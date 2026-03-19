@@ -1268,7 +1268,7 @@ Resources:
             --set scanner.autoscaling.maxReplicas=10 \
             --set scanner.autoscaling.targetCPUUtilizationPercentage=70 \
             --set scanner.autoscaling.targetMemoryUtilizationPercentage=80 \
-            --set scanner.resources.requests.cpu=1200m \
+            --set scanner.resources.requests.cpu=800m \
             --set scanner.resources.requests.memory=4Gi \
             --set visiononeFilesecurity.management.dbEnabled=true \
             --set databaseContainer.storageClass.create=false \

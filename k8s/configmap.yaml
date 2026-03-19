@@ -12,5 +12,5 @@ data:
   V1FS_API_KEY_SECRET_ARN: "<from ApiKeySecretArn output>"
   AWS_REGION: "us-east-1"
   LOG_LEVEL: "INFO"
-  MAX_CONCURRENT_SCANS: "20"
+  MAX_CONCURRENT_SCANS: "40"
   PML_ENABLED: "false"
