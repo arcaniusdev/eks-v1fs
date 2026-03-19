@@ -151,7 +151,8 @@ class ScannerApp:
                         bucket, key, dest_bucket, key,
                     )
 
-                await self._upload(dest_bucket, key, file_bytes)
+                tag = "S3-Malware" if is_malicious else "s3-ingest"
+                await self._upload(dest_bucket, key, file_bytes, tag)
                 await self._delete_object(bucket, key)
 
             await self._delete_message(receipt_handle)
@@ -185,8 +186,11 @@ class ScannerApp:
         async with resp["Body"] as stream:
             return await stream.read()
 
-    async def _upload(self, bucket, key, data):
-        await self.s3_client.put_object(Bucket=bucket, Key=key, Body=data)
+    async def _upload(self, bucket, key, data, tag=None):
+        kwargs = {"Bucket": bucket, "Key": key, "Body": data}
+        if tag:
+            kwargs["Tagging"] = f"ScanResult={tag}"
+        await self.s3_client.put_object(**kwargs)
 
     async def _delete_object(self, bucket, key):
         await self.s3_client.delete_object(Bucket=bucket, Key=key)
