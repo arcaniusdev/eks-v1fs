@@ -1,0 +1,31 @@
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: sqs-trigger-auth
+  namespace: visionone-filesecurity
+spec:
+  podIdentity:
+    provider: aws-eks
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: scanner-app-sqs-scaler
+  namespace: visionone-filesecurity
+spec:
+  scaleTargetRef:
+    name: scanner-app
+    kind: Deployment
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  pollingInterval: 30
+  cooldownPeriod: 300
+  triggers:
+    - type: aws-sqs-queue
+      metadata:
+        queueURL: "<SQS_QUEUE_URL>"
+        queueLength: "5"
+        awsRegion: "<AWS_REGION>"
+        scaleOnInFlight: "true"
+      authenticationRef:
+        name: sqs-trigger-auth

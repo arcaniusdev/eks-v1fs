@@ -62,6 +62,11 @@ EOF
 echo "Applying Deployment..."
 sed "s|<ECR_REPO_URL>|${ECR_REPO_URL}|g" "$K8S_DIR/deployment.yaml" | kubectl apply -f -
 
+echo "Applying KEDA ScaledObject..."
+sed -e "s|<SQS_QUEUE_URL>|${SQS_QUEUE_URL}|g" \
+    -e "s|<AWS_REGION>|${AWS_REGION}|g" \
+    "$K8S_DIR/scaledobject.yaml" | kubectl apply -f -
+
 echo "Waiting for rollout..."
 kubectl rollout status deployment/scanner-app -n visionone-filesecurity --timeout=120s
 

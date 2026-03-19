@@ -4,7 +4,7 @@ metadata:
   name: scanner-app
   namespace: visionone-filesecurity
 spec:
-  replicas: 1
+  # replicas managed by KEDA ScaledObject (scanner-app-sqs-scaler)
   selector:
     matchLabels:
       app: scanner-app

@@ -916,6 +916,96 @@ Resources:
       ServiceAccount: aws-load-balancer-controller
       RoleArn: !GetAtt LBControllerRole.Arn
 
+  # --- KEDA Operator Role (reads SQS queue depth for autoscaling) ---
+
+  KedaOperatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub KedaOperatorRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: KedaSQSMetrics
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: SQSQueueMetrics
+                Effect: Allow
+                Action:
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                Resource: !GetAtt FileScanQueue.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub KedaOperatorRole-${AWS::StackName}
+
+  KedaOperatorPodIdentity:
+    DependsOn: PodIdentityAgentAddon
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !Sub EKSCluster-${AWS::StackName}
+      Namespace: keda
+      ServiceAccount: keda-operator
+      RoleArn: !GetAtt KedaOperatorRole.Arn
+
+  # --- Cluster Autoscaler Role (scales node group based on pending pods) ---
+
+  ClusterAutoscalerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ClusterAutoscalerRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: ClusterAutoscalerPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DescribeResources
+                Effect: Allow
+                Action:
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:DescribeAutoScalingInstances
+                  - autoscaling:DescribeLaunchConfigurations
+                  - autoscaling:DescribeTags
+                  - ec2:DescribeInstanceTypes
+                  - ec2:DescribeLaunchTemplateVersions
+                  - ec2:GetInstanceTypesFromInstanceRequirements
+                  - eks:DescribeNodegroup
+                Resource: "*"
+              - Sid: ManageAutoScalingGroups
+                Effect: Allow
+                Action:
+                  - autoscaling:SetDesiredCapacity
+                  - autoscaling:TerminateInstanceInAutoScalingGroup
+                Resource: !Sub arn:aws:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/eks-*
+      Tags:
+        - Key: Name
+          Value: !Sub ClusterAutoscalerRole-${AWS::StackName}
+
+  ClusterAutoscalerPodIdentity:
+    DependsOn: PodIdentityAgentAddon
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !Sub EKSCluster-${AWS::StackName}
+      Namespace: kube-system
+      ServiceAccount: cluster-autoscaler
+      RoleArn: !GetAtt ClusterAutoscalerRole.Arn
+
   # ================================================================
   #  7. SECRETS MANAGER
   #     (replaces plaintext registration token in UserData / kubectl)
@@ -1095,6 +1185,24 @@ Resources:
             --set clusterName=EKSCluster-${AWS::StackName} \
             --set vpcId=${BaseVPC} \
             --set region=${AWS::Region} \
+            --wait --timeout 5m
+
+          # ---- Install Cluster Autoscaler via Helm ----
+          helm repo add autoscaler https://kubernetes.github.io/autoscaler
+          helm repo update autoscaler
+          helm install cluster-autoscaler autoscaler/cluster-autoscaler \
+            -n kube-system \
+            --set autoDiscovery.clusterName=EKSCluster-${AWS::StackName} \
+            --set awsRegion=${AWS::Region} \
+            --set rbac.serviceAccount.create=true \
+            --set rbac.serviceAccount.name=cluster-autoscaler \
+            --wait --timeout 5m
+
+          # ---- Install KEDA via Helm ----
+          helm repo add kedacore https://kedacore.github.io/charts
+          helm repo update kedacore
+          helm install keda kedacore/keda \
+            -n keda --create-namespace \
             --wait --timeout 5m
 
           # ---- Install Vision One File Security via Helm (GPG-verified) ----
@@ -1425,3 +1533,9 @@ Outputs:
   ECRRepoUrl:
     Description: ECR repository URL for the scanner app container image
     Value: !GetAtt ScannerAppECRRepo.RepositoryUri
+  KedaOperatorRoleArn:
+    Description: IAM role ARN for the KEDA operator (SQS metrics)
+    Value: !GetAtt KedaOperatorRole.Arn
+  ClusterAutoscalerRoleArn:
+    Description: IAM role ARN for the Cluster Autoscaler
+    Value: !GetAtt ClusterAutoscalerRole.Arn

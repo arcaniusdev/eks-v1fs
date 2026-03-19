@@ -66,9 +66,11 @@ The `eks-v1fs.yaml` template creates everything:
 | **ECR Repository** | Hosts the scanner app container image, scan-on-push enabled |
 | **S3 Buckets** | Ingest (with event notifications), Clean, Quarantine (survives stack deletion) |
 | **SQS Queues** | Main queue (300s visibility timeout, 20s long polling) + Dead Letter Queue |
-| **IAM Roles** | Least-privilege roles for nodes, bastion, and scanner app pod |
-| **Pod Identity** | Binds the scanner app IAM role to its Kubernetes service account — no access keys needed |
+| **IAM Roles** | Least-privilege roles for nodes, bastion, scanner app, KEDA operator, and Cluster Autoscaler |
+| **Pod Identity** | Binds IAM roles to Kubernetes service accounts — no access keys needed |
 | **Secrets Manager** | Stores the V1FS registration token and API key |
+| **KEDA** | Scales scanner app pods based on SQS queue depth |
+| **Cluster Autoscaler** | Adds/removes EKS nodes when pods can't be scheduled or nodes are underutilized |
 | **Bastion Host** | Provisions the cluster, installs Helm charts, builds and deploys the scanner app |
 
 ### Scanner Application
@@ -81,6 +83,53 @@ A Python asyncio application optimized for high throughput:
 - **Visibility heartbeat** — extends SQS message visibility during long scans to prevent duplicate processing
 - **Graceful shutdown** — handles SIGTERM to drain in-flight scans before exiting (5-minute grace period)
 - **Predictive Machine Learning** — PML is enabled on every scan for advanced threat detection
+
+### Autoscaling
+
+The system scales automatically at two levels to handle sudden bursts of thousands of files.
+
+**Pod scaling (KEDA)** — [KEDA](https://keda.sh/) monitors the SQS queue depth and adjusts the number of scanner app pods accordingly. When files flood in, SQS messages pile up and KEDA responds by adding more pods to drain the queue faster.
+
+- Checks queue depth every 30 seconds
+- Scales up at 5 messages per pod — if 50 messages are waiting, KEDA scales to 10 pods
+- Includes in-flight messages (being processed but not yet deleted) in the count
+- Scales back down after 5 minutes of low queue depth
+- Range: 1 to 10 pods (always at least 1 pod running)
+
+Each scanner app pod processes up to 20 files concurrently (via async I/O), so at max scale the system handles 200 concurrent scans.
+
+**Node scaling (Cluster Autoscaler)** — when KEDA creates new pods but there aren't enough nodes to run them, the [Cluster Autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler) detects the unschedulable pods and adds nodes to the EKS node group.
+
+- Watches for pods stuck in `Pending` state due to insufficient CPU/memory
+- Adds `t3.large` nodes (2 vCPU, 8 GiB each) to the node group
+- Node group range: 2 to 10 nodes
+- Scales down underutilized nodes after 10 minutes of low usage (threshold: 65% utilization)
+
+**How they work together:**
+
+```
+Thousands of files arrive in S3
+         |
+         v
+SQS queue depth spikes to 1000+
+         |
+         v
+KEDA sees queue depth, scales scanner-app from 1 to 10 pods
+         |
+         v
+Kubernetes can't schedule all 10 pods on 2 nodes (not enough CPU/memory)
+         |
+         v
+Cluster Autoscaler adds nodes (up to 10) to fit the pending pods
+         |
+         v
+All pods start, each processing 20 files concurrently
+         |
+         v
+Queue drains → KEDA scales pods back down → Autoscaler removes idle nodes
+```
+
+Both KEDA and the Cluster Autoscaler get their AWS permissions through Pod Identity — KEDA reads SQS queue metrics, the autoscaler manages the Auto Scaling Group. No access keys are involved.
 
 ### How Credentials Work
 
@@ -118,9 +167,10 @@ That's it. The bastion host UserData automatically:
 
 1. Installs kubectl, Helm, eksctl, Docker, and the AWS CLI
 2. Configures kubeconfig and creates the `visionone-filesecurity` namespace
-3. Deploys the Vision One File Security scanner pods via Helm (GPG-verified)
-4. Clones this repo, builds the scanner app Docker image, pushes it to ECR
-5. Deploys the scanner app (ServiceAccount, ConfigMap, Deployment) to the cluster
+3. Installs Cluster Autoscaler and KEDA via Helm
+4. Deploys the Vision One File Security scanner pods via Helm (GPG-verified)
+5. Clones this repo, builds the scanner app Docker image, pushes it to ECR
+6. Deploys the scanner app (ServiceAccount, ConfigMap, Deployment, KEDA ScaledObject) to the cluster
 
 Stack creation takes approximately 20-30 minutes. Monitor progress:
 
@@ -191,6 +241,7 @@ k8s/
   serviceaccount.yaml      Kubernetes ServiceAccount (Pod Identity, no annotations)
   configmap.yaml           Environment config template (populated by deploy script)
   deployment.yaml          Pod spec with 300s graceful shutdown period
+  scaledobject.yaml        KEDA ScaledObject + TriggerAuthentication for SQS-driven autoscaling
 scripts/
   build-and-push.sh        Build Docker image and push to ECR (reads stack outputs)
   deploy.sh                Template ConfigMap from stack outputs and apply k8s manifests
