@@ -1295,8 +1295,6 @@ Resources:
   # --- ECR Repository ---
 
   ScannerAppECRRepo:
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
     Type: AWS::ECR::Repository
     Properties:
       RepositoryName: !Sub scanner-app-${AWS::StackName}

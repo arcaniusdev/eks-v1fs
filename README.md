@@ -283,7 +283,7 @@ cd /opt/eks-v1fs && git pull
 
 - All S3 buckets use AES256 encryption with public access fully blocked
 - SQS queues use server-side encryption
-- All S3 buckets and the ECR repository have `DeletionPolicy: Retain` — they survive stack deletion to preserve files and images
+- All S3 buckets have `DeletionPolicy: Retain` — they survive stack deletion to preserve files for forensic investigation
 - ECR repository has scan-on-push enabled for container vulnerability scanning
 - IMDSv2 is enforced on all nodes
 - EBS volumes are encrypted
@@ -299,12 +299,11 @@ cd /opt/eks-v1fs && git pull
 aws cloudformation delete-stack --stack-name my-scanner
 ```
 
-Note: All S3 buckets (ingest, clean, quarantine) and the ECR repository have `DeletionPolicy: Retain` and are **not deleted** with the stack. This prevents accidental data loss — scanned files, quarantined malware, and container images are preserved for forensic investigation or audit. To clean up these resources after stack deletion:
+Note: All S3 buckets (ingest, clean, quarantine) have `DeletionPolicy: Retain` and are **not deleted** with the stack. This prevents accidental data loss — scanned files and quarantined malware are preserved for forensic investigation or audit. The ECR repository and its images **are** deleted with the stack. To clean up retained buckets after stack deletion:
 
 ```bash
 # List retained buckets (names are in the stack outputs, saved before deletion)
 aws s3 rb s3://<ingest-bucket> --force
 aws s3 rb s3://<clean-bucket> --force
 aws s3 rb s3://<quarantine-bucket> --force
-aws ecr delete-repository --repository-name scanner-app-<stack-name> --force
 ```
