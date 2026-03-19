@@ -129,7 +129,7 @@ class ScannerApp:
                     self.scan_handle,
                     file_bytes,
                     key,
-                    pml=False,
+                    pml=True,
                     tags=["s3-ingest"],
                 )
                 result = json.loads(result_json)
