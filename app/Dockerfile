@@ -1,8 +1,15 @@
-FROM ubuntu:22.04
-RUN apt-get update && apt-get install -y python3 python3-pip && rm -rf /var/lib/apt/lists/*
+FROM python:3.11-slim
+
+RUN groupadd -r scanner && useradd -r -g scanner -d /app -s /sbin/nologin scanner
+
 WORKDIR /app
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-ENV PYTHONUNBUFFERED=1
-ENTRYPOINT ["python3", "scanner.py"]
+
+RUN chown -R scanner:scanner /app
+USER scanner
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+ENTRYPOINT ["python", "scanner.py"]

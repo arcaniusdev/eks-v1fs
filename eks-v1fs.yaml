@@ -1296,7 +1296,7 @@ Resources:
         ScanOnPush: true
       EncryptionConfiguration:
         EncryptionType: AES256
-      ImageTagMutability: MUTABLE
+      ImageTagMutability: IMMUTABLE
       Tags:
         - Key: Name
           Value: !Sub ScannerAppECR-${AWS::StackName}
@@ -1322,6 +1322,11 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireUnprocessedFiles
+            Status: Enabled
+            ExpirationInDays: 7
       NotificationConfiguration:
         QueueConfigurations:
           - Event: s3:ObjectCreated:*

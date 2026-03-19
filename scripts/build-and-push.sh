@@ -22,7 +22,15 @@ if [ -z "${ECR_REPO_URL:-}" ]; then
   fi
 fi
 
+# Determine image tag: git SHA if available, otherwise "latest"
+if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse HEAD >/dev/null 2>&1; then
+  IMAGE_TAG=$(git -C "$SCRIPT_DIR" rev-parse --short=12 HEAD)
+else
+  IMAGE_TAG="latest"
+fi
+
 echo "ECR repo: $ECR_REPO_URL"
+echo "Image tag: $IMAGE_TAG"
 
 echo "Authenticating to ECR..."
 ACCOUNT_ID="$(echo "$ECR_REPO_URL" | cut -d. -f1)"
@@ -33,7 +41,9 @@ echo "Building image..."
 docker build -t scanner-app "$APP_DIR"
 
 echo "Tagging and pushing to $ECR_REPO_URL..."
-docker tag scanner-app:latest "${ECR_REPO_URL}:latest"
-docker push "${ECR_REPO_URL}:latest"
+docker tag scanner-app:latest "${ECR_REPO_URL}:${IMAGE_TAG}"
+docker push "${ECR_REPO_URL}:${IMAGE_TAG}"
 
-echo "Done. Image pushed to ${ECR_REPO_URL}:latest"
+# Export for deploy.sh to consume
+export IMAGE_TAG
+echo "Done. Image pushed as ${ECR_REPO_URL}:${IMAGE_TAG}"

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import random
 import signal
 import urllib.parse
 from contextlib import AsyncExitStack
@@ -14,6 +15,8 @@ from config import load_config
 
 logger = logging.getLogger("scanner")
 
+MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB
+
 
 class ScannerApp:
     def __init__(self, config):
@@ -24,6 +27,7 @@ class ScannerApp:
         self.scan_handle = None
         self.session = AioSession()
         self._exit_stack = AsyncExitStack()
+        self._consecutive_errors = 0
 
     async def start(self):
         self.s3_client = await self._exit_stack.enter_async_context(
@@ -45,6 +49,7 @@ class ScannerApp:
             "Initializing V1FS async gRPC handle at %s",
             self.config.v1fs_server_addr,
         )
+        # init is synchronous - do not await
         self.scan_handle = amaas.grpc.aio.init(
             self.config.v1fs_server_addr, api_key, False
         )
@@ -73,9 +78,12 @@ class ScannerApp:
                     WaitTimeSeconds=20,
                     AttributeNames=["ApproximateReceiveCount"],
                 )
+                self._consecutive_errors = 0
             except Exception:
-                logger.exception("SQS receive_message error")
-                await asyncio.sleep(5)
+                self._consecutive_errors += 1
+                delay = min(2 ** self._consecutive_errors, 60) + random.uniform(0, 1)
+                logger.exception("SQS receive_message error, retrying in %.1fs", delay)
+                await asyncio.sleep(delay)
                 continue
 
             for msg in resp.get("Messages", []):
@@ -102,60 +110,26 @@ class ScannerApp:
                 await self._delete_message(receipt_handle)
                 return
 
+            all_succeeded = True
             for record in records:
-                bucket = record["s3"]["bucket"]["name"]
-                key = urllib.parse.unquote_plus(record["s3"]["object"]["key"])
-                size = record["s3"]["object"].get("size", 0)
-                logger.info(
-                    "Processing s3://%s/%s (%d bytes) [msg=%s]",
-                    bucket, key, size, message_id,
-                )
-
-                # Download into memory
                 try:
-                    file_bytes = await self._download(bucket, key)
-                except ClientError as exc:
-                    if exc.response["Error"]["Code"] == "NoSuchKey":
-                        logger.warning(
-                            "Object s3://%s/%s no longer exists, deleting message",
-                            bucket, key,
-                        )
-                        await self._delete_message(receipt_handle)
-                        return
-                    raise
+                    await self._process_record(record, message_id)
+                except Exception:
+                    bucket = record.get("s3", {}).get("bucket", {}).get("name", "?")
+                    key = record.get("s3", {}).get("object", {}).get("key", "?")
+                    logger.exception(
+                        "Failed processing record s3://%s/%s [msg=%s]",
+                        bucket, key, message_id,
+                    )
+                    all_succeeded = False
 
-                # Scan
-                result_json = await amaas.grpc.aio.scan_buffer(
-                    self.scan_handle,
-                    file_bytes,
-                    key,
-                    pml=False,
-                    tags=["S3-Scan"],
+            if all_succeeded:
+                await self._delete_message(receipt_handle)
+            else:
+                logger.warning(
+                    "One or more records failed in message %s — leaving for retry",
+                    message_id,
                 )
-                result = json.loads(result_json)
-                is_malicious = result.get("scanResult", 0) > 0
-
-                # Route
-                if is_malicious:
-                    dest_bucket = self.config.s3_quarantine_bucket
-                    logger.warning(
-                        "MALICIOUS: s3://%s/%s → s3://%s/%s sha256=%s result=%s",
-                        bucket, key, dest_bucket, key,
-                        result.get("fileSHA256", "unknown"),
-                        json.dumps(result.get("result", {})),
-                    )
-                else:
-                    dest_bucket = self.config.s3_clean_bucket
-                    logger.info(
-                        "CLEAN: s3://%s/%s → s3://%s/%s",
-                        bucket, key, dest_bucket, key,
-                    )
-
-                tag = "S3-Malware" if is_malicious else "s3-ingest"
-                await self._upload(dest_bucket, key, file_bytes, tag)
-                await self._delete_object(bucket, key)
-
-            await self._delete_message(receipt_handle)
 
         except json.JSONDecodeError:
             logger.exception("Malformed message body [msg=%s], deleting", message_id)
@@ -168,6 +142,76 @@ class ScannerApp:
                 await heartbeat_task
             except asyncio.CancelledError:
                 pass
+
+    async def _process_record(self, record, message_id):
+        bucket = record["s3"]["bucket"]["name"]
+        key = urllib.parse.unquote_plus(record["s3"]["object"]["key"])
+        size = record["s3"]["object"].get("size", 0)
+
+        logger.info(
+            "Processing s3://%s/%s (%d bytes) [msg=%s]",
+            bucket, key, size, message_id,
+        )
+
+        if size > MAX_FILE_SIZE:
+            logger.error(
+                "File s3://%s/%s exceeds size limit (%d > %d bytes), "
+                "moving to quarantine via server-side copy",
+                bucket, key, size, MAX_FILE_SIZE,
+            )
+            # Server-side copy — no download into pod memory
+            await self.s3_client.copy_object(
+                Bucket=self.config.s3_quarantine_bucket,
+                Key=key,
+                CopySource={"Bucket": bucket, "Key": key},
+                Tagging="ScanResult=S3-Oversize",
+                TaggingDirective="REPLACE",
+            )
+            await self._delete_object(bucket, key)
+            return
+
+        # Download into memory
+        try:
+            file_bytes = await self._download(bucket, key)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "NoSuchKey":
+                logger.warning(
+                    "Object s3://%s/%s no longer exists, skipping",
+                    bucket, key,
+                )
+                return
+            raise
+
+        # Scan
+        result_json = await amaas.grpc.aio.scan_buffer(
+            self.scan_handle,
+            file_bytes,
+            key,
+            pml=False,
+            tags=["S3-Scan"],
+        )
+        result = json.loads(result_json)
+        is_malicious = result.get("scanResult", 0) > 0
+
+        # Route
+        if is_malicious:
+            dest_bucket = self.config.s3_quarantine_bucket
+            logger.warning(
+                "MALICIOUS: s3://%s/%s → s3://%s/%s sha256=%s result=%s",
+                bucket, key, dest_bucket, key,
+                result.get("fileSHA256", "unknown"),
+                json.dumps(result.get("result", {})),
+            )
+        else:
+            dest_bucket = self.config.s3_clean_bucket
+            logger.info(
+                "CLEAN: s3://%s/%s → s3://%s/%s",
+                bucket, key, dest_bucket, key,
+            )
+
+        tag = "S3-Malware" if is_malicious else "s3-ingest"
+        await self._upload(dest_bucket, key, file_bytes, tag)
+        await self._delete_object(bucket, key)
 
     async def _extend_visibility(self, receipt_handle, interval=240):
         while True:

@@ -15,9 +15,12 @@ spec:
     spec:
       serviceAccountName: scanner-app
       terminationGracePeriodSeconds: 300
+      securityContext:
+        runAsNonRoot: true
       containers:
         - name: scanner
-          image: <ECR_REPO_URL>:latest
+          image: <ECR_REPO_URL>:<IMAGE_TAG>
+          imagePullPolicy: Always
           envFrom:
             - configMapRef:
                 name: scanner-app-config
@@ -28,3 +31,16 @@ spec:
             limits:
               memory: "512Mi"
               cpu: "500m"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 10Mi

@@ -26,10 +26,10 @@ if [ -z "${SQS_QUEUE_URL:-}" ] || [ -z "${S3_INGEST_BUCKET:-}" ] || \
 import json, sys
 outputs = json.load(sys.stdin)
 for o in outputs:
-    if o['OutputKey'] == '$1':
+    if o['OutputKey'] == sys.argv[1]:
         print(o['OutputValue'])
         break
-"
+" "$1"
   }
 
   SQS_QUEUE_URL="${SQS_QUEUE_URL:-$(get_output FileScanQueueUrl)}"
@@ -40,14 +40,27 @@ for o in outputs:
   ECR_REPO_URL="${ECR_REPO_URL:-$(get_output ECRRepoUrl)}"
 fi
 
+# Determine image tag: use IMAGE_TAG env var, git SHA, or "latest"
+if [ -n "${IMAGE_TAG:-}" ]; then
+  : # already set
+elif command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse HEAD >/dev/null 2>&1; then
+  IMAGE_TAG=$(git -C "$SCRIPT_DIR" rev-parse --short=12 HEAD)
+else
+  IMAGE_TAG="latest"
+fi
+
 echo "SQS Queue: $SQS_QUEUE_URL"
 echo "Ingest:    $S3_INGEST_BUCKET"
 echo "Clean:     $S3_CLEAN_BUCKET"
 echo "Quarantine:$S3_QUARANTINE_BUCKET"
 echo "ECR:       $ECR_REPO_URL"
+echo "Image tag: $IMAGE_TAG"
 
 echo "Applying ServiceAccount..."
 kubectl apply -f "$K8S_DIR/serviceaccount.yaml"
+
+echo "Applying NetworkPolicy..."
+kubectl apply -f "$K8S_DIR/networkpolicy.yaml"
 
 echo "Generating and applying ConfigMap..."
 cat <<EOF | kubectl apply -f -
@@ -69,7 +82,9 @@ data:
 EOF
 
 echo "Applying Deployment..."
-sed "s|<ECR_REPO_URL>|${ECR_REPO_URL}|g" "$K8S_DIR/deployment.yaml" | kubectl apply -f -
+sed -e "s|<ECR_REPO_URL>|${ECR_REPO_URL}|g" \
+    -e "s|<IMAGE_TAG>|${IMAGE_TAG}|g" \
+    "$K8S_DIR/deployment.yaml" | kubectl apply -f -
 
 echo "Applying KEDA ScaledObject..."
 sed -e "s|<SQS_QUEUE_URL>|${SQS_QUEUE_URL}|g" \
