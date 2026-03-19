@@ -1,4 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::LanguageExtensions
 Description: >
   Deploy a hardened EKS cluster with Trend Micro Vision One File Security.
   Declarative CloudFormation constructs replace imperative UserData where possible:
@@ -1349,7 +1350,11 @@ Resources:
   ScannerAppECRRepo:
     Type: AWS::ECR::Repository
     Properties:
-      RepositoryName: !Sub scanner-app-${AWS::StackName}
+      RepositoryName:
+        Fn::Sub:
+          - "scanner-app-${LowerStackName}"
+          - LowerStackName:
+              Fn::ToLower: !Ref AWS::StackName
       ImageScanningConfiguration:
         ScanOnPush: true
       EncryptionConfiguration:
