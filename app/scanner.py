@@ -130,7 +130,7 @@ class ScannerApp:
                     file_bytes,
                     key,
                     pml=False,
-                    tags=["s3-ingest"],
+                    tags=["S3-Scan"],
                 )
                 result = json.loads(result_json)
                 is_malicious = result.get("scanResult", 0) > 0
