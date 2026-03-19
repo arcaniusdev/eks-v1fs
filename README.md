@@ -64,7 +64,7 @@ The `eks-v1fs.yaml` template creates everything:
 | **EKS Cluster** | Private API endpoint, full audit logging, managed addons (vpc-cni, CoreDNS, kube-proxy, Pod Identity Agent) |
 | **Node Group** | `r7i.large` instances (2 vCPU, 16 GiB) in private subnets, min 2 / max 10 — consistent CPU for sustained scanning |
 | **ECR Repository** | Hosts the scanner app container image, scan-on-push enabled |
-| **S3 Buckets** | Ingest (with event notifications), Clean, Quarantine (survives stack deletion) |
+| **S3 Buckets** | Ingest (with event notifications), Clean, Quarantine — all have `DeletionPolicy: Retain` to preserve files when the stack is deleted |
 | **SQS Queues** | Main queue (300s visibility timeout, 20s long polling) + Dead Letter Queue |
 | **IAM Roles** | Least-privilege roles for nodes, bastion, scanner app, KEDA operator, and Cluster Autoscaler |
 | **Pod Identity** | Binds IAM roles to Kubernetes service accounts — no access keys needed |
@@ -247,17 +247,18 @@ This should be flagged as malicious and routed to the quarantine bucket.
 ```
 eks-v1fs.yaml              CloudFormation template (all infrastructure)
 app/
-  Dockerfile               Ubuntu 22.04 container image
-  requirements.txt         Python dependencies (visionone-filesecurity, aiobotocore)
+  Dockerfile               python:3.11-slim, non-root UID 999
+  requirements.txt         Pinned dependencies (visionone-filesecurity, aiobotocore, boto3)
   scanner.py               Async SQS polling, S3 download, V1FS scan, file routing
   config.py                Environment variable loading and validation
 k8s/
   serviceaccount.yaml      Kubernetes ServiceAccount (Pod Identity, no annotations)
   configmap.yaml           Environment config template (populated by deploy script)
-  deployment.yaml          Pod spec with 300s graceful shutdown period
+  deployment.yaml          Hardened pod spec (non-root, read-only fs, drop all capabilities)
+  networkpolicy.yaml       Egress restricted to DNS, V1FS scanner, and AWS HTTPS
   scaledobject.yaml        KEDA ScaledObject + TriggerAuthentication for SQS-driven autoscaling
 scripts/
-  build-and-push.sh        Build Docker image and push to ECR (reads stack outputs)
+  build-and-push.sh        Build Docker image and push to ECR (tagged with git SHA)
   deploy.sh                Template ConfigMap from stack outputs and apply k8s manifests
 ```
 
@@ -282,7 +283,7 @@ cd /opt/eks-v1fs && git pull
 
 - All S3 buckets use AES256 encryption with public access fully blocked
 - SQS queues use server-side encryption
-- The quarantine bucket has `DeletionPolicy: Retain` — it survives stack deletion for forensic preservation
+- All S3 buckets and the ECR repository have `DeletionPolicy: Retain` — they survive stack deletion to preserve files and images
 - ECR repository has scan-on-push enabled for container vulnerability scanning
 - IMDSv2 is enforced on all nodes
 - EBS volumes are encrypted
@@ -298,10 +299,12 @@ cd /opt/eks-v1fs && git pull
 aws cloudformation delete-stack --stack-name my-scanner
 ```
 
-Note: The quarantine bucket is retained after stack deletion to preserve any malicious files for investigation. Delete it manually when no longer needed:
+Note: All S3 buckets (ingest, clean, quarantine) and the ECR repository have `DeletionPolicy: Retain` and are **not deleted** with the stack. This prevents accidental data loss — scanned files, quarantined malware, and container images are preserved for forensic investigation or audit. To clean up these resources after stack deletion:
 
 ```bash
-QUARANTINE_BUCKET=$(aws cloudformation describe-stacks --stack-name my-scanner \
-  --query 'Stacks[0].Outputs[?OutputKey==`QuarantineBucketName`].OutputValue' --output text)
-aws s3 rb s3://$QUARANTINE_BUCKET --force
+# List retained buckets (names are in the stack outputs, saved before deletion)
+aws s3 rb s3://<ingest-bucket> --force
+aws s3 rb s3://<clean-bucket> --force
+aws s3 rb s3://<quarantine-bucket> --force
+aws ecr delete-repository --repository-name scanner-app-<stack-name> --force
 ```
