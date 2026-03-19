@@ -82,7 +82,7 @@ The `eks-v1fs.yaml` template creates everything:
 A Python asyncio application optimized for high throughput:
 
 - **Async I/O throughout** — `aiobotocore` for S3/SQS, `amaas.grpc.aio` for scanning
-- **Concurrent processing** — up to 20 files scanned simultaneously (configurable via `MAX_CONCURRENT_SCANS`)
+- **Concurrent processing** — up to 40 files scanned simultaneously per pod (configurable via `MAX_CONCURRENT_SCANS`)
 - **In-memory scanning** — files are downloaded as bytes and scanned with `scan_buffer()`, never written to disk
 - **Visibility heartbeat** — extends SQS message visibility during long scans to prevent duplicate processing
 - **Graceful shutdown** — handles SIGTERM to drain in-flight scans before exiting (5-minute grace period)
@@ -107,18 +107,18 @@ The system scales automatically at three levels to handle sudden bursts of thous
 
 - Scales based on CPU utilization (target: 70%) and memory utilization (target: 80%)
 - Range: 1 to 10 scanner pods
-- Each scanner pod requests 1200m CPU and 4Gi memory (increased from defaults for high-throughput scanning)
+- Each scanner pod requests 800m CPU and 4Gi memory (tuned to fit 2 scanner pods per r7i.large node)
 - Requires the Metrics Server (installed automatically)
 
 **Scanner-app pod scaling (KEDA)** — KEDA monitors the SQS queue depth and adjusts the number of scanner-app pods accordingly. When files flood in, SQS messages pile up and KEDA responds by adding more pods to drain the queue faster.
 
-- Checks queue depth every 30 seconds
+- Checks queue depth every 15 seconds
 - Scales up at 5 messages per pod — if 50 messages are waiting, KEDA scales to 10 pods
 - Includes in-flight messages (being processed but not yet deleted) in the count
 - Scales back down after 5 minutes of low queue depth
 - Range: 1 to 10 pods (always at least 1 pod running)
 
-Each scanner-app pod processes up to 20 files concurrently (via async I/O), so at max scale the system handles 200 concurrent scans.
+Each scanner-app pod processes up to 40 files concurrently (via async I/O), so at max scale the system handles 400 concurrent scans.
 
 **Node scaling (Cluster Autoscaler)** — when KEDA or HPA creates new pods but there aren't enough nodes to run them, the Cluster Autoscaler detects the unschedulable pods and adds nodes to the EKS node group.
 
