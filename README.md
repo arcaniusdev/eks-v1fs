@@ -165,19 +165,22 @@ You need two credentials from the [Trend Micro Vision One console](https://porta
 
 ### Launch the stack
 
-```bash
-aws cloudformation create-stack \
-  --stack-name my-scanner \
-  --template-body file://eks-v1fs.yaml \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --parameters \
-    ParameterKey=RegistrationToken,ParameterValue='<your-registration-token>' \
-    ParameterKey=ApiKey,ParameterValue='<your-api-key>' \
-    ParameterKey=PrimaryAZ,ParameterValue=us-east-1a \
-    ParameterKey=SecondaryAZ,ParameterValue=us-east-1b
-```
+Download the `eks-v1fs.yaml` CloudFormation template and deploy it in AWS CloudFormation. The template requires two parameters:
 
-That's it. The bastion host UserData automatically:
+- **RegistrationToken** — your Vision One File Security registration token
+- **ApiKey** — your Vision One API key with "Run file scan via SDK" permission
+
+Optional parameters:
+
+| Parameter | Default | Description |
+|---|---|---|
+| **PrimaryAZ** | `us-east-1a` | Availability Zone 1 |
+| **SecondaryAZ** | `us-east-1b` | Availability Zone 2 |
+| **NodeInstanceType** | `r7i.large` | EC2 instance type for EKS worker nodes |
+| **DesiredCapacity** | `2` | Number of EKS worker nodes (2–10) |
+| **PMLEnabled** | `false` | Enable Predictive Machine Learning scanning (requires account support) |
+
+You don't need to clone the repo. The bastion host UserData automatically:
 
 1. Installs kubectl, Helm, eksctl, Docker, and the AWS CLI
 2. Configures kubeconfig and creates the `visionone-filesecurity` namespace
