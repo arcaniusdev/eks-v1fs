@@ -82,7 +82,7 @@ A Python asyncio application optimized for high throughput:
 - **In-memory scanning** — files are downloaded as bytes and scanned with `scan_buffer()`, never written to disk
 - **Visibility heartbeat** — extends SQS message visibility during long scans to prevent duplicate processing
 - **Graceful shutdown** — handles SIGTERM to drain in-flight scans before exiting (5-minute grace period)
-- **Predictive Machine Learning** — PML is enabled on every scan for advanced threat detection
+- **Predictive Machine Learning** — PML can be enabled for advanced threat detection (requires account-level PML support)
 
 ### Autoscaling
 
