@@ -210,7 +210,7 @@ class ScannerApp:
                 bucket, key, dest_bucket, key,
             )
 
-        tag = "S3-Malware" if is_malicious else "s3-ingest"
+        tag = "S3-Malware" if is_malicious else "S3-Clean"
         await self._upload(dest_bucket, key, file_bytes, tag)
         await self._delete_object(bucket, key)
 
