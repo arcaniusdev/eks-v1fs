@@ -179,9 +179,7 @@ You need two credentials from the TrendAI Vision One console:
 
 ### Launch the stack
 
-Download the `eks-v1fs.yaml` CloudFormation template and deploy it in AWS CloudFormation. The stack name **must be lowercase** (a-z, 0-9, hyphens only) — uppercase letters will cause the ECR repository creation to fail.
-
-The template requires two parameters:
+Download the `eks-v1fs.yaml` CloudFormation template and deploy it in AWS CloudFormation. The template requires two parameters:
 
 - **RegistrationToken** — your Vision One File Security registration token
 - **ApiKey** — your Vision One API key with "Run file scan via SDK" permission
