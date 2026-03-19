@@ -69,6 +69,7 @@ The `eks-v1fs.yaml` template creates everything:
 | **IAM Roles** | Least-privilege roles for nodes, bastion, scanner app, KEDA operator, and Cluster Autoscaler |
 | **Pod Identity** | Binds IAM roles to Kubernetes service accounts — no access keys needed |
 | **Secrets Manager** | Stores the V1FS registration token and API key |
+| **Metrics Server** | Provides CPU/memory metrics for V1FS scanner HPA |
 | **KEDA** | Scales scanner app pods based on SQS queue depth |
 | **Cluster Autoscaler** | Adds/removes EKS nodes when pods can't be scheduled or nodes are underutilized |
 | **Bastion Host** | Provisions the cluster, installs Helm charts, builds and deploys the scanner app |
@@ -86,9 +87,16 @@ A Python asyncio application optimized for high throughput:
 
 ### Autoscaling
 
-The system scales automatically at two levels to handle sudden bursts of thousands of files.
+The system scales automatically at three levels to handle sudden bursts of thousands of files.
 
-**Pod scaling (KEDA)** — [KEDA](https://keda.sh/) monitors the SQS queue depth and adjusts the number of scanner app pods accordingly. When files flood in, SQS messages pile up and KEDA responds by adding more pods to drain the queue faster.
+**V1FS scanner pod scaling (HPA)** — The Vision One File Security scanner pods scale horizontally based on CPU and memory utilization using the Kubernetes [Horizontal Pod Autoscaler](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/). When scanner-app pods send a flood of concurrent gRPC scan requests, the V1FS scanner CPU rises and HPA adds more scanner pods to handle the load.
+
+- Scales based on CPU utilization (target: 70%) and memory utilization (target: 80%)
+- Range: 1 to 10 scanner pods
+- Each scanner pod requests 1200m CPU and 4Gi memory (increased from defaults for high-throughput scanning)
+- Requires the [Metrics Server](https://github.com/kubernetes-sigs/metrics-server) (installed automatically)
+
+**Scanner-app pod scaling (KEDA)** — [KEDA](https://keda.sh/) monitors the SQS queue depth and adjusts the number of scanner-app pods accordingly. When files flood in, SQS messages pile up and KEDA responds by adding more pods to drain the queue faster.
 
 - Checks queue depth every 30 seconds
 - Scales up at 5 messages per pod — if 50 messages are waiting, KEDA scales to 10 pods
@@ -96,9 +104,9 @@ The system scales automatically at two levels to handle sudden bursts of thousan
 - Scales back down after 5 minutes of low queue depth
 - Range: 1 to 10 pods (always at least 1 pod running)
 
-Each scanner app pod processes up to 20 files concurrently (via async I/O), so at max scale the system handles 200 concurrent scans.
+Each scanner-app pod processes up to 20 files concurrently (via async I/O), so at max scale the system handles 200 concurrent scans.
 
-**Node scaling (Cluster Autoscaler)** — when KEDA creates new pods but there aren't enough nodes to run them, the [Cluster Autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler) detects the unschedulable pods and adds nodes to the EKS node group.
+**Node scaling (Cluster Autoscaler)** — when KEDA or HPA creates new pods but there aren't enough nodes to run them, the [Cluster Autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler) detects the unschedulable pods and adds nodes to the EKS node group.
 
 - Watches for pods stuck in `Pending` state due to insufficient CPU/memory
 - Adds `r7i.large` nodes (2 vCPU, 16 GiB each) to the node group
@@ -117,19 +125,25 @@ SQS queue depth spikes to 1000+
 KEDA sees queue depth, scales scanner-app from 1 to 10 pods
          |
          v
-Kubernetes can't schedule all 10 pods on 2 nodes (not enough CPU/memory)
+Scanner-app pods flood V1FS scanner with concurrent gRPC scan requests
+         |
+         v
+HPA detects high CPU on V1FS scanner pods, scales from 1 to 10
+         |
+         v
+Kubernetes can't schedule all pods on 2 nodes (not enough CPU/memory)
          |
          v
 Cluster Autoscaler adds nodes (up to 10) to fit the pending pods
          |
          v
-All pods start, each processing 20 files concurrently
+All pods start — scanner-app pods process 20 files each, V1FS scanner pods handle the scan load
          |
          v
-Queue drains → KEDA scales pods back down → Autoscaler removes idle nodes
+Queue drains → KEDA + HPA scale pods back down → Autoscaler removes idle nodes
 ```
 
-Both KEDA and the Cluster Autoscaler get their AWS permissions through Pod Identity — KEDA reads SQS queue metrics, the autoscaler manages the Auto Scaling Group. No access keys are involved.
+KEDA and the Cluster Autoscaler get their AWS permissions through Pod Identity — KEDA reads SQS queue metrics, the autoscaler manages the Auto Scaling Group. No access keys are involved. The Metrics Server provides CPU/memory metrics to HPA for the V1FS scanner scaling.
 
 ### How Credentials Work
 

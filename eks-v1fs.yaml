@@ -1186,6 +1186,10 @@ Resources:
             --set region=${AWS::Region} \
             --wait --timeout 5m
 
+          # ---- Install Metrics Server (required for V1FS scanner HPA) ----
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+          kubectl rollout status deployment/metrics-server -n kube-system --timeout=120s
+
           # ---- Install Cluster Autoscaler via Helm ----
           helm repo add autoscaler https://kubernetes.github.io/autoscaler
           helm repo update autoscaler
@@ -1214,9 +1218,18 @@ Resources:
           # Verify chart signature (validation only - not used for install)
           helm pull --verify visionone-filesecurity/visionone-filesecurity
 
-          # Install from repo per official instructions (no --wait; pods need
-          # time to register with Vision One cloud on first startup)
-          helm install my-release visionone-filesecurity/visionone-filesecurity -n visionone-filesecurity
+          # Install with scanner HPA enabled and increased resources for
+          # high-throughput scanning (no --wait; pods need time to register
+          # with Vision One cloud on first startup)
+          helm install my-release visionone-filesecurity/visionone-filesecurity \
+            -n visionone-filesecurity \
+            --set scanner.autoscaling.enabled=true \
+            --set scanner.autoscaling.minReplicas=1 \
+            --set scanner.autoscaling.maxReplicas=10 \
+            --set scanner.autoscaling.targetCPUUtilizationPercentage=70 \
+            --set scanner.autoscaling.targetMemoryUtilizationPercentage=80 \
+            --set scanner.resources.requests.cpu=1200m \
+            --set scanner.resources.requests.memory=4Gi
 
           # ---- Install Docker (needed to build scanner app image) ----
           apt-get install -y ca-certificates gnupg lsb-release
