@@ -1462,11 +1462,13 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:PutObject
+                  - s3:PutObjectTagging
                 Resource: !Sub ${CleanBucket.Arn}/*
               - Sid: S3QuarantineWrite
                 Effect: Allow
                 Action:
                   - s3:PutObject
+                  - s3:PutObjectTagging
                 Resource: !Sub ${QuarantineBucket.Arn}/*
               - Sid: SecretsManagerApiKey
                 Effect: Allow
