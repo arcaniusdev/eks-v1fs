@@ -1,6 +1,6 @@
 # EKS Vision One File Security Scanner
 
-Automated malware scanning pipeline on AWS. Files uploaded to an S3 bucket are automatically scanned using [TrendAI Vision One File Security](https://www.trendmicro.com/en_us/business/products/network-security/file-security.html) and routed to a clean bucket or quarantine bucket based on the scan result.
+Automated malware scanning pipeline on AWS. Files uploaded to an S3 bucket are automatically scanned using [TrendAI Vision One File Security](https://docs.trendmicro.com/en-us/documentation/article/trend-vision-one-file-security-intro-origin) and routed to a clean bucket or quarantine bucket based on the scan result.
 
 Everything deploys from a single CloudFormation template — the EKS cluster, networking, storage, queues, IAM, and the scanner application itself.
 
@@ -103,14 +103,14 @@ The database configuration is immutable after initial deployment — changing st
 
 The system scales automatically at three levels to handle sudden bursts of thousands of files.
 
-**V1FS scanner pod scaling (HPA)** — The Vision One File Security scanner pods scale horizontally based on CPU and memory utilization using the Kubernetes [Horizontal Pod Autoscaler](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/). When scanner-app pods send a flood of concurrent gRPC scan requests, the V1FS scanner CPU rises and HPA adds more scanner pods to handle the load.
+**V1FS scanner pod scaling (HPA)** — The Vision One File Security scanner pods scale horizontally based on CPU and memory utilization using the Kubernetes Horizontal Pod Autoscaler. When scanner-app pods send a flood of concurrent gRPC scan requests, the V1FS scanner CPU rises and HPA adds more scanner pods to handle the load.
 
 - Scales based on CPU utilization (target: 70%) and memory utilization (target: 80%)
 - Range: 1 to 10 scanner pods
 - Each scanner pod requests 1200m CPU and 4Gi memory (increased from defaults for high-throughput scanning)
-- Requires the [Metrics Server](https://github.com/kubernetes-sigs/metrics-server) (installed automatically)
+- Requires the Metrics Server (installed automatically)
 
-**Scanner-app pod scaling (KEDA)** — [KEDA](https://keda.sh/) monitors the SQS queue depth and adjusts the number of scanner-app pods accordingly. When files flood in, SQS messages pile up and KEDA responds by adding more pods to drain the queue faster.
+**Scanner-app pod scaling (KEDA)** — KEDA monitors the SQS queue depth and adjusts the number of scanner-app pods accordingly. When files flood in, SQS messages pile up and KEDA responds by adding more pods to drain the queue faster.
 
 - Checks queue depth every 30 seconds
 - Scales up at 5 messages per pod — if 50 messages are waiting, KEDA scales to 10 pods
@@ -120,7 +120,7 @@ The system scales automatically at three levels to handle sudden bursts of thous
 
 Each scanner-app pod processes up to 20 files concurrently (via async I/O), so at max scale the system handles 200 concurrent scans.
 
-**Node scaling (Cluster Autoscaler)** — when KEDA or HPA creates new pods but there aren't enough nodes to run them, the [Cluster Autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler) detects the unschedulable pods and adds nodes to the EKS node group.
+**Node scaling (Cluster Autoscaler)** — when KEDA or HPA creates new pods but there aren't enough nodes to run them, the Cluster Autoscaler detects the unschedulable pods and adds nodes to the EKS node group.
 
 - Watches for pods stuck in `Pending` state due to insufficient CPU/memory
 - Adds `r7i.large` nodes (2 vCPU, 16 GiB each) to the node group
@@ -161,7 +161,7 @@ KEDA and the Cluster Autoscaler get their AWS permissions through Pod Identity �
 
 ### How Credentials Work
 
-The scanner app pod gets AWS permissions automatically through [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html). No access keys are configured anywhere.
+The scanner app pod gets AWS permissions automatically through EKS Pod Identity. No access keys are configured anywhere.
 
 1. CloudFormation creates an IAM role (`ScannerAppRole`) with permissions scoped to the specific S3 buckets, SQS queue, and Secrets Manager secret
 2. A Pod Identity Association binds this role to the `scanner-app` Kubernetes service account
@@ -170,7 +170,7 @@ The scanner app pod gets AWS permissions automatically through [EKS Pod Identity
 
 ## Prerequisites
 
-You need two credentials from the [TrendAI Vision One console](https://portal.xdr.trendmicro.com/):
+You need two credentials from the TrendAI Vision One console:
 
 1. **Registration Token** — used by the scanner pods to register with Vision One. Generate this under **Cloud Security > File Security > Containerized Scanner > Get ready to deploy containerized scanner > Get registration token**.
 2. **API Key** — used by the scanner application to authenticate scan requests. Generate this under **Administration > API Keys > Add API Key** with the **"Run file scan via SDK"** permission.
