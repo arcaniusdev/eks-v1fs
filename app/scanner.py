@@ -129,8 +129,8 @@ class ScannerApp:
                 # Scan
                 result_json = await amaas.grpc.aio.scan_buffer(
                     self.scan_handle,
-                    buffer=file_bytes,
-                    identifier=key,
+                    file_bytes,
+                    key,
                     pml=True,
                     tags=["s3-ingest"],
                 )
