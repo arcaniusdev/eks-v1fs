@@ -6,7 +6,7 @@ metadata:
 spec:
   podIdentity:
     provider: aws
-    identityOwner: operator
+    identityOwner: keda
 ---
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject

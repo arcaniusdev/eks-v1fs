@@ -151,7 +151,7 @@ Kubernetes can't schedule all pods on 2 nodes (not enough CPU/memory)
 Cluster Autoscaler adds nodes (up to 10) to fit the pending pods
          |
          v
-All pods start — scanner-app pods process 20 files each, V1FS scanner pods handle the scan load
+All pods start — scanner-app pods process 40 files each, V1FS scanner pods handle the scan load
          |
          v
 Queue drains → KEDA + HPA scale pods back down → Autoscaler removes idle nodes
