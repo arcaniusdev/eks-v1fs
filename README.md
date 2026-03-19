@@ -62,7 +62,7 @@ The `eks-v1fs.yaml` template creates everything:
 | **VPC** | `10.2.0.0/16` with public and private subnets across 2 AZs |
 | **NAT Gateways** | One per AZ — pods in private subnets reach the internet for threat intelligence updates |
 | **EKS Cluster** | Private API endpoint, full audit logging, managed addons (vpc-cni, CoreDNS, kube-proxy, Pod Identity Agent) |
-| **Node Group** | `t3.large` instances (2 vCPU, 8 GiB) in private subnets, min 2 / max 10 |
+| **Node Group** | `r7i.large` instances (2 vCPU, 16 GiB) in private subnets, min 2 / max 10 — consistent CPU for sustained scanning |
 | **ECR Repository** | Hosts the scanner app container image, scan-on-push enabled |
 | **S3 Buckets** | Ingest (with event notifications), Clean, Quarantine (survives stack deletion) |
 | **SQS Queues** | Main queue (300s visibility timeout, 20s long polling) + Dead Letter Queue |
@@ -101,7 +101,7 @@ Each scanner app pod processes up to 20 files concurrently (via async I/O), so a
 **Node scaling (Cluster Autoscaler)** — when KEDA creates new pods but there aren't enough nodes to run them, the [Cluster Autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler) detects the unschedulable pods and adds nodes to the EKS node group.
 
 - Watches for pods stuck in `Pending` state due to insufficient CPU/memory
-- Adds `t3.large` nodes (2 vCPU, 8 GiB each) to the node group
+- Adds `r7i.large` nodes (2 vCPU, 16 GiB each) to the node group
 - Node group range: 2 to 10 nodes
 - Scales down underutilized nodes after 10 minutes of low usage (threshold: 65% utilization)
 
@@ -144,8 +144,8 @@ The scanner app pod gets AWS permissions automatically through [EKS Pod Identity
 
 You need two credentials from the [Trend Micro Vision One console](https://portal.xdr.trendmicro.com/):
 
-1. **Registration Token** — used by the scanner pods to register with Vision One. Generate this under **File Security > SDK & Tools > Deployment > Kubernetes**.
-2. **API Key** — used by the scanner application to authenticate scan requests. Generate this under **Administration > API Keys** with the **"Run file scan via SDK"** permission.
+1. **Registration Token** — used by the scanner pods to register with Vision One. Generate this under **Cloud Security > File Security > Containerized Scanner > Get ready to deploy containerized scanner > Get registration token**.
+2. **API Key** — used by the scanner application to authenticate scan requests. Generate this under **Administration > API Keys > Add API Key** with the **"Run file scan via SDK"** permission.
 
 ## Deployment
 

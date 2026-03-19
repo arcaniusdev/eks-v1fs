@@ -30,21 +30,18 @@ Parameters:
     MaxValue: 10
   NodeInstanceType:
     Type: String
-    Description: EC2 instance type for EKS worker nodes (t3.large recommended for V1FS scanner memory requirements)
-    Default: t3.large
+    Description: EC2 instance type for EKS worker nodes (r7i.large recommended for consistent CPU under sustained scanning load)
+    Default: r7i.large
     AllowedValues:
-      - t3.micro
-      - t3.small
-      - t3.medium
+      - r7i.large
+      - r7i.xlarge
+      - r7i.2xlarge
+      - r7a.large
+      - r7a.xlarge
+      - r7a.2xlarge
       - t3.large
       - t3.xlarge
       - t3.2xlarge
-      - t3a.micro
-      - t3a.small
-      - t3a.medium
-      - t3a.large
-      - t3a.xlarge
-      - t3a.2xlarge
 
 Mappings:
   RegionMap:
@@ -554,10 +551,12 @@ Resources:
                   - sts:GetCallerIdentity
                 Resource: "*"
               # aws cloudformation signal-resource (used by UserData trap)
-              - Sid: CFNSignal
+              # aws cloudformation describe-stacks (used by deploy scripts to read Outputs)
+              - Sid: CFNAccess
                 Effect: Allow
                 Action:
                   - cloudformation:SignalResource
+                  - cloudformation:DescribeStacks
                 Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*
               # Read V1FS registration token from Secrets Manager
               - Sid: SecretsManagerRead
@@ -1237,6 +1236,14 @@ Resources:
           # ---- Clone scanner app repo, build image, deploy to cluster ----
           export CFN_STACK_NAME="${AWS::StackName}"
           export AWS_REGION="${AWS::Region}"
+
+          # Pass resource values directly — stack Outputs are not available during CREATE_IN_PROGRESS
+          export ECR_REPO_URL="${ScannerAppECRRepo.RepositoryUri}"
+          export SQS_QUEUE_URL="${FileScanQueue}"
+          export S3_INGEST_BUCKET="${IngestBucket}"
+          export S3_CLEAN_BUCKET="${CleanBucket}"
+          export S3_QUARANTINE_BUCKET="${QuarantineBucket}"
+          export V1FS_API_KEY_SECRET_ARN="${V1FSApiKeySecret}"
 
           git clone https://github.com/arcaniusdev/eks-v1fs.git /opt/eks-v1fs
           chmod +x /opt/eks-v1fs/scripts/*.sh
