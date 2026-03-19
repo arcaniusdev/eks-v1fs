@@ -14,6 +14,7 @@ class Config:
     aws_region: str
     log_level: str
     max_concurrent_scans: int
+    pml_enabled: bool
 
 
 def load_config() -> Config:
@@ -49,4 +50,5 @@ def load_config() -> Config:
         aws_region=required["AWS_REGION"],
         log_level=log_level,
         max_concurrent_scans=int(os.environ.get("MAX_CONCURRENT_SCANS", "20")),
+        pml_enabled=os.environ.get("PML_ENABLED", "false").lower() == "true",
     )

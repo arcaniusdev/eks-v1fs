@@ -13,3 +13,4 @@ data:
   AWS_REGION: "us-east-1"
   LOG_LEVEL: "INFO"
   MAX_CONCURRENT_SCANS: "20"
+  PML_ENABLED: "false"

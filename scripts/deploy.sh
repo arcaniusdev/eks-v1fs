@@ -79,6 +79,7 @@ data:
   AWS_REGION: "$AWS_REGION"
   LOG_LEVEL: "INFO"
   MAX_CONCURRENT_SCANS: "20"
+  PML_ENABLED: "${PML_ENABLED:-false}"
 EOF
 
 echo "Applying Deployment..."

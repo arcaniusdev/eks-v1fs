@@ -55,9 +55,10 @@ class ScannerApp:
         )
 
         logger.info(
-            "Scanner started — polling %s (concurrency=%d)",
+            "Scanner started — polling %s (concurrency=%d, pml=%s)",
             self.config.sqs_queue_url,
             self.config.max_concurrent_scans,
+            self.config.pml_enabled,
         )
         try:
             await self._poll_loop()
@@ -187,7 +188,7 @@ class ScannerApp:
             self.scan_handle,
             file_bytes,
             key,
-            pml=False,
+            pml=self.config.pml_enabled,
             tags=["S3-Scan"],
         )
         result = json.loads(result_json)
