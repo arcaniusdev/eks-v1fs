@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-RUN groupadd -r scanner && useradd -r -g scanner -d /app -s /sbin/nologin scanner
+RUN groupadd -g 999 scanner && useradd -r -u 999 -g scanner -d /app -s /sbin/nologin scanner
 
 WORKDIR /app
 COPY requirements.txt .

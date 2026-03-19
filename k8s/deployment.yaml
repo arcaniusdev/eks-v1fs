@@ -17,6 +17,9 @@ spec:
       terminationGracePeriodSeconds: 300
       securityContext:
         runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
       containers:
         - name: scanner
           image: <ECR_REPO_URL>:<IMAGE_TAG>
