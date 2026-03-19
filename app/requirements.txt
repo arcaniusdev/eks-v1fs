@@ -1,0 +1,2 @@
+visionone-filesecurity>=1.4.0
+aiobotocore>=2.12.0

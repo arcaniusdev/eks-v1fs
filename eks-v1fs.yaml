@@ -1,0 +1,1427 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  Deploy a hardened EKS cluster with Trend Micro Vision One File Security.
+  Declarative CloudFormation constructs replace imperative UserData where possible:
+  EKS addons, Pod Identity, Secrets Manager. Remaining provisioning runs in
+  bastion UserData with trap-based CloudFormation signaling.
+
+Parameters:
+  PrimaryAZ:
+    Description: Availability Zone 1
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1a
+  SecondaryAZ:
+    Description: Availability Zone 2
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1b
+  RegistrationToken:
+    Description: Vision One File Security registration token
+    Type: String
+    NoEcho: true
+  ApiKey:
+    Description: Vision One API key with "Run file scan via SDK" permission
+    Type: String
+    NoEcho: true
+  DesiredCapacity:
+    Type: Number
+    Description: Desired number of EKS worker nodes (minimum 2 for V1FS scanner availability)
+    Default: 2
+    MinValue: 2
+    MaxValue: 10
+  NodeInstanceType:
+    Type: String
+    Description: EC2 instance type for EKS worker nodes (t3.large recommended for V1FS scanner memory requirements)
+    Default: t3.large
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - t3.2xlarge
+      - t3a.micro
+      - t3a.small
+      - t3a.medium
+      - t3a.large
+      - t3a.xlarge
+      - t3a.2xlarge
+
+Mappings:
+  RegionMap:
+    us-east-1:
+      ami: ami-0e1bed4f06a3b463d
+    us-east-2:
+      ami: ami-0884d2865dbe9de4b
+    us-west-2:
+      ami: ami-0606dd43116f5ed57
+
+Resources:
+
+  # ================================================================
+  #  1. VPC & NETWORKING
+  # ================================================================
+
+  BaseVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.2.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub BaseVPC-${AWS::StackName}
+
+  # --- VPC Flow Logs (audit trail) ---
+
+  VPCFlowLogRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: vpc-flow-logs.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: FlowLogWrite
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vpc/flowlogs/${AWS::StackName}
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vpc/flowlogs/${AWS::StackName}:*
+
+  VPCFlowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /vpc/flowlogs/${AWS::StackName}
+      RetentionInDays: 90
+
+  VPCFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      ResourceId: !Ref BaseVPC
+      ResourceType: VPC
+      TrafficType: ALL
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: !Ref VPCFlowLogGroup
+      DeliverLogsPermissionArn: !GetAtt VPCFlowLogRole.Arn
+
+  # --- Internet Gateway ---
+
+  IG:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub IG-${AWS::StackName}
+
+  VPCIG:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref IG
+      VpcId: !Ref BaseVPC
+
+  # --- Public Subnets ---
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.2.1.0/24
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref BaseVPC
+      AvailabilityZone: !Ref PrimaryAZ
+      Tags:
+        - Key: kubernetes.io/role/elb
+          Value: "1"
+        - Key: Name
+          Value: !Sub PublicSubnet1-${AWS::StackName}
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.2.2.0/24
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref BaseVPC
+      AvailabilityZone: !Ref SecondaryAZ
+      Tags:
+        - Key: kubernetes.io/role/elb
+          Value: "1"
+        - Key: Name
+          Value: !Sub PublicSubnet2-${AWS::StackName}
+
+  # --- Private Subnets ---
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.2.3.0/24
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref BaseVPC
+      AvailabilityZone: !Ref PrimaryAZ
+      Tags:
+        - Key: kubernetes.io/role/internal-elb
+          Value: "1"
+        - Key: Name
+          Value: !Sub PrivateSubnet1-${AWS::StackName}
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.2.4.0/24
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref BaseVPC
+      AvailabilityZone: !Ref SecondaryAZ
+      Tags:
+        - Key: kubernetes.io/role/internal-elb
+          Value: "1"
+        - Key: Name
+          Value: !Sub PrivateSubnet2-${AWS::StackName}
+
+  # --- NAT Gateways (one per AZ) ---
+
+  NGWEIP1:
+    Type: AWS::EC2::EIP
+    DependsOn: VPCIG
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub NGWEIP1-${AWS::StackName}
+
+  NGW1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NGWEIP1.AllocationId
+      ConnectivityType: public
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub NGW1-${AWS::StackName}
+
+  NGWEIP2:
+    Type: AWS::EC2::EIP
+    DependsOn: VPCIG
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub NGWEIP2-${AWS::StackName}
+
+  NGW2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NGWEIP2.AllocationId
+      ConnectivityType: public
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub NGW2-${AWS::StackName}
+
+  # --- Route Tables ---
+
+  PublicRT1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref BaseVPC
+      Tags:
+        - Key: Name
+          Value: !Sub PublicRT1-${AWS::StackName}
+
+  PublicRT2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref BaseVPC
+      Tags:
+        - Key: Name
+          Value: !Sub PublicRT2-${AWS::StackName}
+
+  PrivateRT1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref BaseVPC
+      Tags:
+        - Key: Name
+          Value: !Sub PrivateRT1-${AWS::StackName}
+
+  PrivateRT2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref BaseVPC
+      Tags:
+        - Key: Name
+          Value: !Sub PrivateRT2-${AWS::StackName}
+
+  # --- Routes ---
+
+  PublicRoute1:
+    DependsOn: VPCIG
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRT1
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IG
+
+  PublicRoute2:
+    DependsOn: VPCIG
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRT2
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IG
+
+  PrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRT1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NGW1
+
+  PrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRT2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NGW2
+
+  # --- Route Table Associations ---
+
+  PublicSubnetRT1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRT1
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnetRT2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRT2
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateSubnetRT1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRT1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnetRT2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRT2
+      SubnetId: !Ref PrivateSubnet2
+
+  # ================================================================
+  #  2. SECURITY GROUPS (least-privilege port access)
+  # ================================================================
+
+  BastionSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref BaseVPC
+      GroupDescription: SSH access to bastion host from a single trusted CIDR
+      Tags:
+        - Key: Name
+          Value: !Sub BastionSecGroup-${AWS::StackName}
+
+  EKSSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref BaseVPC
+      GroupDescription: EKS control plane - restricted ports only
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.2.3.0/24
+          Description: HTTPS API from private subnet 1
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.2.4.0/24
+          Description: HTTPS API from private subnet 2
+        - IpProtocol: tcp
+          FromPort: 6443
+          ToPort: 6443
+          CidrIp: 10.2.3.0/24
+          Description: K8s API from private subnet 1
+        - IpProtocol: tcp
+          FromPort: 6443
+          ToPort: 6443
+          CidrIp: 10.2.4.0/24
+          Description: K8s API from private subnet 2
+        - IpProtocol: tcp
+          FromPort: 9443
+          ToPort: 9443
+          CidrIp: 10.2.3.0/24
+          Description: Webhooks from private subnet 1
+        - IpProtocol: tcp
+          FromPort: 9443
+          ToPort: 9443
+          CidrIp: 10.2.4.0/24
+          Description: Webhooks from private subnet 2
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref BastionSecGroup
+          Description: HTTPS API from bastion
+        - IpProtocol: tcp
+          FromPort: 6443
+          ToPort: 6443
+          SourceSecurityGroupId: !Ref BastionSecGroup
+          Description: K8s API from bastion
+      Tags:
+        - Key: Name
+          Value: !Sub EKSSecGroup-${AWS::StackName}
+
+  NodeSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref BaseVPC
+      GroupDescription: EKS worker nodes - restricted ports only
+      Tags:
+        - Key: Name
+          Value: !Sub NodeSecGroup-${AWS::StackName}
+
+  NodeSecGroupSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSecGroup
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !Ref NodeSecGroup
+      Description: Node-to-node (pod networking, DNS, etc.)
+
+  NodeSecGroupFromControlPlane:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSecGroup
+      IpProtocol: tcp
+      FromPort: 1025
+      ToPort: 65535
+      SourceSecurityGroupId: !Ref EKSSecGroup
+      Description: Control plane to node kubelet and workloads
+
+  NodeSecGroupFromControlPlane443:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSecGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref EKSSecGroup
+      Description: Control plane to node HTTPS (webhooks)
+
+  NodeSecGroupBastionSSH:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSecGroup
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      SourceSecurityGroupId: !Ref BastionSecGroup
+      Description: SSH from bastion for debugging
+
+  EKSSecGroupFromNodes:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EKSSecGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref NodeSecGroup
+      Description: Nodes to control plane HTTPS
+
+
+  # ================================================================
+  #  3. IAM ROLES
+  # ================================================================
+
+  # --- EKS Cluster Role ---
+
+  EKSClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub EKSClusterRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+      Tags:
+        - Key: Name
+          Value: !Sub EKSClusterRole-${AWS::StackName}
+
+  # --- Node Instance Role (least-privilege, no AdministratorAccess) ---
+
+  NodeInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub EKSNodeRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: NodeCloudWatchLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/eks/EKSCluster-${AWS::StackName}/*
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/containerinsights/EKSCluster-${AWS::StackName}/*
+      Tags:
+        - Key: Name
+          Value: !Sub EKSNodeRole-${AWS::StackName}
+
+  # --- Bastion Role (scoped to EKS + Helm operations) ---
+
+  BastionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub BastionRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: BastionEKSAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EKSAccess
+                Effect: Allow
+                Action:
+                  - eks:DescribeCluster
+                  - eks:ListClusters
+                  - eks:AccessKubernetesApi
+                Resource:
+                  - !Sub arn:aws:eks:${AWS::Region}:${AWS::AccountId}:cluster/EKSCluster-${AWS::StackName}
+              - Sid: ECRAuth
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: ECRRead
+                Effect: Allow
+                Action:
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchCheckLayerAvailability
+                Resource: "*"
+              - Sid: ECRPush
+                Effect: Allow
+                Action:
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                Resource: !GetAtt ScannerAppECRRepo.Arn
+              - Sid: STS
+                Effect: Allow
+                Action:
+                  - sts:GetCallerIdentity
+                Resource: "*"
+              # aws cloudformation signal-resource (used by UserData trap)
+              - Sid: CFNSignal
+                Effect: Allow
+                Action:
+                  - cloudformation:SignalResource
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*
+              # Read V1FS registration token from Secrets Manager
+              - Sid: SecretsManagerRead
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref V1FSRegistrationSecret
+      Tags:
+        - Key: Name
+          Value: !Sub BastionRole-${AWS::StackName}
+
+  BastionInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref BastionRole
+
+  # --- AWS LB Controller Role (used via Pod Identity, not IRSA) ---
+  #
+  # REPLACES: helm install aws-load-balancer-controller (from UserData)
+  # The Helm chart installed a controller without a proper IAM binding.
+  # Now the controller runs as a managed EKS addon with a dedicated
+  # IAM role bound through EKS Pod Identity Association.
+
+  LBControllerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub LBControllerRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: AWSLoadBalancerControllerPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: elasticloadbalancing.amazonaws.com
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeAccountAttributes
+                  - ec2:DescribeAddresses
+                  - ec2:DescribeAvailabilityZones
+                  - ec2:DescribeInternetGateways
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeVpcPeeringConnections
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeInstances
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DescribeTags
+                  - ec2:DescribeCoipPools
+                  - ec2:GetCoipPoolUsage
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - elasticloadbalancing:DescribeLoadBalancerAttributes
+                  - elasticloadbalancing:DescribeListeners
+                  - elasticloadbalancing:DescribeListenerCertificates
+                  - elasticloadbalancing:DescribeSSLPolicies
+                  - elasticloadbalancing:DescribeRules
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - elasticloadbalancing:DescribeTargetGroupAttributes
+                  - elasticloadbalancing:DescribeTargetHealth
+                  - elasticloadbalancing:DescribeTags
+                  - elasticloadbalancing:DescribeTrustStores
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - cognito-idp:DescribeUserPoolClient
+                  - acm:ListCertificates
+                  - acm:DescribeCertificate
+                  - iam:ListServerCertificates
+                  - iam:GetServerCertificate
+                  - waf-regional:GetWebACL
+                  - waf-regional:GetWebACLForResource
+                  - waf-regional:AssociateWebACL
+                  - waf-regional:DisassociateWebACL
+                  - wafv2:GetWebACL
+                  - wafv2:GetWebACLForResource
+                  - wafv2:AssociateWebACL
+                  - wafv2:DisassociateWebACL
+                  - shield:GetSubscriptionState
+                  - shield:DescribeProtection
+                  - shield:CreateProtection
+                  - shield:DeleteProtection
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupIngress
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ec2:CreateSecurityGroup
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ec2:CreateTags
+                Resource: arn:aws:ec2:*:*:security-group/*
+                Condition:
+                  StringEquals:
+                    ec2:CreateAction: CreateSecurityGroup
+                  "Null":
+                    aws:RequestTag/elbv2.k8s.aws/cluster: "false"
+              - Effect: Allow
+                Action:
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                Resource: arn:aws:ec2:*:*:security-group/*
+                Condition:
+                  "Null":
+                    aws:RequestTag/elbv2.k8s.aws/cluster: "true"
+                    aws:ResourceTag/elbv2.k8s.aws/cluster: "false"
+              - Effect: Allow
+                Action:
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:DeleteSecurityGroup
+                Resource: "*"
+                Condition:
+                  "Null":
+                    aws:ResourceTag/elbv2.k8s.aws/cluster: "false"
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:CreateLoadBalancer
+                  - elasticloadbalancing:CreateTargetGroup
+                Resource: "*"
+                Condition:
+                  "Null":
+                    aws:RequestTag/elbv2.k8s.aws/cluster: "false"
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:CreateListener
+                  - elasticloadbalancing:DeleteListener
+                  - elasticloadbalancing:CreateRule
+                  - elasticloadbalancing:DeleteRule
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:AddTags
+                  - elasticloadbalancing:RemoveTags
+                Resource:
+                  - arn:aws:elasticloadbalancing:*:*:targetgroup/*/*
+                  - arn:aws:elasticloadbalancing:*:*:loadbalancer/net/*/*
+                  - arn:aws:elasticloadbalancing:*:*:loadbalancer/app/*/*
+                Condition:
+                  "Null":
+                    aws:RequestTag/elbv2.k8s.aws/cluster: "true"
+                    aws:ResourceTag/elbv2.k8s.aws/cluster: "false"
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:AddTags
+                  - elasticloadbalancing:RemoveTags
+                Resource:
+                  - arn:aws:elasticloadbalancing:*:*:listener/net/*/*/*
+                  - arn:aws:elasticloadbalancing:*:*:listener/app/*/*/*
+                  - arn:aws:elasticloadbalancing:*:*:listener-rule/net/*/*/*
+                  - arn:aws:elasticloadbalancing:*:*:listener-rule/app/*/*/*
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:ModifyLoadBalancerAttributes
+                  - elasticloadbalancing:SetIpAddressType
+                  - elasticloadbalancing:SetSecurityGroups
+                  - elasticloadbalancing:SetSubnets
+                  - elasticloadbalancing:DeleteLoadBalancer
+                  - elasticloadbalancing:ModifyTargetGroup
+                  - elasticloadbalancing:ModifyTargetGroupAttributes
+                  - elasticloadbalancing:DeleteTargetGroup
+                Resource: "*"
+                Condition:
+                  "Null":
+                    aws:ResourceTag/elbv2.k8s.aws/cluster: "false"
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:RegisterTargets
+                  - elasticloadbalancing:DeregisterTargets
+                Resource: arn:aws:elasticloadbalancing:*:*:targetgroup/*/*
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:SetWebAcl
+                  - elasticloadbalancing:ModifyListener
+                  - elasticloadbalancing:AddListenerCertificates
+                  - elasticloadbalancing:RemoveListenerCertificates
+                  - elasticloadbalancing:ModifyRule
+                Resource: "*"
+      Tags:
+        - Key: Name
+          Value: !Sub LBControllerRole-${AWS::StackName}
+
+  # ================================================================
+  #  4. EKS CLUSTER
+  # ================================================================
+
+  EKSCluster:
+    DependsOn:
+      - EKSClusterRole
+      - EKSSecGroup
+      - NGW1
+      - NGW2
+      - PrivateRoute1
+      - PrivateRoute2
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Sub EKSCluster-${AWS::StackName}
+      RoleArn: !GetAtt EKSClusterRole.Arn
+      AccessConfig:
+        AuthenticationMode: API_AND_CONFIG_MAP
+      ResourcesVpcConfig:
+        SecurityGroupIds:
+          - !Ref EKSSecGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        EndpointPrivateAccess: true
+        EndpointPublicAccess: false
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      Tags:
+        - Key: Name
+          Value: !Sub EKSCluster-${AWS::StackName}
+
+  # --- EKS Access Entry ---
+  #
+  # Grant the Bastion role K8s API access declaratively
+  # instead of relying on the aws-auth ConfigMap.
+  # Access policies are embedded in the AccessEntry via AccessPolicies.
+
+  BastionAccessEntry:
+    DependsOn: EKSCluster
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      ClusterName: !Sub EKSCluster-${AWS::StackName}
+      PrincipalArn: !GetAtt BastionRole.Arn
+      Type: STANDARD
+      AccessPolicies:
+        - PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+          AccessScope:
+            Type: cluster
+
+  # ================================================================
+  #  5. EKS NODE GROUP
+  # ================================================================
+
+  EKSLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub EKSLaunchTemplate-${AWS::StackName}
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpPutResponseHopLimit: 2
+          HttpTokens: required
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 20
+              VolumeType: gp3
+              Encrypted: true
+        SecurityGroupIds:
+          - !Ref NodeSecGroup
+
+  NodeGroup:
+    DependsOn:
+      - EKSCluster
+      - NodeInstanceRole
+      - EKSLaunchTemplate
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref EKSCluster
+      LaunchTemplate:
+        Id: !Ref EKSLaunchTemplate
+        Version: !GetAtt EKSLaunchTemplate.LatestVersionNumber
+      NodeRole: !GetAtt NodeInstanceRole.Arn
+      Subnets:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      ScalingConfig:
+        DesiredSize: !Ref DesiredCapacity
+        MinSize: 2
+        MaxSize: 10
+      InstanceTypes:
+        - !Ref NodeInstanceType
+
+  # ================================================================
+  #  6. DECLARATIVE EKS ADD-ONS
+  #     (replaces imperative CLI / Helm commands from UserData)
+  # ================================================================
+
+  # REPLACES: aws eks create-addon --addon-name vpc-cni
+  CNIAddOn:
+    DependsOn: EKSCluster
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: vpc-cni
+      ClusterName: !Sub EKSCluster-${AWS::StackName}
+
+  # REPLACES: aws eks create-addon --addon-name eks-pod-identity-agent
+  PodIdentityAgentAddon:
+    DependsOn: NodeGroup
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: eks-pod-identity-agent
+      ClusterName: !Sub EKSCluster-${AWS::StackName}
+
+  # CoreDNS — provides in-cluster DNS for pod name resolution.
+  # Pods use CoreDNS for both cluster-internal service names and
+  # external internet DNS (forwarded to VPC resolver at CIDR+2).
+  # EKS installs this as self-managed by default; declaring it
+  # as a managed addon keeps it updated automatically.
+  CoreDNSAddon:
+    DependsOn: NodeGroup
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: coredns
+      ClusterName: !Sub EKSCluster-${AWS::StackName}
+
+  # kube-proxy — maintains iptables/IPVS rules on each node so
+  # pods can reach ClusterIP services. Required for CoreDNS itself
+  # to be reachable by pods.
+  KubeProxyAddon:
+    DependsOn: EKSCluster
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: kube-proxy
+      ClusterName: !Sub EKSCluster-${AWS::StackName}
+
+  # REPLACES: helm install aws-load-balancer-controller eks/aws-load-balancer-controller
+  # NOTE: The LB controller is NOT an EKS managed addon — it must be installed
+  # via Helm (done in bastion UserData). However, the IAM role binding IS
+  # declarative via Pod Identity Association below.
+
+  # Bind the LB Controller IAM role to its K8s service account via Pod Identity.
+  # The bastion's UserData Helm install creates the service account; this
+  # association binds the IAM role to it for credential injection.
+  LBControllerPodIdentity:
+    DependsOn: PodIdentityAgentAddon
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !Sub EKSCluster-${AWS::StackName}
+      Namespace: kube-system
+      ServiceAccount: aws-load-balancer-controller
+      RoleArn: !GetAtt LBControllerRole.Arn
+
+  # ================================================================
+  #  7. SECRETS MANAGER
+  #     (replaces plaintext registration token in UserData / kubectl)
+  # ================================================================
+
+  # REPLACES: passing ${RegistrationToken} directly into kubectl create secret
+  # The token is stored in Secrets Manager; the bastion reads it at deploy
+  # time to create the K8s secret without exposing the token in UserData.
+
+  V1FSRegistrationSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${AWS::StackName}/v1fs-registration-token
+      Description: Vision One File Security registration token
+      SecretString: !Ref RegistrationToken
+      Tags:
+        - Key: Name
+          Value: !Sub V1FSRegistrationToken-${AWS::StackName}
+
+  V1FSApiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${AWS::StackName}/v1fs-api-key
+      Description: Vision One API key for SDK file scanning
+      SecretString: !Ref ApiKey
+      Tags:
+        - Key: Name
+          Value: !Sub V1FSApiKey-${AWS::StackName}
+
+  # ================================================================
+  #  8. BASTION HOST
+  #     Responsible for:
+  #       - Tool installation (AWS CLI v2, Helm, kubectl, eksctl)
+  #       - kubeconfig setup
+  #       - K8s namespace and secrets for V1FS (reads token from Secrets Manager)
+  #       - LB controller Helm install
+  #       - V1FS Helm chart install (GPG-verified)
+  #     All steps run directly in UserData (no cfn-init/cfn-bootstrap).
+  #     A bash trap guarantees CloudFormation signaling on exit via
+  #     the AWS CLI, regardless of success or failure.
+  # ================================================================
+
+  BastionKeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub BastionKey-${AWS::StackName}
+      Tags:
+        - Key: Name
+          Value: !Sub BastionKey-${AWS::StackName}
+
+  Bastion:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT30M
+        Count: 1
+    DependsOn:
+      # Wait for Pod Identity association so the LB controller pods
+      # get IAM credentials immediately when they start.
+      - LBControllerPodIdentity
+    Properties:
+      IamInstanceProfile: !Ref BastionInstanceProfile
+      ImageId: !FindInMap
+        - RegionMap
+        - !Ref AWS::Region
+        - ami
+      InstanceType: t3.micro
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          SubnetId: !Ref PublicSubnet1
+          GroupSet:
+            - !Ref BastionSecGroup
+          AssociatePublicIpAddress: true
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+      KeyName: !Ref BastionKeyPair
+      AvailabilityZone: !Ref PrimaryAZ
+      UserData: !Base64
+        Fn::Sub: |
+          #!/bin/bash -x
+          # ------------------------------------------------------------------
+          # Bastion provisioning script
+          # Signals CloudFormation on exit regardless of success or failure.
+          # No dependency on cfn-bootstrap / cfn-init / cfn-signal.
+          # ------------------------------------------------------------------
+          SIGNAL_STATUS="FAILURE"
+
+          signal_cfn() {
+            # Use whichever aws binary is available (v2 at /usr/local/bin, v1 at /usr/bin)
+            AWS_CMD=$(command -v aws || echo "/usr/bin/aws")
+            $AWS_CMD cloudformation signal-resource \
+              --stack-name "${AWS::StackName}" \
+              --logical-resource-id Bastion \
+              --unique-id "$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo bastion)" \
+              --status "$SIGNAL_STATUS" \
+              --region "${AWS::Region}" || true
+          }
+          trap signal_cfn EXIT
+
+          # Exit on first error — the trap will signal FAILURE.
+          # Commands that are allowed to fail use || true explicitly.
+          set -e
+
+          export DEBIAN_FRONTEND=noninteractive
+          export HOME=/root
+          export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH
+
+          # Ensure /usr/local/bin is on PATH and KUBECONFIG is set for SSH sessions
+          echo 'export PATH=/usr/local/bin:$PATH' > /etc/profile.d/local-bin.sh
+          echo 'export KUBECONFIG=/root/.kube/config' >> /etc/profile.d/local-bin.sh
+          chmod 644 /etc/profile.d/local-bin.sh
+
+          # ---- System packages ----
+          apt-get update -y
+          apt-get remove needrestart -y || true
+          apt-get install -y python3 python3-pip curl gpg apt-transport-https unzip jq
+
+          # ---- AWS CLI v2 ----
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+          unzip -q /tmp/awscliv2.zip -d /tmp
+          /tmp/aws/install --update
+          rm -rf /tmp/aws /tmp/awscliv2.zip
+          /usr/local/bin/aws --version
+
+          # ---- Helm ----
+          curl -fsSL https://packages.buildkite.com/helm-linux/helm-debian/gpgkey | gpg --dearmor | tee /usr/share/keyrings/helm.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/helm.gpg] https://packages.buildkite.com/helm-linux/helm-debian/any/ any main" | tee /etc/apt/sources.list.d/helm-stable-debian.list
+          apt-get update -y
+          apt-get install -y helm
+          helm version
+
+          # ---- eksctl ----
+          ARCH=amd64
+          PLATFORM=$(uname -s)_$ARCH
+          curl -sLO "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$PLATFORM.tar.gz"
+          tar -xzf "eksctl_$PLATFORM.tar.gz" -C /tmp && rm "eksctl_$PLATFORM.tar.gz"
+          mv /tmp/eksctl /usr/local/bin/eksctl
+          /usr/local/bin/eksctl version
+
+          # ---- kubectl ----
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          rm -f kubectl
+          /usr/local/bin/kubectl version --client
+
+          # ---- Configure kubeconfig ----
+          /usr/local/bin/aws eks update-kubeconfig --region ${AWS::Region} --name EKSCluster-${AWS::StackName}
+          export KUBECONFIG=/root/.kube/config
+
+          # ---- Create V1FS namespace and secrets ----
+          /usr/local/bin/kubectl create namespace visionone-filesecurity
+
+          # Retrieve registration token from Secrets Manager into a temp file.
+          # Using --from-file avoids shell interpolation issues with special
+          # characters in the token (e.g. $, backticks, !, \).
+          /usr/local/bin/aws secretsmanager get-secret-value \
+            --secret-id "${V1FSRegistrationSecret}" \
+            --query SecretString --output text \
+            --region ${AWS::Region} | tr -d '\n' > /tmp/.reg-token
+          /usr/local/bin/kubectl create secret generic token-secret \
+            --from-file=registration-token=/tmp/.reg-token \
+            -n visionone-filesecurity
+          shred -u /tmp/.reg-token
+
+          /usr/local/bin/kubectl create secret generic device-token-secret \
+            -n visionone-filesecurity
+
+          # ---- Install AWS Load Balancer Controller via Helm ----
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update eks
+          helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+            -n kube-system \
+            --set clusterName=EKSCluster-${AWS::StackName} \
+            --set vpcId=${BaseVPC} \
+            --set region=${AWS::Region} \
+            --wait --timeout 5m
+
+          # ---- Install Vision One File Security via Helm (GPG-verified) ----
+          helm repo add visionone-filesecurity https://trendmicro.github.io/visionone-file-security-helm/
+          helm repo update
+          curl -o /tmp/public-key.asc https://trendmicro.github.io/visionone-file-security-helm/public-key.asc
+          gpg --import /tmp/public-key.asc
+          gpg --export > /root/.gnupg/pubring.gpg
+
+          # Verify chart signature (validation only - not used for install)
+          helm pull --verify visionone-filesecurity/visionone-filesecurity
+
+          # Install from repo per official instructions (no --wait; pods need
+          # time to register with Vision One cloud on first startup)
+          helm install my-release visionone-filesecurity/visionone-filesecurity -n visionone-filesecurity
+
+          # ---- Install Docker (needed to build scanner app image) ----
+          apt-get install -y ca-certificates gnupg lsb-release
+          install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+            | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          chmod a+r /etc/apt/keyrings/docker.gpg
+          echo \
+            "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+            https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+            > /etc/apt/sources.list.d/docker.list
+          apt-get update -y
+          apt-get install -y docker-ce docker-ce-cli containerd.io
+          systemctl enable docker
+          systemctl start docker
+
+          # ---- Clone scanner app repo, build image, deploy to cluster ----
+          export CFN_STACK_NAME="${AWS::StackName}"
+          export AWS_REGION="${AWS::Region}"
+
+          git clone https://github.com/arcaniusdev/eks-v1fs.git /opt/eks-v1fs
+          chmod +x /opt/eks-v1fs/scripts/*.sh
+
+          /opt/eks-v1fs/scripts/build-and-push.sh
+          /opt/eks-v1fs/scripts/deploy.sh
+
+          # If we reach here, everything succeeded
+          SIGNAL_STATUS="SUCCESS"
+          echo "Bastion provisioning complete."
+      Tags:
+        - Key: Name
+          Value: !Sub Bastion-${AWS::StackName}
+
+  # ================================================================
+  #  9. FILE SCANNING WORKFLOW (S3, SQS, Scanner App IAM)
+  #
+  #  Ingest bucket receives files and sends s3:ObjectCreated events
+  #  to SQS. The scanner app pod polls SQS, scans each file, and
+  #  routes to clean or quarantine bucket. After disposition, the
+  #  SQS message is deleted.
+  #
+  #  Ingest Bucket --[S3 Event]--> SQS Queue --> Scanner App Pod
+  #       |                                          |
+  #       +--- (malicious) --> Quarantine Bucket      |
+  #       +--- (clean) ------> Clean Bucket           |
+  #       +--- (delete from ingest) <-----------------+
+  # ================================================================
+
+  # --- ECR Repository ---
+
+  ScannerAppECRRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub scanner-app-${AWS::StackName}
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      ImageTagMutability: MUTABLE
+      Tags:
+        - Key: Name
+          Value: !Sub ScannerAppECR-${AWS::StackName}
+
+  # --- S3 Buckets ---
+  # Bucket names are auto-generated by CloudFormation to ensure valid
+  # lowercase naming regardless of stack name. Actual names appear in Outputs.
+
+  IngestBucket:
+    DependsOn: SQSQueuePolicy
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:*
+            Queue: !GetAtt FileScanQueue.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub IngestBucket-${AWS::StackName}
+        - Key: Purpose
+          Value: file-scan-ingest
+
+  CleanBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub CleanBucket-${AWS::StackName}
+        - Key: Purpose
+          Value: file-scan-clean
+
+  QuarantineBucket:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub QuarantineBucket-${AWS::StackName}
+        - Key: Purpose
+          Value: file-scan-quarantine
+
+  # --- SQS Queues ---
+
+  FileScanDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub file-scan-dlq-${AWS::StackName}
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub FileScanDLQ-${AWS::StackName}
+
+  FileScanQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub file-scan-queue-${AWS::StackName}
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 345600
+      ReceiveMessageWaitTimeSeconds: 20
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FileScanDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Name
+          Value: !Sub FileScanQueue-${AWS::StackName}
+
+  # Allow the ingest bucket to send event notifications to the queue.
+  # This must be created BEFORE the bucket notification configuration
+  # (IngestBucket DependsOn SQSQueuePolicy).
+  SQSQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref FileScanQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowS3Notification
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt FileScanQueue.Arn
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  # --- Scanner App IAM Role (Pod Identity) ---
+  #
+  # The scanner application pod uses this role to:
+  #   - Poll SQS for new file events
+  #   - Download files from the ingest bucket
+  #   - Copy clean files to the clean bucket
+  #   - Copy malicious files to the quarantine bucket
+  #   - Delete processed files from the ingest bucket
+  #   - Delete processed messages from the SQS queue
+
+  ScannerAppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ScannerAppRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: ScannerAppPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: SQSPoll
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource: !GetAtt FileScanQueue.Arn
+              - Sid: S3IngestRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:DeleteObject
+                Resource: !Sub ${IngestBucket.Arn}/*
+              - Sid: S3CleanWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub ${CleanBucket.Arn}/*
+              - Sid: S3QuarantineWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub ${QuarantineBucket.Arn}/*
+              - Sid: SecretsManagerApiKey
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref V1FSApiKeySecret
+      Tags:
+        - Key: Name
+          Value: !Sub ScannerAppRole-${AWS::StackName}
+
+  # Bind the scanner app IAM role to its K8s service account.
+  # The scanner app Deployment should use serviceAccountName: scanner-app
+  # in the visionone-filesecurity namespace.
+  ScannerAppPodIdentity:
+    DependsOn: PodIdentityAgentAddon
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !Sub EKSCluster-${AWS::StackName}
+      Namespace: visionone-filesecurity
+      ServiceAccount: scanner-app
+      RoleArn: !GetAtt ScannerAppRole.Arn
+
+  # ================================================================
+  #  OUTPUTS
+  # ================================================================
+
+Outputs:
+  ClusterName:
+    Description: EKS cluster name
+    Value: !Ref EKSCluster
+  ClusterEndpoint:
+    Description: EKS cluster API endpoint
+    Value: !GetAtt EKSCluster.Endpoint
+  BastionPublicIP:
+    Description: Bastion host public IP
+    Value: !GetAtt Bastion.PublicIp
+  VPCId:
+    Description: VPC ID
+    Value: !Ref BaseVPC
+  PrivateSubnet1Id:
+    Description: Private subnet 1
+    Value: !Ref PrivateSubnet1
+  PrivateSubnet2Id:
+    Description: Private subnet 2
+    Value: !Ref PrivateSubnet2
+  NodeRoleArn:
+    Description: EKS node instance role ARN
+    Value: !GetAtt NodeInstanceRole.Arn
+  RegistrationTokenSecretArn:
+    Description: Secrets Manager ARN for the V1FS registration token
+    Value: !Ref V1FSRegistrationSecret
+  ApiKeySecretArn:
+    Description: Secrets Manager ARN for the V1FS API key
+    Value: !Ref V1FSApiKeySecret
+  BastionKeyPairId:
+    Description: EC2 KeyPair ID (private key stored in SSM Parameter Store)
+    Value: !GetAtt BastionKeyPair.KeyPairId
+  BastionKeySSMParameter:
+    Description: SSM Parameter Store path for the private key
+    Value: !Sub /ec2/keypair/${BastionKeyPair.KeyPairId}
+  IngestBucketName:
+    Description: S3 bucket for incoming files to scan
+    Value: !Ref IngestBucket
+  CleanBucketName:
+    Description: S3 bucket for files that passed scanning
+    Value: !Ref CleanBucket
+  QuarantineBucketName:
+    Description: S3 bucket for malicious files
+    Value: !Ref QuarantineBucket
+  FileScanQueueUrl:
+    Description: SQS queue URL for S3 file events
+    Value: !Ref FileScanQueue
+  FileScanQueueArn:
+    Description: SQS queue ARN for S3 file events
+    Value: !GetAtt FileScanQueue.Arn
+  FileScanDLQUrl:
+    Description: SQS dead letter queue URL for failed processing
+    Value: !Ref FileScanDLQ
+  ScannerAppRoleArn:
+    Description: IAM role ARN for the scanner app pod (via Pod Identity)
+    Value: !GetAtt ScannerAppRole.Arn
+  ECRRepoUrl:
+    Description: ECR repository URL for the scanner app container image
+    Value: !GetAtt ScannerAppECRRepo.RepositoryUri

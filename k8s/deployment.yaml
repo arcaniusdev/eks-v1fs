@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scanner-app
+  namespace: visionone-filesecurity
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scanner-app
+  template:
+    metadata:
+      labels:
+        app: scanner-app
+    spec:
+      serviceAccountName: scanner-app
+      terminationGracePeriodSeconds: 300
+      containers:
+        - name: scanner
+          image: <ECR_REPO_URL>:latest
+          envFrom:
+            - configMapRef:
+                name: scanner-app-config
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"

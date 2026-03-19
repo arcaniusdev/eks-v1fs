@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scanner-app-config
+  namespace: visionone-filesecurity
+data:
+  SQS_QUEUE_URL: "<from FileScanQueueUrl output>"
+  S3_INGEST_BUCKET: "<from IngestBucketName output>"
+  S3_QUARANTINE_BUCKET: "<from QuarantineBucketName output>"
+  S3_CLEAN_BUCKET: "<from CleanBucketName output>"
+  V1FS_SERVER_ADDR: "my-release-visionone-filesecurity-scanner:50051"
+  V1FS_API_KEY_SECRET_ARN: "<from ApiKeySecretArn output>"
+  AWS_REGION: "us-east-1"
+  LOG_LEVEL: "INFO"
+  MAX_CONCURRENT_SCANS: "20"
