@@ -5,6 +5,7 @@ import signal
 import urllib.parse
 from contextlib import AsyncExitStack
 
+import boto3
 import amaas.grpc.aio
 from aiobotocore.session import AioSession
 from botocore.exceptions import ClientError
@@ -31,14 +32,11 @@ class ScannerApp:
         self.sqs_client = await self._exit_stack.enter_async_context(
             self.session.create_client("sqs", region_name=self.config.aws_region)
         )
-        sm_client = await self._exit_stack.enter_async_context(
-            self.session.create_client(
-                "secretsmanager", region_name=self.config.aws_region
-            )
-        )
-
         logger.info("Retrieving V1FS API key from Secrets Manager")
-        resp = await sm_client.get_secret_value(
+        sm_client = boto3.client(
+            "secretsmanager", region_name=self.config.aws_region
+        )
+        resp = sm_client.get_secret_value(
             SecretId=self.config.v1fs_api_key_secret_arn
         )
         api_key = resp["SecretString"]
