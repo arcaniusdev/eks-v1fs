@@ -1,12 +1,12 @@
 # EKS Vision One File Security Scanner
 
-Automated malware scanning pipeline on AWS. Files uploaded to an S3 bucket are automatically scanned using [Trend Micro Vision One File Security](https://www.trendmicro.com/en_us/business/products/network-security/file-security.html) and routed to a clean bucket or quarantine bucket based on the scan result.
+Automated malware scanning pipeline on AWS. Files uploaded to an S3 bucket are automatically scanned using [TrendAI Vision One File Security](https://www.trendmicro.com/en_us/business/products/network-security/file-security.html) and routed to a clean bucket or quarantine bucket based on the scan result.
 
 Everything deploys from a single CloudFormation template — the EKS cluster, networking, storage, queues, IAM, and the scanner application itself.
 
 ## What is Vision One File Security?
 
-Vision One File Security is Trend Micro's malware scanning service. It uses multiple detection engines — pattern matching, heuristics, and predictive machine learning (PML) — to identify threats in files of any type.
+Vision One File Security is TrendAI's malware scanning service. It uses multiple detection engines — pattern matching, heuristics, and predictive machine learning (PML) — to identify threats in files of any type.
 
 In this project, the scanner runs **inside the Kubernetes cluster** as a set of pods deployed via Helm. The scanner app communicates with these pods over gRPC to scan files, and the scanner pods phone home to the Vision One cloud for threat intelligence updates and to report results.
 
@@ -156,7 +156,7 @@ The scanner app pod gets AWS permissions automatically through [EKS Pod Identity
 
 ## Prerequisites
 
-You need two credentials from the [Trend Micro Vision One console](https://portal.xdr.trendmicro.com/):
+You need two credentials from the [TrendAI Vision One console](https://portal.xdr.trendmicro.com/):
 
 1. **Registration Token** — used by the scanner pods to register with Vision One. Generate this under **Cloud Security > File Security > Containerized Scanner > Get ready to deploy containerized scanner > Get registration token**.
 2. **API Key** — used by the scanner application to authenticate scan requests. Generate this under **Administration > API Keys > Add API Key** with the **"Run file scan via SDK"** permission.
