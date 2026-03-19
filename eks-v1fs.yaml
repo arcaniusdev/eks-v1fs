@@ -61,10 +61,6 @@ Mappings:
 
 Resources:
 
-  # ================================================================
-  #  1. VPC & NETWORKING
-  # ================================================================
-
   BaseVPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -75,8 +71,6 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub BaseVPC-${AWS::StackName}
-
-  # --- VPC Flow Logs (audit trail) ---
 
   VPCFlowLogRole:
     Type: AWS::IAM::Role
@@ -120,8 +114,6 @@ Resources:
       LogGroupName: !Ref VPCFlowLogGroup
       DeliverLogsPermissionArn: !GetAtt VPCFlowLogRole.Arn
 
-  # --- Internet Gateway ---
-
   IG:
     Type: AWS::EC2::InternetGateway
     Properties:
@@ -134,8 +126,6 @@ Resources:
     Properties:
       InternetGatewayId: !Ref IG
       VpcId: !Ref BaseVPC
-
-  # --- Public Subnets ---
 
   PublicSubnet1:
     Type: AWS::EC2::Subnet
@@ -163,8 +153,6 @@ Resources:
         - Key: Name
           Value: !Sub PublicSubnet2-${AWS::StackName}
 
-  # --- Private Subnets ---
-
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -190,8 +178,6 @@ Resources:
           Value: "1"
         - Key: Name
           Value: !Sub PrivateSubnet2-${AWS::StackName}
-
-  # --- NAT Gateways (one per AZ) ---
 
   NGWEIP1:
     Type: AWS::EC2::EIP
@@ -231,8 +217,6 @@ Resources:
         - Key: Name
           Value: !Sub NGW2-${AWS::StackName}
 
-  # --- Route Tables ---
-
   PublicRT1:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -265,8 +249,6 @@ Resources:
         - Key: Name
           Value: !Sub PrivateRT2-${AWS::StackName}
 
-  # --- Routes ---
-
   PublicRoute1:
     DependsOn: VPCIG
     Type: AWS::EC2::Route
@@ -297,8 +279,6 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       NatGatewayId: !Ref NGW2
 
-  # --- Route Table Associations ---
-
   PublicSubnetRT1:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
@@ -322,10 +302,6 @@ Resources:
     Properties:
       RouteTableId: !Ref PrivateRT2
       SubnetId: !Ref PrivateSubnet2
-
-  # ================================================================
-  #  2. SECURITY GROUPS (least-privilege port access)
-  # ================================================================
 
   BastionSecGroup:
     Type: AWS::EC2::SecurityGroup
@@ -443,13 +419,6 @@ Resources:
       SourceSecurityGroupId: !Ref NodeSecGroup
       Description: Nodes to control plane HTTPS
 
-
-  # ================================================================
-  #  3. IAM ROLES
-  # ================================================================
-
-  # --- EKS Cluster Role ---
-
   EKSClusterRole:
     Type: AWS::IAM::Role
     Properties:
@@ -466,8 +435,6 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub EKSClusterRole-${AWS::StackName}
-
-  # --- Node Instance Role (least-privilege, no AdministratorAccess) ---
 
   NodeInstanceRole:
     Type: AWS::IAM::Role
@@ -501,8 +468,6 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub EKSNodeRole-${AWS::StackName}
-
-  # --- Bastion Role (scoped to EKS + Helm operations) ---
 
   BastionRole:
     Type: AWS::IAM::Role
@@ -555,15 +520,12 @@ Resources:
                 Action:
                   - sts:GetCallerIdentity
                 Resource: "*"
-              # aws cloudformation signal-resource (used by UserData trap)
-              # aws cloudformation describe-stacks (used by deploy scripts to read Outputs)
               - Sid: CFNAccess
                 Effect: Allow
                 Action:
                   - cloudformation:SignalResource
                   - cloudformation:DescribeStacks
                 Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*
-              # Read V1FS registration token from Secrets Manager
               - Sid: SecretsManagerRead
                 Effect: Allow
                 Action:
@@ -578,13 +540,6 @@ Resources:
     Properties:
       Roles:
         - !Ref BastionRole
-
-  # --- AWS LB Controller Role (used via Pod Identity, not IRSA) ---
-  #
-  # REPLACES: helm install aws-load-balancer-controller (from UserData)
-  # The Helm chart installed a controller without a proper IAM binding.
-  # Now the controller runs as a managed EKS addon with a dedicated
-  # IAM role bound through EKS Pod Identity Association.
 
   LBControllerRole:
     Type: AWS::IAM::Role
@@ -761,10 +716,6 @@ Resources:
         - Key: Name
           Value: !Sub LBControllerRole-${AWS::StackName}
 
-  # ================================================================
-  #  4. EKS CLUSTER
-  # ================================================================
-
   EKSCluster:
     DependsOn:
       - EKSClusterRole
@@ -799,12 +750,6 @@ Resources:
         - Key: Name
           Value: !Sub EKSCluster-${AWS::StackName}
 
-  # --- EKS Access Entry ---
-  #
-  # Grant the Bastion role K8s API access declaratively
-  # instead of relying on the aws-auth ConfigMap.
-  # Access policies are embedded in the AccessEntry via AccessPolicies.
-
   BastionAccessEntry:
     DependsOn: EKSCluster
     Type: AWS::EKS::AccessEntry
@@ -816,10 +761,6 @@ Resources:
         - PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
           AccessScope:
             Type: cluster
-
-  # ================================================================
-  #  5. EKS NODE GROUP
-  # ================================================================
 
   EKSLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
@@ -860,12 +801,6 @@ Resources:
       InstanceTypes:
         - !Ref NodeInstanceType
 
-  # ================================================================
-  #  6. DECLARATIVE EKS ADD-ONS
-  #     (replaces imperative CLI / Helm commands from UserData)
-  # ================================================================
-
-  # REPLACES: aws eks create-addon --addon-name vpc-cni
   CNIAddOn:
     DependsOn: EKSCluster
     Type: AWS::EKS::Addon
@@ -873,7 +808,6 @@ Resources:
       AddonName: vpc-cni
       ClusterName: !Sub EKSCluster-${AWS::StackName}
 
-  # REPLACES: aws eks create-addon --addon-name eks-pod-identity-agent
   PodIdentityAgentAddon:
     DependsOn: NodeGroup
     Type: AWS::EKS::Addon
@@ -881,11 +815,6 @@ Resources:
       AddonName: eks-pod-identity-agent
       ClusterName: !Sub EKSCluster-${AWS::StackName}
 
-  # CoreDNS — provides in-cluster DNS for pod name resolution.
-  # Pods use CoreDNS for both cluster-internal service names and
-  # external internet DNS (forwarded to VPC resolver at CIDR+2).
-  # EKS installs this as self-managed by default; declaring it
-  # as a managed addon keeps it updated automatically.
   CoreDNSAddon:
     DependsOn: NodeGroup
     Type: AWS::EKS::Addon
@@ -893,9 +822,6 @@ Resources:
       AddonName: coredns
       ClusterName: !Sub EKSCluster-${AWS::StackName}
 
-  # kube-proxy — maintains iptables/IPVS rules on each node so
-  # pods can reach ClusterIP services. Required for CoreDNS itself
-  # to be reachable by pods.
   KubeProxyAddon:
     DependsOn: EKSCluster
     Type: AWS::EKS::Addon
@@ -903,14 +829,6 @@ Resources:
       AddonName: kube-proxy
       ClusterName: !Sub EKSCluster-${AWS::StackName}
 
-  # REPLACES: helm install aws-load-balancer-controller eks/aws-load-balancer-controller
-  # NOTE: The LB controller is NOT an EKS managed addon — it must be installed
-  # via Helm (done in bastion UserData). However, the IAM role binding IS
-  # declarative via Pod Identity Association below.
-
-  # Bind the LB Controller IAM role to its K8s service account via Pod Identity.
-  # The bastion's UserData Helm install creates the service account; this
-  # association binds the IAM role to it for credential injection.
   LBControllerPodIdentity:
     DependsOn: PodIdentityAgentAddon
     Type: AWS::EKS::PodIdentityAssociation
@@ -919,8 +837,6 @@ Resources:
       Namespace: kube-system
       ServiceAccount: aws-load-balancer-controller
       RoleArn: !GetAtt LBControllerRole.Arn
-
-  # --- KEDA Operator Role (reads SQS queue depth for autoscaling) ---
 
   KedaOperatorRole:
     Type: AWS::IAM::Role
@@ -958,8 +874,6 @@ Resources:
       Namespace: keda
       ServiceAccount: keda-operator
       RoleArn: !GetAtt KedaOperatorRole.Arn
-
-  # --- Cluster Autoscaler Role (scales node group based on pending pods) ---
 
   ClusterAutoscalerRole:
     Type: AWS::IAM::Role
@@ -1010,15 +924,6 @@ Resources:
       ServiceAccount: cluster-autoscaler
       RoleArn: !GetAtt ClusterAutoscalerRole.Arn
 
-  # ================================================================
-  #  7. SECRETS MANAGER
-  #     (replaces plaintext registration token in UserData / kubectl)
-  # ================================================================
-
-  # REPLACES: passing ${RegistrationToken} directly into kubectl create secret
-  # The token is stored in Secrets Manager; the bastion reads it at deploy
-  # time to create the K8s secret without exposing the token in UserData.
-
   V1FSRegistrationSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
@@ -1039,19 +944,6 @@ Resources:
         - Key: Name
           Value: !Sub V1FSApiKey-${AWS::StackName}
 
-  # ================================================================
-  #  8. BASTION HOST
-  #     Responsible for:
-  #       - Tool installation (AWS CLI v2, Helm, kubectl, eksctl)
-  #       - kubeconfig setup
-  #       - K8s namespace and secrets for V1FS (reads token from Secrets Manager)
-  #       - LB controller Helm install
-  #       - V1FS Helm chart install (GPG-verified)
-  #     All steps run directly in UserData (no cfn-init/cfn-bootstrap).
-  #     A bash trap guarantees CloudFormation signaling on exit via
-  #     the AWS CLI, regardless of success or failure.
-  # ================================================================
-
   BastionKeyPair:
     Type: AWS::EC2::KeyPair
     Properties:
@@ -1067,8 +959,6 @@ Resources:
         Timeout: PT30M
         Count: 1
     DependsOn:
-      # Wait for Pod Identity association so the LB controller pods
-      # get IAM credentials immediately when they start.
       - LBControllerPodIdentity
     Properties:
       IamInstanceProfile: !Ref BastionInstanceProfile
@@ -1277,23 +1167,6 @@ Resources:
         - Key: Name
           Value: !Sub Bastion-${AWS::StackName}
 
-  # ================================================================
-  #  9. FILE SCANNING WORKFLOW (S3, SQS, Scanner App IAM)
-  #
-  #  Ingest bucket receives files and sends s3:ObjectCreated events
-  #  to SQS. The scanner app pod polls SQS, scans each file, and
-  #  routes to clean or quarantine bucket. After disposition, the
-  #  SQS message is deleted.
-  #
-  #  Ingest Bucket --[S3 Event]--> SQS Queue --> Scanner App Pod
-  #       |                                          |
-  #       +--- (malicious) --> Quarantine Bucket      |
-  #       +--- (clean) ------> Clean Bucket           |
-  #       +--- (delete from ingest) <-----------------+
-  # ================================================================
-
-  # --- ECR Repository ---
-
   ScannerAppECRRepo:
     Type: AWS::ECR::Repository
     Properties:
@@ -1303,13 +1176,10 @@ Resources:
       EncryptionConfiguration:
         EncryptionType: AES256
       ImageTagMutability: IMMUTABLE
+      EmptyOnDelete: true
       Tags:
         - Key: Name
           Value: !Sub ScannerAppECR-${AWS::StackName}
-
-  # --- S3 Buckets ---
-  # Bucket names are auto-generated by CloudFormation to ensure valid
-  # lowercase naming regardless of stack name. Actual names appear in Outputs.
 
   IngestBucket:
     DeletionPolicy: Retain
@@ -1412,9 +1282,6 @@ Resources:
         - Key: Name
           Value: !Sub FileScanQueue-${AWS::StackName}
 
-  # Allow the ingest bucket to send event notifications to the queue.
-  # This must be created BEFORE the bucket notification configuration
-  # (IngestBucket DependsOn SQSQueuePolicy).
   SQSQueuePolicy:
     Type: AWS::SQS::QueuePolicy
     Properties:
@@ -1432,16 +1299,6 @@ Resources:
             Condition:
               StringEquals:
                 aws:SourceAccount: !Ref AWS::AccountId
-
-  # --- Scanner App IAM Role (Pod Identity) ---
-  #
-  # The scanner application pod uses this role to:
-  #   - Poll SQS for new file events
-  #   - Download files from the ingest bucket
-  #   - Copy clean files to the clean bucket
-  #   - Copy malicious files to the quarantine bucket
-  #   - Delete processed files from the ingest bucket
-  #   - Delete processed messages from the SQS queue
 
   ScannerAppRole:
     Type: AWS::IAM::Role
@@ -1496,9 +1353,6 @@ Resources:
         - Key: Name
           Value: !Sub ScannerAppRole-${AWS::StackName}
 
-  # Bind the scanner app IAM role to its K8s service account.
-  # The scanner app Deployment should use serviceAccountName: scanner-app
-  # in the visionone-filesecurity namespace.
   ScannerAppPodIdentity:
     DependsOn: PodIdentityAgentAddon
     Type: AWS::EKS::PodIdentityAssociation
@@ -1507,10 +1361,6 @@ Resources:
       Namespace: visionone-filesecurity
       ServiceAccount: scanner-app
       RoleArn: !GetAtt ScannerAppRole.Arn
-
-  # ================================================================
-  #  OUTPUTS
-  # ================================================================
 
 Outputs:
   ClusterName:
