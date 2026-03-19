@@ -12,6 +12,8 @@ In this project, the scanner runs **inside the Kubernetes cluster** as a set of 
 
 This means files are scanned locally within your VPC — they are never uploaded to an external service.
 
+For more information, see the [Vision One File Security Helm chart repository](https://trendmicro.github.io/visionone-file-security-helm/).
+
 ## How It Works
 
 ```
