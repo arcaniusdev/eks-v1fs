@@ -63,7 +63,7 @@ The `eks-v1fs.yaml` template creates everything:
 |---|---|
 | **VPC** | `10.2.0.0/16` with public and private subnets across 2 AZs |
 | **NAT Gateways** | One per AZ — pods in private subnets reach the internet for threat intelligence updates |
-| **EKS Cluster** | Private API endpoint, full audit logging, managed addons (vpc-cni, CoreDNS, kube-proxy, Pod Identity Agent) |
+| **EKS Cluster** | Private API endpoint, full audit logging, managed addons (vpc-cni, CoreDNS, kube-proxy, Pod Identity Agent, EBS CSI Driver, EFS CSI Driver) |
 | **Node Group** | `r7i.large` instances (2 vCPU, 16 GiB) in private subnets, min 2 / max 10 — consistent CPU for sustained scanning |
 | **ECR Repository** | Hosts the scanner app container image, scan-on-push enabled |
 | **S3 Buckets** | Ingest (with event notifications), Clean, Quarantine — all have `DeletionPolicy: Retain` to preserve files when the stack is deleted |
@@ -74,6 +74,7 @@ The `eks-v1fs.yaml` template creates everything:
 | **Metrics Server** | Provides CPU/memory metrics for V1FS scanner HPA |
 | **KEDA** | Scales scanner app pods based on SQS queue depth |
 | **Cluster Autoscaler** | Adds/removes EKS nodes when pods can't be scheduled or nodes are underutilized |
+| **EFS Filesystem** | Encrypted shared storage (ReadWriteMany) for V1FS scanner ephemeral volume across multiple pods |
 | **Bastion Host** | Provisions the cluster, installs Helm charts, builds and deploys the scanner app |
 
 ### Scanner Application
@@ -86,6 +87,17 @@ A Python asyncio application optimized for high throughput:
 - **Visibility heartbeat** — extends SQS message visibility during long scans to prevent duplicate processing
 - **Graceful shutdown** — handles SIGTERM to drain in-flight scans before exiting (5-minute grace period)
 - **Predictive Machine Learning** — PML can be enabled for advanced threat detection (requires account-level PML support)
+
+### Database & Storage
+
+The Vision One File Security management service uses a **PostgreSQL database** deployed as a Kubernetes StatefulSet within the cluster. The database stores scan metadata, configuration, and operational state.
+
+- **PostgreSQL StatefulSet** — deployed by the V1FS Helm chart with `dbEnabled: true`
+- **EBS gp3 storage** — 100Gi encrypted persistent volume for database data, provisioned by the EBS CSI Driver
+- **EFS shared storage** — 100Gi ReadWriteMany volume for scanner ephemeral files, provisioned by the EFS CSI Driver. This allows multiple scanner pods (scaled by HPA) to share temporary scan storage across different nodes
+- **StorageClasses** — `gp3` (EBS, block storage, ReadWriteOnce) for the database and `efs-sc` (EFS, network filesystem, ReadWriteMany) for scanner ephemeral volumes
+
+The database configuration is immutable after initial deployment — changing storage class or size requires deleting and recreating the StatefulSet.
 
 ### Autoscaling
 
@@ -292,6 +304,7 @@ cd /opt/eks-v1fs && git pull
 - ECR repository has scan-on-push enabled for container vulnerability scanning
 - IMDSv2 is enforced on all nodes
 - EBS volumes are encrypted
+- EFS filesystem is encrypted at rest and in transit (TLS mount option)
 - VPC Flow Logs capture all network traffic
 - EKS audit logging is enabled for all control plane components
 - IAM policies use least-privilege, resource-scoped permissions

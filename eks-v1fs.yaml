@@ -419,6 +419,21 @@ Resources:
       SourceSecurityGroupId: !Ref NodeSecGroup
       Description: Nodes to control plane HTTPS
 
+  EFSSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref BaseVPC
+      GroupDescription: EFS mount targets - NFS access from EKS nodes
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref NodeSecGroup
+          Description: NFS from EKS worker nodes
+      Tags:
+        - Key: Name
+          Value: !Sub EFSSecGroup-${AWS::StackName}
+
   EKSClusterRole:
     Type: AWS::IAM::Role
     Properties:
@@ -540,6 +555,62 @@ Resources:
     Properties:
       Roles:
         - !Ref BastionRole
+
+  EBSCSIDriverRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub EBSCSIDriverRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+      Tags:
+        - Key: Name
+          Value: !Sub EBSCSIDriverRole-${AWS::StackName}
+
+  EFSCSIDriverRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub EFSCSIDriverRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: EFSCSIDriverPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EFSAccess
+                Effect: Allow
+                Action:
+                  - elasticfilesystem:DescribeAccessPoints
+                  - elasticfilesystem:DescribeFileSystems
+                  - elasticfilesystem:DescribeMountTargets
+                  - elasticfilesystem:CreateAccessPoint
+                  - elasticfilesystem:DeleteAccessPoint
+                  - elasticfilesystem:TagResource
+                Resource: "*"
+              - Sid: EC2Describe
+                Effect: Allow
+                Action:
+                  - ec2:DescribeAvailabilityZones
+                Resource: "*"
+      Tags:
+        - Key: Name
+          Value: !Sub EFSCSIDriverRole-${AWS::StackName}
 
   LBControllerRole:
     Type: AWS::IAM::Role
@@ -829,6 +900,42 @@ Resources:
       AddonName: kube-proxy
       ClusterName: !Sub EKSCluster-${AWS::StackName}
 
+  EBSCSIDriverAddon:
+    DependsOn:
+      - NodeGroup
+      - EBSCSIDriverPodIdentity
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: aws-ebs-csi-driver
+      ClusterName: !Sub EKSCluster-${AWS::StackName}
+
+  EBSCSIDriverPodIdentity:
+    DependsOn: PodIdentityAgentAddon
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !Sub EKSCluster-${AWS::StackName}
+      Namespace: kube-system
+      ServiceAccount: ebs-csi-controller-sa
+      RoleArn: !GetAtt EBSCSIDriverRole.Arn
+
+  EFSCSIDriverAddon:
+    DependsOn:
+      - NodeGroup
+      - EFSCSIDriverPodIdentity
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: aws-efs-csi-driver
+      ClusterName: !Sub EKSCluster-${AWS::StackName}
+
+  EFSCSIDriverPodIdentity:
+    DependsOn: PodIdentityAgentAddon
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !Sub EKSCluster-${AWS::StackName}
+      Namespace: kube-system
+      ServiceAccount: efs-csi-controller-sa
+      RoleArn: !GetAtt EFSCSIDriverRole.Arn
+
   LBControllerPodIdentity:
     DependsOn: PodIdentityAgentAddon
     Type: AWS::EKS::PodIdentityAssociation
@@ -960,6 +1067,10 @@ Resources:
         Count: 1
     DependsOn:
       - LBControllerPodIdentity
+      - EBSCSIDriverAddon
+      - EFSCSIDriverAddon
+      - EFSMountTarget1
+      - EFSMountTarget2
     Properties:
       IamInstanceProfile: !Ref BastionInstanceProfile
       ImageId: !FindInMap
@@ -1103,6 +1214,40 @@ Resources:
             -n keda --create-namespace \
             --wait --timeout 5m
 
+          # ---- Create gp3 StorageClass for V1FS database ----
+          kubectl wait --for=condition=ready pod -l app=ebs-csi-controller -n kube-system --timeout=300s
+          cat <<EOFGP3 | kubectl apply -f -
+          apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: gp3
+          provisioner: ebs.csi.aws.com
+          parameters:
+            type: gp3
+            encrypted: "true"
+          volumeBindingMode: WaitForFirstConsumer
+          allowVolumeExpansion: true
+          EOFGP3
+
+          # ---- Create EFS StorageClass for V1FS scanner ephemeral volume ----
+          kubectl wait --for=condition=ready pod -l app=efs-csi-controller -n kube-system --timeout=300s
+          cat <<EOFSC | kubectl apply -f -
+          apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: efs-sc
+          provisioner: efs.csi.aws.com
+          parameters:
+            provisioningMode: efs-ap
+            fileSystemId: ${EFSFileSystem}
+            directoryPerms: "700"
+            uid: "0"
+            gid: "0"
+            basePath: "/scanner"
+          mountOptions:
+            - tls
+          EOFSC
+
           # ---- Install Vision One File Security via Helm (GPG-verified) ----
           helm repo add visionone-filesecurity https://trendmicro.github.io/visionone-file-security-helm/
           helm repo update
@@ -1124,7 +1269,15 @@ Resources:
             --set scanner.autoscaling.targetCPUUtilizationPercentage=70 \
             --set scanner.autoscaling.targetMemoryUtilizationPercentage=80 \
             --set scanner.resources.requests.cpu=1200m \
-            --set scanner.resources.requests.memory=4Gi
+            --set scanner.resources.requests.memory=4Gi \
+            --set visiononeFilesecurity.management.dbEnabled=true \
+            --set databaseContainer.storageClass.create=false \
+            --set databaseContainer.persistence.storageClassName=gp3 \
+            --set databaseContainer.persistence.size=100Gi \
+            --set scanner.ephemeralVolume.enabled=true \
+            --set scanner.ephemeralVolume.storageClass=efs-sc \
+            --set scanner.ephemeralVolume.accessMode=ReadWriteMany \
+            --set scanner.ephemeralVolume.size=100Gi
 
           # ---- Install Docker (needed to build scanner app image) ----
           apt-get install -y ca-certificates gnupg lsb-release
@@ -1166,6 +1319,32 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub Bastion-${AWS::StackName}
+
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: elastic
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub EFS-${AWS::StackName}
+
+  EFSMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroups:
+        - !Ref EFSSecGroup
+
+  EFSMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroups:
+        - !Ref EFSSecGroup
 
   ScannerAppECRRepo:
     Type: AWS::ECR::Repository
@@ -1254,8 +1433,6 @@ Resources:
           Value: !Sub QuarantineBucket-${AWS::StackName}
         - Key: Purpose
           Value: file-scan-quarantine
-
-  # --- SQS Queues ---
 
   FileScanDLQ:
     Type: AWS::SQS::Queue
@@ -1426,3 +1603,6 @@ Outputs:
   ClusterAutoscalerRoleArn:
     Description: IAM role ARN for the Cluster Autoscaler
     Value: !GetAtt ClusterAutoscalerRole.Arn
+  EFSFileSystemId:
+    Description: EFS filesystem ID for scanner ephemeral volume
+    Value: !Ref EFSFileSystem
