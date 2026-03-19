@@ -394,7 +394,7 @@ Resources:
       GroupId: !Ref NodeSecGroup
       IpProtocol: "-1"
       SourceSecurityGroupId: !Ref NodeSecGroup
-      Description: Node-to-node (all protocols — pod networking, DNS, etc.)
+      Description: Node-to-node (all protocols - pod networking, DNS, etc.)
 
   NodeSecGroupFromControlPlane:
     Type: AWS::EC2::SecurityGroupIngress
