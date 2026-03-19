@@ -28,7 +28,7 @@ Parameters:
     Default: 2
     MinValue: 2
     MaxValue: 10
-  PmlEnabled:
+  PMLEnabled:
     Type: String
     Description: Enable Predictive Machine Learning (PML) for file scanning. Requires PML support on the Vision One account.
     Default: "false"
@@ -1262,7 +1262,7 @@ Resources:
           export S3_CLEAN_BUCKET="${CleanBucket}"
           export S3_QUARANTINE_BUCKET="${QuarantineBucket}"
           export V1FS_API_KEY_SECRET_ARN="${V1FSApiKeySecret}"
-          export PML_ENABLED="${PmlEnabled}"
+          export PML_ENABLED="${PMLEnabled}"
 
           git clone https://github.com/arcaniusdev/eks-v1fs.git /opt/eks-v1fs
           chmod +x /opt/eks-v1fs/scripts/*.sh
