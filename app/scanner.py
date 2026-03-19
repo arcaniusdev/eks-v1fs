@@ -45,7 +45,7 @@ class ScannerApp:
             "Initializing V1FS async gRPC handle at %s",
             self.config.v1fs_server_addr,
         )
-        self.scan_handle = await amaas.grpc.aio.init(
+        self.scan_handle = amaas.grpc.aio.init(
             self.config.v1fs_server_addr, api_key, False
         )
 
