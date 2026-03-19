@@ -47,7 +47,7 @@ class ScannerApp:
             "Initializing V1FS async gRPC handle at %s",
             self.config.v1fs_server_addr,
         )
-        self.scan_handle = amaas.grpc.aio.init(
+        self.scan_handle = await amaas.grpc.aio.init(
             self.config.v1fs_server_addr, api_key, False
         )
 
@@ -206,7 +206,7 @@ class ScannerApp:
         if self.in_flight:
             await asyncio.gather(*self.in_flight, return_exceptions=True)
         if self.scan_handle:
-            amaas.grpc.aio.quit(self.scan_handle)
+            await amaas.grpc.aio.quit(self.scan_handle)
         await self._exit_stack.aclose()
         logger.info("Shutdown complete")
 
