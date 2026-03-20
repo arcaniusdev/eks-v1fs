@@ -286,7 +286,7 @@ scripts/
 
 ## Manual Re-deployment
 
-If you need to update the scanner app after the initial deployment, SSH into the bastion and run:
+If you need to update the scanner app after the initial deployment, connect to the bastion via Session Manager and run:
 
 ```bash
 export CFN_STACK_NAME=my-scanner
