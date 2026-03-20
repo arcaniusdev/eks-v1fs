@@ -289,22 +289,19 @@ scripts/
   deploy.sh                Template ConfigMap from stack outputs and apply k8s manifests
 ```
 
-## Manual Re-deployment
+## Redeploying the Scanner App
 
-If you need to update the scanner app after the initial deployment, connect to the bastion via Session Manager and run:
+To update the custom scanner-app code (Python application in `app/`), connect to the bastion via Session Manager and run:
 
 ```bash
+cd /opt/eks-v1fs && git pull
 export CFN_STACK_NAME=my-scanner
 export AWS_REGION=us-east-1
 /opt/eks-v1fs/scripts/build-and-push.sh
 /opt/eks-v1fs/scripts/deploy.sh
 ```
 
-Or pull the latest code first:
-
-```bash
-cd /opt/eks-v1fs && git pull
-```
+This rebuilds the Docker image, pushes it to ECR, and re-applies the k8s manifests. It does **not** update the V1FS scanner — see [Updating the V1FS Scanner](#updating-the-v1fs-scanner) for that.
 
 ## Updating the V1FS Scanner
 
