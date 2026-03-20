@@ -64,15 +64,15 @@ The `eks-v1fs.yaml` template creates everything:
 | **VPC** | `10.2.0.0/16` with public and private subnets across 2 AZs |
 | **NAT Gateways** | One per AZ — pods in private subnets reach the internet for threat intelligence updates |
 | **EKS Cluster** | Private API endpoint, full audit logging, managed addons (vpc-cni, CoreDNS, kube-proxy, Pod Identity Agent, EBS CSI Driver, EFS CSI Driver) |
-| **Node Group** | `r7i.large` instances (2 vCPU, 16 GiB) in private subnets, min 2 / max 10 — consistent CPU for sustained scanning |
+| **Node Group** | `r7i.large` instances (2 vCPU, 16 GiB) in private subnets, min 2 / max 200 — consistent CPU for sustained scanning |
 | **ECR Repository** | Hosts the scanner app container image, scan-on-push enabled |
 | **S3 Buckets** | Ingest (with event notifications), Clean, Quarantine — all have `DeletionPolicy: Retain` to preserve files when the stack is deleted |
-| **SQS Queues** | Main queue (300s visibility timeout, 20s long polling) + Dead Letter Queue |
+| **SQS Queues** | Main queue (600s visibility timeout, 20s long polling) + Dead Letter Queue |
 | **IAM Roles** | Least-privilege roles for nodes, bastion, scanner app, KEDA operator, and Cluster Autoscaler |
 | **Pod Identity** | Binds IAM roles to Kubernetes service accounts — no access keys needed |
 | **Secrets Manager** | Stores the V1FS registration token and API key |
-| **Metrics Server** | Provides CPU/memory metrics for V1FS scanner HPA |
-| **KEDA** | Scales scanner app pods based on SQS queue depth |
+| **Metrics Server** | Provides CPU/memory metrics for cluster monitoring |
+| **KEDA** | Scales both scanner-app and V1FS scanner pods based on SQS queue depth |
 | **Cluster Autoscaler** | Adds/removes EKS nodes when pods can't be scheduled or nodes are underutilized |
 | **EFS Filesystem** | Encrypted shared storage (ReadWriteMany) for V1FS scanner ephemeral volume across multiple pods |
 | **Bastion Host** | Provisions the cluster, installs Helm charts, builds and deploys the scanner app |
@@ -104,7 +104,7 @@ The database configuration is immutable after initial deployment — changing st
 
 The default instance type, `r7i.large` (2 vCPU, 16 GiB memory), is deliberately chosen for memory-intensive scanning workloads. The R7i family provides consistent, non-burstable CPU performance backed by 4th Generation Intel Xeon processors — unlike burstable T-series instances that throttle under sustained load. The 8:1 memory-to-vCPU ratio ensures scanner pods have ample headroom to hold multiple large files in memory simultaneously without triggering OOM kills.
 
-Each node fits 2 V1FS scanner pods (800m CPU / 4Gi memory each) alongside scanner-app pods, maximizing pod density without resource contention.
+Each node fits 2 V1FS scanner pods (800m CPU / 2Gi memory each) alongside scanner-app pods, maximizing pod density without resource contention.
 
 ### Autoscaling
 
@@ -162,7 +162,7 @@ Cluster Autoscaler provisions nodes to fit all pods (up to 200 nodes)
 Queue empty → KEDA scales pods back down → Autoscaler removes idle nodes
 ```
 
-KEDA and the Cluster Autoscaler get their AWS permissions through Pod Identity — KEDA reads SQS queue metrics, the autoscaler manages the Auto Scaling Group. No access keys are involved. The Metrics Server provides CPU/memory metrics to HPA for the V1FS scanner scaling.
+KEDA and the Cluster Autoscaler get their AWS permissions through Pod Identity — KEDA reads SQS queue metrics, the autoscaler manages the Auto Scaling Group. No access keys are involved.
 
 ### How Credentials Work
 
@@ -196,7 +196,7 @@ Optional parameters:
 | **PrimaryAZ** | `us-east-1a` | Availability Zone 1 |
 | **SecondaryAZ** | `us-east-1b` | Availability Zone 2 |
 | **NodeInstanceType** | `r7i.large` | EC2 instance type for EKS worker nodes |
-| **DesiredCapacity** | `2` | Number of EKS worker nodes (2–10) |
+| **DesiredCapacity** | `2` | Number of EKS worker nodes (2–100) |
 | **PMLEnabled** | `false` | Enable Predictive Machine Learning scanning (requires account support) |
 
 You don't need to clone the repo. The bastion host UserData automatically:
