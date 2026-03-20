@@ -543,6 +543,14 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Ref V1FSRegistrationSecret
+              - Sid: S3IngestWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt IngestBucket.Arn
+                  - !Sub ${IngestBucket.Arn}/*
       Tags:
         - Key: Name
           Value: !Sub BastionRole-${AWS::StackName}
