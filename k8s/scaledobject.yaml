@@ -19,7 +19,7 @@ spec:
     kind: Deployment
   minReplicaCount: 1
   maxReplicaCount: 100
-  pollingInterval: 15
+  pollingInterval: 10
   cooldownPeriod: 90
   triggers:
     - type: aws-sqs-queue
@@ -42,13 +42,13 @@ spec:
     kind: Deployment
   minReplicaCount: 1
   maxReplicaCount: 100
-  pollingInterval: 15
+  pollingInterval: 10
   cooldownPeriod: 90
   triggers:
     - type: aws-sqs-queue
       metadata:
         queueURL: "<SQS_QUEUE_URL>"
-        queueLength: "200"
+        queueLength: "50"
         awsRegion: "<AWS_REGION>"
         scaleOnInFlight: "true"
       authenticationRef:
