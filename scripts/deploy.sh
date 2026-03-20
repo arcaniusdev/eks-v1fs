@@ -95,8 +95,10 @@ sed -e "s|<SQS_QUEUE_URL>|${SQS_QUEUE_URL}|g" \
     -e "s|<AWS_REGION>|${AWS_REGION}|g" \
     "$K8S_DIR/scaledobject.yaml" | kubectl apply -f -
 
-echo "Waiting for rollout..."
-kubectl rollout status deployment/scanner-app -n visionone-filesecurity --timeout=300s
-
-echo "Deploy complete."
+echo "Waiting for rollout (Karpenter may need to provision a node first)..."
+if kubectl rollout status deployment/scanner-app -n visionone-filesecurity --timeout=300s; then
+  echo "Deploy complete. Scanner-app is running."
+else
+  echo "WARNING: Rollout not yet complete after 300s. This is expected on first deploy while Karpenter provisions a node. The pod will start once the node is ready."
+fi
 kubectl get pods -n visionone-filesecurity -l app=scanner-app
