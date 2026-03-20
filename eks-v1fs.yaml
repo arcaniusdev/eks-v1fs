@@ -1009,152 +1009,96 @@ Resources:
       Policies:
         - PolicyName: KarpenterControllerPolicy
           PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: AllowScopedEC2InstanceAccessActions
-                Effect: Allow
-                Action:
-                  - ec2:RunInstances
-                  - ec2:CreateFleet
-                Resource:
-                  - !Sub arn:aws:ec2:${AWS::Region}::image/*
-                  - !Sub arn:aws:ec2:${AWS::Region}::snapshot/*
-                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*
-                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*
-                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:launch-template/*
-              - Sid: AllowScopedEC2LaunchTemplateAccessActions
-                Effect: Allow
-                Action:
-                  - ec2:RunInstances
-                  - ec2:CreateFleet
-                Resource:
-                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:fleet/*
-                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
-                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:volume/*
-                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*
-                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:spot-instances-request/*
-                Condition:
-                  StringEquals:
-                    !Sub "aws:RequestTag/kubernetes.io/cluster/EKSCluster-${AWS::StackName}": owned
-                  StringLike:
-                    aws:RequestTag/karpenter.sh/nodepool: "*"
-              - Sid: AllowScopedEC2InstanceActionsWithTags
-                Effect: Allow
-                Action:
-                  - ec2:TerminateInstances
-                  - ec2:DeleteLaunchTemplate
-                Resource: "*"
-                Condition:
-                  StringEquals:
-                    !Sub "aws:ResourceTag/kubernetes.io/cluster/EKSCluster-${AWS::StackName}": owned
-                  StringLike:
-                    aws:ResourceTag/karpenter.sh/nodepool: "*"
-              - Sid: AllowScopedResourceCreationTagging
-                Effect: Allow
-                Action: ec2:CreateTags
-                Resource:
-                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
-                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:volume/*
-                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*
-                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:fleet/*
-                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:spot-instances-request/*
-                Condition:
-                  StringEquals:
-                    !Sub "aws:RequestTag/kubernetes.io/cluster/EKSCluster-${AWS::StackName}": owned
-                    ec2:CreateAction:
-                      - RunInstances
-                      - CreateFleet
-              - Sid: AllowScopedResourceTagging
-                Effect: Allow
-                Action: ec2:CreateTags
-                Resource: !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
-                Condition:
-                  StringEquals:
-                    !Sub "aws:ResourceTag/kubernetes.io/cluster/EKSCluster-${AWS::StackName}": owned
-                  StringLike:
-                    aws:ResourceTag/karpenter.sh/nodepool: "*"
-                  ForAllValues:StringEquals:
-                    aws:TagKeys:
-                      - karpenter.sh/nodeclaim
-                      - Name
-              - Sid: AllowScopedDeletion
-                Effect: Allow
-                Action:
-                  - ec2:TerminateInstances
-                Resource: !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
-                Condition:
-                  StringLike:
-                    ec2:ResourceTag/karpenter.sh/nodepool: "*"
-              - Sid: AllowRegionalReadActions
-                Effect: Allow
-                Action:
-                  - ec2:DescribeAvailabilityZones
-                  - ec2:DescribeImages
-                  - ec2:DescribeInstances
-                  - ec2:DescribeInstanceTypeOfferings
-                  - ec2:DescribeInstanceTypes
-                  - ec2:DescribeLaunchTemplates
-                  - ec2:DescribeSecurityGroups
-                  - ec2:DescribeSubnets
-                Resource: "*"
-                Condition:
-                  StringEquals:
-                    aws:RequestedRegion: !Ref AWS::Region
-              - Sid: AllowSSMReadActions
-                Effect: Allow
-                Action: ssm:GetParameter
-                Resource: !Sub arn:aws:ssm:${AWS::Region}::parameter/aws/service/*
-              - Sid: AllowPricingReadActions
-                Effect: Allow
-                Action: pricing:GetProducts
-                Resource: "*"
-              - Sid: AllowPassingInstanceRole
-                Effect: Allow
-                Action: iam:PassRole
-                Resource: !GetAtt NodeInstanceRole.Arn
-                Condition:
-                  StringEquals:
-                    iam:PassedToService: ec2.amazonaws.com
-              - Sid: AllowScopedInstanceProfileActions
-                Effect: Allow
-                Action:
-                  - iam:AddRoleToInstanceProfile
-                  - iam:RemoveRoleFromInstanceProfile
-                  - iam:DeleteInstanceProfile
-                Resource: "*"
-                Condition:
-                  StringEquals:
-                    !Sub "aws:ResourceTag/kubernetes.io/cluster/EKSCluster-${AWS::StackName}": owned
-                  StringLike:
-                    aws:ResourceTag/karpenter.sh/nodepool: "*"
-              - Sid: AllowInstanceProfileCreationActions
-                Effect: Allow
-                Action: iam:CreateInstanceProfile
-                Resource: "*"
-                Condition:
-                  StringEquals:
-                    !Sub "aws:RequestTag/kubernetes.io/cluster/EKSCluster-${AWS::StackName}": owned
-                  StringLike:
-                    aws:RequestTag/karpenter.sh/nodepool: "*"
-              - Sid: AllowInstanceProfileTagActions
-                Effect: Allow
-                Action: iam:TagInstanceProfile
-                Resource: "*"
-                Condition:
-                  StringEquals:
-                    !Sub "aws:ResourceTag/kubernetes.io/cluster/EKSCluster-${AWS::StackName}": owned
-                    !Sub "aws:RequestTag/kubernetes.io/cluster/EKSCluster-${AWS::StackName}": owned
-                  StringLike:
-                    aws:ResourceTag/karpenter.sh/nodepool: "*"
-                    aws:RequestTag/karpenter.sh/nodepool: "*"
-              - Sid: AllowGetInstanceProfile
-                Effect: Allow
-                Action: iam:GetInstanceProfile
-                Resource: "*"
-              - Sid: AllowEKSActions
-                Effect: Allow
-                Action: eks:DescribeCluster
-                Resource: !Sub arn:aws:eks:${AWS::Region}:${AWS::AccountId}:cluster/EKSCluster-${AWS::StackName}
+            Fn::Sub:
+              - |
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [
+                    {
+                      "Sid": "AllowEC2Actions",
+                      "Effect": "Allow",
+                      "Action": [
+                        "ec2:RunInstances",
+                        "ec2:CreateFleet",
+                        "ec2:CreateTags",
+                        "ec2:TerminateInstances",
+                        "ec2:DeleteLaunchTemplate",
+                        "ec2:CreateLaunchTemplate",
+                        "ec2:DescribeAvailabilityZones",
+                        "ec2:DescribeImages",
+                        "ec2:DescribeInstances",
+                        "ec2:DescribeInstanceTypeOfferings",
+                        "ec2:DescribeInstanceTypes",
+                        "ec2:DescribeLaunchTemplates",
+                        "ec2:DescribeSecurityGroups",
+                        "ec2:DescribeSubnets",
+                        "ec2:DescribeSpotPriceHistory"
+                      ],
+                      "Resource": "*",
+                      "Condition": {
+                        "StringEquals": {
+                          "aws:RequestedRegion": "${AWS::Region}"
+                        }
+                      }
+                    },
+                    {
+                      "Sid": "AllowSSMReadActions",
+                      "Effect": "Allow",
+                      "Action": "ssm:GetParameter",
+                      "Resource": "arn:aws:ssm:${AWS::Region}::parameter/aws/service/*"
+                    },
+                    {
+                      "Sid": "AllowPricingReadActions",
+                      "Effect": "Allow",
+                      "Action": "pricing:GetProducts",
+                      "Resource": "*"
+                    },
+                    {
+                      "Sid": "AllowPassingInstanceRole",
+                      "Effect": "Allow",
+                      "Action": "iam:PassRole",
+                      "Resource": "${NodeRoleArn}",
+                      "Condition": {
+                        "StringEquals": {
+                          "iam:PassedToService": "ec2.amazonaws.com"
+                        }
+                      }
+                    },
+                    {
+                      "Sid": "AllowInstanceProfileActions",
+                      "Effect": "Allow",
+                      "Action": [
+                        "iam:CreateInstanceProfile",
+                        "iam:DeleteInstanceProfile",
+                        "iam:AddRoleToInstanceProfile",
+                        "iam:RemoveRoleFromInstanceProfile",
+                        "iam:TagInstanceProfile",
+                        "iam:GetInstanceProfile"
+                      ],
+                      "Resource": "*",
+                      "Condition": {
+                        "StringEquals": {
+                          "aws:RequestTag/kubernetes.io/cluster/${ClusterName}": "owned",
+                          "aws:ResourceTag/kubernetes.io/cluster/${ClusterName}": "owned"
+                        }
+                      }
+                    },
+                    {
+                      "Sid": "AllowInstanceProfileReadActions",
+                      "Effect": "Allow",
+                      "Action": "iam:GetInstanceProfile",
+                      "Resource": "*"
+                    },
+                    {
+                      "Sid": "AllowEKSActions",
+                      "Effect": "Allow",
+                      "Action": "eks:DescribeCluster",
+                      "Resource": "arn:aws:eks:${AWS::Region}:${AWS::AccountId}:cluster/${ClusterName}"
+                    }
+                  ]
+                }
+              - ClusterName: !Sub "EKSCluster-${AWS::StackName}"
+                NodeRoleArn: !GetAtt NodeInstanceRole.Arn
       Tags:
         - Key: Name
           Value: !Sub KarpenterControllerRole-${AWS::StackName}
