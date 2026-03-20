@@ -1268,11 +1268,7 @@ Resources:
           # with Vision One cloud on first startup)
           helm install my-release visionone-filesecurity/visionone-filesecurity \
             -n visionone-filesecurity \
-            --set scanner.autoscaling.enabled=true \
-            --set scanner.autoscaling.minReplicas=1 \
-            --set scanner.autoscaling.maxReplicas=100 \
-            --set scanner.autoscaling.targetCPUUtilizationPercentage=70 \
-            --set scanner.autoscaling.targetMemoryUtilizationPercentage=80 \
+            --set scanner.autoscaling.enabled=false \
             --set scanner.resources.requests.cpu=800m \
             --set scanner.resources.requests.memory=4Gi \
             --set visiononeFilesecurity.management.dbEnabled=true \
