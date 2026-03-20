@@ -1035,7 +1035,7 @@ Resources:
                   - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:spot-instances-request/*
                 Condition:
                   StringEquals:
-                    aws:RequestTag/kubernetes.io/cluster/${EKSCluster}: owned
+                    !Sub "aws:RequestTag/kubernetes.io/cluster/EKSCluster-${AWS::StackName}": owned
                   StringLike:
                     aws:RequestTag/karpenter.sh/nodepool: "*"
               - Sid: AllowScopedEC2InstanceActionsWithTags
@@ -1046,7 +1046,7 @@ Resources:
                 Resource: "*"
                 Condition:
                   StringEquals:
-                    aws:ResourceTag/kubernetes.io/cluster/${EKSCluster}: owned
+                    !Sub "aws:ResourceTag/kubernetes.io/cluster/EKSCluster-${AWS::StackName}": owned
                   StringLike:
                     aws:ResourceTag/karpenter.sh/nodepool: "*"
               - Sid: AllowScopedResourceCreationTagging
@@ -1060,7 +1060,7 @@ Resources:
                   - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:spot-instances-request/*
                 Condition:
                   StringEquals:
-                    aws:RequestTag/kubernetes.io/cluster/${EKSCluster}: owned
+                    !Sub "aws:RequestTag/kubernetes.io/cluster/EKSCluster-${AWS::StackName}": owned
                     ec2:CreateAction:
                       - RunInstances
                       - CreateFleet
@@ -1070,7 +1070,7 @@ Resources:
                 Resource: !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
                 Condition:
                   StringEquals:
-                    aws:ResourceTag/kubernetes.io/cluster/${EKSCluster}: owned
+                    !Sub "aws:ResourceTag/kubernetes.io/cluster/EKSCluster-${AWS::StackName}": owned
                   StringLike:
                     aws:ResourceTag/karpenter.sh/nodepool: "*"
                   ForAllValues:StringEquals:
@@ -1124,7 +1124,7 @@ Resources:
                 Resource: "*"
                 Condition:
                   StringEquals:
-                    aws:ResourceTag/kubernetes.io/cluster/${EKSCluster}: owned
+                    !Sub "aws:ResourceTag/kubernetes.io/cluster/EKSCluster-${AWS::StackName}": owned
                   StringLike:
                     aws:ResourceTag/karpenter.sh/nodepool: "*"
               - Sid: AllowInstanceProfileCreationActions
@@ -1133,7 +1133,7 @@ Resources:
                 Resource: "*"
                 Condition:
                   StringEquals:
-                    aws:RequestTag/kubernetes.io/cluster/${EKSCluster}: owned
+                    !Sub "aws:RequestTag/kubernetes.io/cluster/EKSCluster-${AWS::StackName}": owned
                   StringLike:
                     aws:RequestTag/karpenter.sh/nodepool: "*"
               - Sid: AllowInstanceProfileTagActions
@@ -1142,8 +1142,8 @@ Resources:
                 Resource: "*"
                 Condition:
                   StringEquals:
-                    aws:ResourceTag/kubernetes.io/cluster/${EKSCluster}: owned
-                    aws:RequestTag/kubernetes.io/cluster/${EKSCluster}: owned
+                    !Sub "aws:ResourceTag/kubernetes.io/cluster/EKSCluster-${AWS::StackName}": owned
+                    !Sub "aws:RequestTag/kubernetes.io/cluster/EKSCluster-${AWS::StackName}": owned
                   StringLike:
                     aws:ResourceTag/karpenter.sh/nodepool: "*"
                     aws:RequestTag/karpenter.sh/nodepool: "*"
