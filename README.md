@@ -122,7 +122,11 @@ Three independent scaling systems work in concert, each reacting to different si
 - Range: 1 to 100 scanner pods
 - Each scanner pod requests 800m CPU and 2Gi memory
 
-**Infrastructure scaling (Cluster Autoscaler)** — When KEDA creates pods that can't be scheduled due to insufficient cluster capacity, the Cluster Autoscaler detects the pending pods and provisions new nodes within seconds. The node group can expand up to 200 r7i.large instances, adding 2 vCPU and 16 GiB memory per node. When load subsides, underutilized nodes are drained and terminated after 10 minutes.
+**Infrastructure scaling (Karpenter)** — When KEDA creates pods that can't be scheduled due to insufficient cluster capacity, Karpenter provisions new nodes directly via the EC2 Fleet API in 30-60 seconds — roughly 2x faster than the traditional Cluster Autoscaler/ASG approach. Karpenter selects the optimal instance type from a flexible set (r7i, r7a, r6i, m7i in large/xlarge sizes) based on pending pod requirements and availability, eliminating capacity failures from single-instance-type dependency. When load subsides, Karpenter consolidates underutilized nodes after 2 minutes, intelligently bin-packing remaining pods onto fewer nodes before removing excess capacity. Pod Disruption Budgets protect active scan workloads from premature eviction during consolidation.
+
+A small managed node group (2-6 nodes) hosts system components (CoreDNS, KEDA, EBS CSI driver, Karpenter itself). Scanner workloads are directed to Karpenter-provisioned nodes via nodeAffinity, keeping the system plane isolated from workload scaling turbulence.
+
+**Why Karpenter over Cluster Autoscaler:** This system is designed for sustained, latency-sensitive production traffic with unpredictable spikes. Karpenter's direct EC2 provisioning, intelligent consolidation, and multi-instance-type flexibility deliver faster scale-out, lower cost during low-demand periods, and better resilience compared to the ASG-based Cluster Autoscaler.
 
 **At full scale:**
 
@@ -130,7 +134,7 @@ Three independent scaling systems work in concert, each reacting to different si
 |---|---|---|---|
 | Scanner-app pods (KEDA) | 1 | 100 | 50 concurrent scans each |
 | V1FS scanner pods (KEDA) | 1 | 100 | gRPC scan workers |
-| Nodes (Cluster Autoscaler) | 2 | 200 | 2 vCPU / 16 GiB each |
+| Nodes (Karpenter) | 2 | ~100 | 2-4 vCPU each (flexible instance types) |
 | **Total concurrent scans** | **50** | **5,000** | **100x scale-out** |
 
 **Important:** At full scale, the cluster requires approximately 200 on-demand vCPUs. The default AWS account limit for on-demand standard instances is 64 vCPUs, which will cap the system at ~30 nodes. To unlock full scaling capacity, request a vCPU quota increase via the AWS Service Quotas console for the "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances" quota.
@@ -153,16 +157,16 @@ Scanner-app pods open concurrent gRPC streams to V1FS scanner
 KEDA scales V1FS scanner pods from 1 to 100 based on queue depth
          |
          v
-Cluster Autoscaler provisions nodes to fit all pods (up to 200 nodes)
+Karpenter provisions nodes via EC2 Fleet API in 30-60 seconds
          |
          v
 5,000 concurrent scans running — queue drains rapidly
          |
          v
-Queue empty → KEDA scales pods back down → Autoscaler removes idle nodes
+Queue empty → KEDA scales pods back down → Karpenter consolidates idle nodes
 ```
 
-KEDA and the Cluster Autoscaler get their AWS permissions through Pod Identity — KEDA reads SQS queue metrics, the autoscaler manages the Auto Scaling Group. No access keys are involved.
+KEDA and Karpenter get their AWS permissions through Pod Identity — KEDA reads SQS queue metrics, Karpenter manages EC2 instances directly. No access keys are involved.
 
 ### How Credentials Work
 

@@ -87,6 +87,9 @@ sed -e "s|<ECR_REPO_URL>|${ECR_REPO_URL}|g" \
     -e "s|<IMAGE_TAG>|${IMAGE_TAG}|g" \
     "$K8S_DIR/deployment.yaml" | kubectl apply -f -
 
+echo "Applying PodDisruptionBudgets..."
+kubectl apply -f "$K8S_DIR/pdb.yaml"
+
 echo "Applying KEDA ScaledObject..."
 sed -e "s|<SQS_QUEUE_URL>|${SQS_QUEUE_URL}|g" \
     -e "s|<AWS_REGION>|${AWS_REGION}|g" \

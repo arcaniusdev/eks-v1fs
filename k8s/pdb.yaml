@@ -1,0 +1,21 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: scanner-app-pdb
+  namespace: visionone-filesecurity
+spec:
+  maxUnavailable: "25%"
+  selector:
+    matchLabels:
+      app: scanner-app
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: v1fs-scanner-pdb
+  namespace: visionone-filesecurity
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: scanner
