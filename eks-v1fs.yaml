@@ -1082,7 +1082,7 @@ Resources:
         - RegionMap
         - !Ref AWS::Region
         - ami
-      InstanceType: t3.micro
+      InstanceType: t3.small
       NetworkInterfaces:
         - DeviceIndex: 0
           SubnetId: !Ref PublicSubnet1
