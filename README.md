@@ -200,14 +200,14 @@ Optional parameters:
 | **PrimaryAZ** | `us-east-1a` | Availability Zone 1 |
 | **SecondaryAZ** | `us-east-1b` | Availability Zone 2 |
 | **NodeInstanceType** | `r7i.large` | EC2 instance type for EKS worker nodes |
-| **DesiredCapacity** | `2` | Number of EKS worker nodes (2–100) |
+| **DesiredCapacity** | `3` | Number of system nodes in managed node group (3–6) |
 | **PMLEnabled** | `false` | Enable Predictive Machine Learning scanning (requires account support) |
 
 You don't need to clone the repo. The bastion host UserData automatically:
 
 1. Installs kubectl, Helm, eksctl, Docker, and the AWS CLI
 2. Configures kubeconfig and creates the `visionone-filesecurity` namespace
-3. Installs Cluster Autoscaler and KEDA via Helm
+3. Installs Karpenter and KEDA via Helm
 4. Deploys the Vision One File Security scanner pods via Helm (GPG-verified)
 5. Clones this repo, builds the scanner app Docker image, pushes it to ECR
 6. Deploys the scanner app (ServiceAccount, ConfigMap, Deployment, KEDA ScaledObject) to the cluster
@@ -282,6 +282,7 @@ k8s/
   configmap.yaml           Environment config template (populated by deploy script)
   deployment.yaml          Hardened pod spec (non-root, read-only fs, drop all capabilities)
   networkpolicy.yaml       Egress restricted to DNS, V1FS scanner, and AWS HTTPS
+  pdb.yaml                 PodDisruptionBudgets (Karpenter consolidation protection)
   scaledobject.yaml        KEDA ScaledObject + TriggerAuthentication for SQS-driven autoscaling
 scripts/
   build-and-push.sh        Build Docker image and push to ECR (tagged with git SHA)
@@ -303,6 +304,75 @@ Or pull the latest code first:
 
 ```bash
 cd /opt/eks-v1fs && git pull
+```
+
+## Updating the V1FS Scanner
+
+The TrendAI Vision One File Security scanner is installed via its official Helm chart, but this deployment customizes several Helm values to integrate with our KEDA-based autoscaling and EKS infrastructure. A standard `helm upgrade` without re-specifying these values will silently revert them to chart defaults, breaking the deployment.
+
+### Why this matters
+
+The Helm chart's default behavior conflicts with our architecture in several ways:
+
+| Default behavior | Our customization | What breaks if reverted |
+|---|---|---|
+| HPA enabled (`scanner.autoscaling.enabled=true`) | HPA disabled, KEDA scales instead | Two controllers fight over replica count, causing erratic scaling |
+| Default CPU/memory requests | 800m CPU / 2Gi memory | Scanner pods may be under-resourced or improperly bin-packed |
+| No EFS ephemeral volume | EFS-backed shared ephemeral storage | Scanner pods lose shared scratch space |
+| Default storage class | gp3 StorageClass for database PVC | Database PVC may fail to provision |
+
+### Safe upgrade procedure
+
+When TrendAI releases a new scanner image, upgrade via the bastion host using Session Manager:
+
+```bash
+aws ssm start-session --target <bastion-instance-id>
+```
+
+Then run the upgrade with **all custom values explicitly specified**:
+
+```bash
+helm repo update visionone-filesecurity
+
+helm upgrade my-release visionone-filesecurity/visionone-filesecurity \
+  -n visionone-filesecurity \
+  --set scanner.autoscaling.enabled=false \
+  --set scanner.resources.requests.cpu=800m \
+  --set scanner.resources.requests.memory=2Gi \
+  --set visiononeFilesecurity.management.dbEnabled=true \
+  --set databaseContainer.storageClass.create=false \
+  --set databaseContainer.persistence.storageClassName=gp3 \
+  --set databaseContainer.persistence.size=100Gi \
+  --set scanner.ephemeralVolume.enabled=true \
+  --set scanner.ephemeralVolume.storageClass=efs-sc \
+  --set scanner.ephemeralVolume.accessMode=ReadWriteMany \
+  --set scanner.ephemeralVolume.size=100Gi
+```
+
+**Do not use `--reuse-values`** — if the new chart version renames or adds values, `--reuse-values` can cause silent misconfiguration.
+
+### What does not need re-applying after upgrade
+
+These resources are managed separately from the Helm chart and are not affected by `helm upgrade`:
+
+- **KEDA ScaledObjects** — applied via `kubectl`, not Helm
+- **PodDisruptionBudgets** — applied via `kubectl`
+- **Pod Identity associations** — managed by CloudFormation
+- **Scanner-app deployment** — separate deployment, not part of the V1FS chart
+
+### Verify after upgrade
+
+```bash
+# Confirm no HPA was created (should return empty)
+kubectl get hpa -n visionone-filesecurity
+
+# Confirm KEDA ScaledObjects are still active
+kubectl get scaledobject -n visionone-filesecurity
+
+# Confirm scanner pods are running with correct resources
+kubectl describe pod -n visionone-filesecurity -l app.kubernetes.io/component=scanner | grep -A 2 "Requests:"
+
+# Run a sanity scan (1 clean + 1 EICAR) to verify scanning works
 ```
 
 ## Security
