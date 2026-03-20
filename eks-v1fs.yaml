@@ -24,7 +24,7 @@ Parameters:
     Description: Desired number of EKS worker nodes (minimum 2 for V1FS scanner availability)
     Default: 2
     MinValue: 2
-    MaxValue: 10
+    MaxValue: 25
   PMLEnabled:
     Type: String
     Description: Enable Predictive Machine Learning (PML) for file scanning. Requires PML support on the Vision One account.
@@ -127,7 +127,7 @@ Resources:
   PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
-      CidrBlock: 10.2.1.0/24
+      CidrBlock: 10.2.0.0/22
       MapPublicIpOnLaunch: true
       VpcId: !Ref BaseVPC
       AvailabilityZone: !Ref PrimaryAZ
@@ -140,7 +140,7 @@ Resources:
   PublicSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
-      CidrBlock: 10.2.2.0/24
+      CidrBlock: 10.2.4.0/22
       MapPublicIpOnLaunch: true
       VpcId: !Ref BaseVPC
       AvailabilityZone: !Ref SecondaryAZ
@@ -153,7 +153,7 @@ Resources:
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
-      CidrBlock: 10.2.3.0/24
+      CidrBlock: 10.2.32.0/20
       MapPublicIpOnLaunch: false
       VpcId: !Ref BaseVPC
       AvailabilityZone: !Ref PrimaryAZ
@@ -166,7 +166,7 @@ Resources:
   PrivateSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
-      CidrBlock: 10.2.4.0/24
+      CidrBlock: 10.2.48.0/20
       MapPublicIpOnLaunch: false
       VpcId: !Ref BaseVPC
       AvailabilityZone: !Ref SecondaryAZ
@@ -318,32 +318,32 @@ Resources:
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
-          CidrIp: 10.2.3.0/24
+          CidrIp: 10.2.32.0/20
           Description: HTTPS API from private subnet 1
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
-          CidrIp: 10.2.4.0/24
+          CidrIp: 10.2.48.0/20
           Description: HTTPS API from private subnet 2
         - IpProtocol: tcp
           FromPort: 6443
           ToPort: 6443
-          CidrIp: 10.2.3.0/24
+          CidrIp: 10.2.32.0/20
           Description: K8s API from private subnet 1
         - IpProtocol: tcp
           FromPort: 6443
           ToPort: 6443
-          CidrIp: 10.2.4.0/24
+          CidrIp: 10.2.48.0/20
           Description: K8s API from private subnet 2
         - IpProtocol: tcp
           FromPort: 9443
           ToPort: 9443
-          CidrIp: 10.2.3.0/24
+          CidrIp: 10.2.32.0/20
           Description: Webhooks from private subnet 1
         - IpProtocol: tcp
           FromPort: 9443
           ToPort: 9443
-          CidrIp: 10.2.4.0/24
+          CidrIp: 10.2.48.0/20
           Description: Webhooks from private subnet 2
         - IpProtocol: tcp
           FromPort: 443
@@ -865,7 +865,7 @@ Resources:
       ScalingConfig:
         DesiredSize: !Ref DesiredCapacity
         MinSize: 2
-        MaxSize: 10
+        MaxSize: 25
       InstanceTypes:
         - !Ref NodeInstanceType
 
@@ -1262,7 +1262,7 @@ Resources:
             -n visionone-filesecurity \
             --set scanner.autoscaling.enabled=true \
             --set scanner.autoscaling.minReplicas=1 \
-            --set scanner.autoscaling.maxReplicas=10 \
+            --set scanner.autoscaling.maxReplicas=25 \
             --set scanner.autoscaling.targetCPUUtilizationPercentage=70 \
             --set scanner.autoscaling.targetMemoryUtilizationPercentage=80 \
             --set scanner.resources.requests.cpu=800m \

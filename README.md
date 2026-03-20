@@ -79,12 +79,13 @@ The `eks-v1fs.yaml` template creates everything:
 
 ### Scanner Application
 
-A Python asyncio application optimized for high throughput:
+A Python asyncio application built for speed. Scan requests use **gRPC** — a binary protocol that is dramatically faster than traditional REST/RPC, with lower latency, smaller payloads, and native streaming support. Files are scanned entirely in memory via `scan_buffer()`, eliminating disk I/O from the critical path. The result is scan latency measured in milliseconds, not seconds.
 
-- **Async I/O throughout** — `aiobotocore` for S3/SQS, `amaas.grpc.aio` for scanning
-- **Concurrent processing** — up to 40 files scanned simultaneously per pod (configurable via `MAX_CONCURRENT_SCANS`)
-- **In-memory scanning** — files are downloaded as bytes and scanned with `scan_buffer()`, never written to disk
-- **Visibility heartbeat** — extends SQS message visibility during long scans to prevent duplicate processing
+- **gRPC-native scanning** — binary protocol with persistent HTTP/2 connections to in-cluster scanner pods, avoiding the overhead of REST serialization and per-request TCP handshakes
+- **Fully async pipeline** — `aiobotocore` for S3/SQS operations and `amaas.grpc.aio` for scan requests, all running concurrently on a single event loop with zero thread-blocking
+- **In-memory scanning** — files are downloaded as byte buffers and passed directly to the scanner over gRPC, never written to disk
+- **40 concurrent scans per pod** — each pod maintains 40 in-flight scan requests simultaneously (configurable via `MAX_CONCURRENT_SCANS`), fully saturating the scanner backend
+- **Visibility heartbeat** — automatically extends SQS message visibility during long-running scans to prevent duplicate processing
 - **Graceful shutdown** — handles SIGTERM to drain in-flight scans before exiting (5-minute grace period)
 - **Predictive Machine Learning** — PML can be enabled for advanced threat detection (requires account-level PML support)
 
@@ -94,38 +95,43 @@ The Vision One File Security management service uses a **PostgreSQL database** d
 
 - **PostgreSQL StatefulSet** — deployed by the V1FS Helm chart with `dbEnabled: true`
 - **EBS gp3 storage** — 100Gi encrypted persistent volume for database data, provisioned by the EBS CSI Driver
-- **EFS shared storage** — 100Gi ReadWriteMany volume for scanner ephemeral files, provisioned by the EFS CSI Driver. This allows multiple scanner pods (scaled by HPA) to share temporary scan storage across different nodes
+- **EFS shared storage** — 100Gi ReadWriteMany volume for scanner ephemeral files, provisioned by the EFS CSI Driver. Multiple scanner pods across different nodes share this storage simultaneously, eliminating the single-node bottleneck of block storage
 - **StorageClasses** — `gp3` (EBS, block storage, ReadWriteOnce) for the database and `efs-sc` (EFS, network filesystem, ReadWriteMany) for scanner ephemeral volumes
 
 The database configuration is immutable after initial deployment — changing storage class or size requires deleting and recreating the StatefulSet.
 
+### Performance-Optimized Compute
+
+The default instance type, `r7i.large` (2 vCPU, 16 GiB memory), is deliberately chosen for memory-intensive scanning workloads. The R7i family provides consistent, non-burstable CPU performance backed by 4th Generation Intel Xeon processors — unlike burstable T-series instances that throttle under sustained load. The 8:1 memory-to-vCPU ratio ensures scanner pods have ample headroom to hold multiple large files in memory simultaneously without triggering OOM kills.
+
+Each node fits 2 V1FS scanner pods (800m CPU / 4Gi memory each) alongside scanner-app pods, maximizing pod density without resource contention.
+
 ### Autoscaling
 
-The system scales automatically at three levels to handle sudden bursts of thousands of files.
+Three independent scaling systems work in concert, each reacting to different signals but coordinating automatically through Kubernetes to deliver elastic throughput from a single idle pod to **1,000 concurrent scan slots** in under a minute.
 
-**V1FS scanner pod scaling (HPA)** — The Vision One File Security scanner pods scale horizontally based on CPU and memory utilization using the Kubernetes Horizontal Pod Autoscaler. When scanner-app pods send a flood of concurrent gRPC scan requests, the V1FS scanner CPU rises and HPA adds more scanner pods to handle the load.
+**Queue-driven pod scaling (KEDA)** — KEDA watches the SQS queue every 15 seconds and scales scanner-app pods proportionally to the backlog. When thousands of files land in the ingest bucket, the resulting SQS messages trigger rapid scale-out — 1 pod for every 5 queued messages, up to 25 pods. Each pod immediately begins pulling messages and scanning files at 40 concurrent scans. When the queue drains, KEDA scales back down after a 5-minute cooldown, keeping costs aligned with demand.
 
-- Scales based on CPU utilization (target: 70%) and memory utilization (target: 80%)
-- Range: 1 to 10 scanner pods
-- Each scanner pod requests 800m CPU and 4Gi memory (tuned to fit 2 scanner pods per r7i.large node)
-- Requires the Metrics Server (installed automatically)
+- Polls SQS queue depth every 15 seconds for fast reaction to bursts
+- Includes in-flight messages (being scanned but not yet deleted) in scaling decisions
+- Range: 1 to 25 pods (always at least 1 pod running, ready for immediate processing)
 
-**Scanner-app pod scaling (KEDA)** — KEDA monitors the SQS queue depth and adjusts the number of scanner-app pods accordingly. When files flood in, SQS messages pile up and KEDA responds by adding more pods to drain the queue faster.
+**CPU-driven scanner scaling (HPA)** — As scanner-app pods flood the V1FS scanner service with concurrent gRPC scan requests, scanner CPU utilization rises. The Horizontal Pod Autoscaler detects this and adds scanner pods to absorb the load, scaling from 1 to 25 based on CPU and memory pressure.
 
-- Checks queue depth every 15 seconds
-- Scales up at 5 messages per pod — if 50 messages are waiting, KEDA scales to 10 pods
-- Includes in-flight messages (being processed but not yet deleted) in the count
-- Scales back down after 5 minutes of low queue depth
-- Range: 1 to 10 pods (always at least 1 pod running)
+- CPU target: 70%, Memory target: 80%
+- Range: 1 to 25 scanner pods
+- Each scanner pod requests 800m CPU and 4Gi memory
 
-Each scanner-app pod processes up to 40 files concurrently (via async I/O), so at max scale the system handles 400 concurrent scans.
+**Infrastructure scaling (Cluster Autoscaler)** — When KEDA or HPA create pods that can't be scheduled due to insufficient cluster capacity, the Cluster Autoscaler detects the pending pods and provisions new nodes within seconds. The node group expands from 2 to 25 r7i.large instances, adding 2 vCPU and 16 GiB memory per node. When load subsides, underutilized nodes are drained and terminated after 10 minutes.
 
-**Node scaling (Cluster Autoscaler)** — when KEDA or HPA creates new pods but there aren't enough nodes to run them, the Cluster Autoscaler detects the unschedulable pods and adds nodes to the EKS node group.
+**At full scale:**
 
-- Watches for pods stuck in `Pending` state due to insufficient CPU/memory
-- Adds `r7i.large` nodes (2 vCPU, 16 GiB each) to the node group
-- Node group range: 2 to 10 nodes
-- Scales down underutilized nodes after 10 minutes of low usage (threshold: 65% utilization)
+| Layer | Min | Max | Multiplier |
+|---|---|---|---|
+| Scanner-app pods (KEDA) | 1 | 25 | 40 concurrent scans each |
+| V1FS scanner pods (HPA) | 1 | 25 | gRPC scan workers |
+| Nodes (Cluster Autoscaler) | 2 | 25 | 2 vCPU / 16 GiB each |
+| **Total concurrent scans** | **40** | **1,000** | **25x scale-out** |
 
 **How they work together:**
 
@@ -133,28 +139,25 @@ Each scanner-app pod processes up to 40 files concurrently (via async I/O), so a
 Thousands of files arrive in S3
          |
          v
-SQS queue depth spikes to 1000+
+SQS queue depth spikes
          |
          v
-KEDA sees queue depth, scales scanner-app from 1 to 10 pods
+KEDA detects backlog, scales scanner-app from 1 to 25 pods
          |
          v
-Scanner-app pods flood V1FS scanner with concurrent gRPC scan requests
+Scanner-app pods open concurrent gRPC streams to V1FS scanner
          |
          v
-HPA detects high CPU on V1FS scanner pods, scales from 1 to 10
+HPA detects rising CPU on scanner pods, scales from 1 to 25
          |
          v
-Kubernetes can't schedule all pods on 2 nodes (not enough CPU/memory)
+Cluster Autoscaler provisions nodes to fit all pods (up to 25 nodes)
          |
          v
-Cluster Autoscaler adds nodes (up to 10) to fit the pending pods
+1,000 concurrent scans running — queue drains rapidly
          |
          v
-All pods start — scanner-app pods process 40 files each, V1FS scanner pods handle the scan load
-         |
-         v
-Queue drains → KEDA + HPA scale pods back down → Autoscaler removes idle nodes
+Queue empty → KEDA + HPA scale pods back down → Autoscaler removes idle nodes
 ```
 
 KEDA and the Cluster Autoscaler get their AWS permissions through Pod Identity — KEDA reads SQS queue metrics, the autoscaler manages the Auto Scaling Group. No access keys are involved. The Metrics Server provides CPU/memory metrics to HPA for the V1FS scanner scaling.
