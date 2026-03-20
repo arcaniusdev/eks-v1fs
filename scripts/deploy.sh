@@ -96,7 +96,7 @@ sed -e "s|<SQS_QUEUE_URL>|${SQS_QUEUE_URL}|g" \
     "$K8S_DIR/scaledobject.yaml" | kubectl apply -f -
 
 echo "Waiting for rollout..."
-kubectl rollout status deployment/scanner-app -n visionone-filesecurity --timeout=120s
+kubectl rollout status deployment/scanner-app -n visionone-filesecurity --timeout=300s
 
 echo "Deploy complete."
 kubectl get pods -n visionone-filesecurity -l app=scanner-app
