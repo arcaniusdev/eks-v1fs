@@ -22,8 +22,8 @@ Parameters:
   DesiredCapacity:
     Type: Number
     Description: Desired number of system nodes in the managed node group (Karpenter handles workload scaling)
-    Default: 2
-    MinValue: 2
+    Default: 3
+    MinValue: 3
     MaxValue: 6
   PMLEnabled:
     Type: String
@@ -878,7 +878,7 @@ Resources:
         - !Ref PrivateSubnet2
       ScalingConfig:
         DesiredSize: !Ref DesiredCapacity
-        MinSize: 2
+        MinSize: 3
         MaxSize: 6
       InstanceTypes:
         - !Ref NodeInstanceType
@@ -1347,8 +1347,8 @@ Resources:
             --version "1.3.0" \
             -n kube-system \
             --set "settings.clusterName=EKSCluster-${AWS::StackName}" \
-            --set controller.resources.requests.cpu=1 \
-            --set controller.resources.requests.memory=1Gi \
+            --set controller.resources.requests.cpu=500m \
+            --set controller.resources.requests.memory=512Mi \
             --set controller.resources.limits.cpu=1 \
             --set controller.resources.limits.memory=1Gi \
             --wait --timeout 5m
