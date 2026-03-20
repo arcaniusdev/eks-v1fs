@@ -1082,7 +1082,7 @@ Resources:
         - RegionMap
         - !Ref AWS::Region
         - ami
-      InstanceType: t3.small
+      InstanceType: t3.medium
       NetworkInterfaces:
         - DeviceIndex: 0
           SubnetId: !Ref PublicSubnet1
@@ -1270,7 +1270,7 @@ Resources:
             -n visionone-filesecurity \
             --set scanner.autoscaling.enabled=false \
             --set scanner.resources.requests.cpu=800m \
-            --set scanner.resources.requests.memory=4Gi \
+            --set scanner.resources.requests.memory=2Gi \
             --set visiononeFilesecurity.management.dbEnabled=true \
             --set databaseContainer.storageClass.create=false \
             --set databaseContainer.persistence.storageClassName=gp3 \
@@ -1448,7 +1448,7 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub file-scan-queue-${AWS::StackName}
-      VisibilityTimeout: 300
+      VisibilityTimeout: 600
       MessageRetentionPeriod: 345600
       ReceiveMessageWaitTimeSeconds: 20
       SqsManagedSseEnabled: true

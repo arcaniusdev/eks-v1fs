@@ -20,7 +20,7 @@ spec:
   minReplicaCount: 1
   maxReplicaCount: 100
   pollingInterval: 15
-  cooldownPeriod: 300
+  cooldownPeriod: 90
   triggers:
     - type: aws-sqs-queue
       metadata:
@@ -43,12 +43,12 @@ spec:
   minReplicaCount: 1
   maxReplicaCount: 100
   pollingInterval: 15
-  cooldownPeriod: 300
+  cooldownPeriod: 90
   triggers:
     - type: aws-sqs-queue
       metadata:
         queueURL: "<SQS_QUEUE_URL>"
-        queueLength: "500"
+        queueLength: "200"
         awsRegion: "<AWS_REGION>"
         scaleOnInFlight: "true"
       authenticationRef:
