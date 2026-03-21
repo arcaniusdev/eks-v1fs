@@ -64,11 +64,11 @@ The `eks-v1fs.yaml` template creates everything:
 | **VPC** | `10.2.0.0/16` with public and private subnets across 2 AZs |
 | **NAT Gateways** | One per AZ — pods in private subnets reach the internet for threat intelligence updates |
 | **EKS Cluster** | Private API endpoint, full audit logging, managed addons (vpc-cni, CoreDNS, kube-proxy, Pod Identity Agent, EBS CSI Driver, EFS CSI Driver) |
-| **Node Group** | `r7i.large` instances (2 vCPU, 16 GiB) in private subnets, min 2 / max 200 — consistent CPU for sustained scanning |
+| **Node Group** | `r7i.large` system nodes (2 vCPU, 16 GiB) in private subnets, min 3 / max 6 — hosts system components only |
 | **ECR Repository** | Hosts the scanner app container image, scan-on-push enabled |
 | **S3 Buckets** | Ingest (with event notifications), Clean, Quarantine — all have `DeletionPolicy: Retain` to preserve files when the stack is deleted |
 | **SQS Queues** | Main queue (600s visibility timeout, 20s long polling) + Dead Letter Queue |
-| **IAM Roles** | Least-privilege roles for nodes, bastion, scanner app, KEDA operator, and Cluster Autoscaler |
+| **IAM Roles** | Least-privilege roles for nodes, bastion, scanner app, KEDA operator, and Karpenter |
 | **Pod Identity** | Binds IAM roles to Kubernetes service accounts — no access keys needed |
 | **Secrets Manager** | Stores the V1FS registration token and API key |
 | **Metrics Server** | Provides CPU/memory metrics for cluster monitoring |
@@ -124,9 +124,25 @@ Three independent scaling systems work in concert, each reacting to different si
 
 **Infrastructure scaling (Karpenter)** — When KEDA creates pods that can't be scheduled due to insufficient cluster capacity, Karpenter provisions new nodes directly via the EC2 Fleet API in 30-60 seconds — roughly 2x faster than the traditional Cluster Autoscaler/ASG approach. Karpenter selects the optimal instance type from a flexible set (r7i, r7a, r6i, m7i in large/xlarge sizes) based on pending pod requirements and availability, eliminating capacity failures from single-instance-type dependency. When load subsides, Karpenter consolidates underutilized nodes after 2 minutes, intelligently bin-packing remaining pods onto fewer nodes before removing excess capacity. Pod Disruption Budgets protect active scan workloads from premature eviction during consolidation.
 
-A small managed node group (2-6 nodes) hosts system components (CoreDNS, KEDA, EBS CSI driver, Karpenter itself). Scanner workloads are directed to Karpenter-provisioned nodes via nodeAffinity, keeping the system plane isolated from workload scaling turbulence.
+A small managed node group (3-6 nodes) hosts system components (CoreDNS, KEDA, EBS/EFS CSI drivers, LB controller, metrics server, Karpenter itself). Scanner workloads are directed to Karpenter-provisioned nodes via nodeAffinity, keeping the system plane isolated from workload scaling turbulence.
 
 **Why Karpenter over Cluster Autoscaler:** This system is designed for sustained, latency-sensitive production traffic with unpredictable spikes. Karpenter's direct EC2 provisioning, intelligent consolidation, and multi-instance-type flexibility deliver faster scale-out, lower cost during low-demand periods, and better resilience compared to the ASG-based Cluster Autoscaler.
+
+**Karpenter NodePool configuration (`scanner-pool`):**
+
+| Setting | Value | Rationale |
+|---|---|---|
+| Instance types | r7i, r7a, r6i, m7i (large/xlarge) | Memory-optimized for signature databases, multiple types for availability |
+| Capacity type | On-demand only | No spot — scan visibility timeouts make interruptions expensive |
+| CPU limit | 200 vCPU | Matches AWS account quota, prevents over-provisioning |
+| Memory limit | 1,600 GiB | Proportional to CPU limit |
+| Consolidation policy | WhenEmptyOrUnderutilized | Bin-packs pods onto fewer nodes when load drops |
+| Consolidation delay | 2 minutes | Balances cost savings against scaling churn |
+| Disruption budget | 10% of nodes | Limits how many nodes can be drained simultaneously |
+| Node expiry | 30 days | Automatic node rotation for security patching |
+| AMI | Amazon Linux 2023 (EKS-optimized) | Auto-selected via `al2023@latest` |
+| Block storage | 20 GiB gp3, encrypted | Matches managed node group configuration |
+| IMDSv2 | Required (hop limit 2) | Security hardening |
 
 **At full scale:**
 
@@ -137,7 +153,7 @@ A small managed node group (2-6 nodes) hosts system components (CoreDNS, KEDA, E
 | Nodes (Karpenter) | 3 | ~100 | 2-4 vCPU each (flexible instance types) |
 | **Total concurrent scans** | **50** | **7,500** | **150x scale-out** |
 
-**Important:** At full scale, the cluster requires approximately 200 on-demand vCPUs. The default AWS account limit for on-demand standard instances is 64 vCPUs, which will cap the system at ~30 nodes. To unlock full scaling capacity, request a vCPU quota increase via the AWS Service Quotas console for the "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances" quota.
+**Important:** At full scale (150+150 pods), the cluster requires approximately 195 on-demand vCPUs for pod requests alone (150 × 500m scanner-app + 150 × 800m V1FS scanner), plus 6 vCPU for the 3 system nodes. The default AWS account limit is 64 vCPUs — request an increase to at least 200 via the AWS Service Quotas console for "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances." The Karpenter NodePool enforces a CPU limit of 200 to prevent exceeding the account quota.
 
 **How they work together:**
 
