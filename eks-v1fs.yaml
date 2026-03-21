@@ -1105,6 +1105,152 @@ Resources:
       Roles:
         - !Ref NodeInstanceRole
 
+  # --- Pre-Delete Cleanup (Lambda) ---
+  # Ensures Karpenter-managed EC2 instances and orphaned EBS volumes
+  # are cleaned up before CloudFormation deletes the EKS cluster and IAM roles.
+  # Without this, stack deletion fails because orphaned resources still reference
+  # the NodeInstanceRole.
+
+  CleanupLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub CleanupLambdaRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CleanupPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:TerminateInstances
+                  - ec2:DescribeVolumes
+                  - ec2:DeleteVolume
+                  - iam:ListInstanceProfiles
+                  - iam:GetInstanceProfile
+                  - iam:RemoveRoleFromInstanceProfile
+                  - iam:DeleteInstanceProfile
+                Resource: "*"
+
+  CleanupLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub cleanup-${AWS::StackName}
+      Runtime: python3.12
+      Timeout: 300
+      Handler: index.handler
+      Role: !GetAtt CleanupLambdaRole.Arn
+      Environment:
+        Variables:
+          CLUSTER_NAME: !Sub EKSCluster-${AWS::StackName}
+          STACK_NAME: !Ref AWS::StackName
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import os
+          import time
+
+          def handler(event, context):
+              if event['RequestType'] != 'Delete':
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  return
+
+              cluster_name = os.environ['CLUSTER_NAME']
+              stack_name = os.environ['STACK_NAME']
+              ec2 = boto3.client('ec2')
+              iam = boto3.client('iam')
+
+              try:
+                  # 1. Terminate Karpenter-managed EC2 instances
+                  print(f"Finding Karpenter instances for {cluster_name}...")
+                  paginator = ec2.get_paginator('describe_instances')
+                  instance_ids = []
+                  for page in paginator.paginate(
+                      Filters=[
+                          {'Name': 'tag:karpenter.sh/nodepool', 'Values': ['*']},
+                          {'Name': f'tag:kubernetes.io/cluster/{cluster_name}', 'Values': ['owned']},
+                          {'Name': 'instance-state-name', 'Values': ['running', 'pending', 'stopping', 'stopped']},
+                      ]
+                  ):
+                      for r in page['Reservations']:
+                          for i in r['Instances']:
+                              instance_ids.append(i['InstanceId'])
+
+                  if instance_ids:
+                      print(f"Terminating {len(instance_ids)} Karpenter instances...")
+                      # Terminate in batches of 20
+                      for i in range(0, len(instance_ids), 20):
+                          batch = instance_ids[i:i+20]
+                          ec2.terminate_instances(InstanceIds=batch)
+
+                      # Wait for termination (up to 120s)
+                      print("Waiting for instances to terminate...")
+                      for _ in range(24):
+                          time.sleep(5)
+                          resp = ec2.describe_instances(InstanceIds=instance_ids)
+                          states = [i['State']['Name'] for r in resp['Reservations'] for i in r['Instances']]
+                          if all(s == 'terminated' for s in states):
+                              print("All instances terminated")
+                              break
+                      else:
+                          print("Warning: some instances still terminating after 120s")
+                  else:
+                      print("No Karpenter instances found")
+
+                  # 2. Clean up orphaned instance profiles
+                  print("Checking for Karpenter instance profiles...")
+                  profiles = iam.list_instance_profiles()
+                  for profile in profiles['InstanceProfiles']:
+                      name = profile['InstanceProfileName']
+                      if cluster_name in name and name != f'KarpenterNodeProfile-{stack_name}':
+                          print(f"Cleaning up instance profile: {name}")
+                          for role in profile['Roles']:
+                              iam.remove_role_from_instance_profile(
+                                  InstanceProfileName=name,
+                                  RoleName=role['RoleName']
+                              )
+                          iam.delete_instance_profile(InstanceProfileName=name)
+
+                  # 3. Delete orphaned EBS volumes (from V1FS PVCs)
+                  print("Checking for orphaned EBS volumes...")
+                  vols = ec2.describe_volumes(
+                      Filters=[
+                          {'Name': 'status', 'Values': ['available']},
+                          {'Name': f'tag:kubernetes.io/cluster/{cluster_name}', 'Values': ['owned']},
+                      ]
+                  )
+                  for vol in vols['Volumes']:
+                      print(f"Deleting orphaned volume: {vol['VolumeId']}")
+                      ec2.delete_volume(VolumeId=vol['VolumeId'])
+
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print(f"Cleanup error (non-fatal): {e}")
+                  # Always succeed — don't block stack deletion
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+
+  CleanupTrigger:
+    # DependsOn controls DELETE ordering (reverse of creation order).
+    # By depending on NodeInstanceRole and KarpenterNodeInstanceProfile,
+    # CloudFormation will delete this resource (running cleanup Lambda) BEFORE
+    # attempting to delete the role and instance profile.
+    DependsOn:
+      - NodeInstanceRole
+      - KarpenterNodeInstanceProfile
+    Type: Custom::CleanupTrigger
+    Properties:
+      ServiceToken: !GetAtt CleanupLambda.Arn
+
   V1FSRegistrationSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
