@@ -24,13 +24,13 @@ For more information, see the [Vision One File Security Helm chart repository](h
                                v
                           SQS Queue ---------> Dead Letter Queue
                                |                (after 3 failures)
-                               v
-                     Scanner App Pod (EKS)
-                        |            |
-                   Download file   Scan via gRPC
-                   from S3         (in-cluster V1FS pods)
-                        |
-                  +-----+------+
+                               v                       |
+                     Scanner App Pod (EKS)      DLQ Remediation Lambda
+                        |            |          (re-queue with backoff,
+                   Download file   Scan via      max 3 DLQ retries)
+                   from S3         gRPC
+                        |        (in-cluster
+                  +-----+------+  V1FS pods)
                   |            |
               CLEAN        MALICIOUS
                   |            |
@@ -39,7 +39,7 @@ For more information, see the [Vision One File Security Helm chart repository](h
                   |            |
               Delete from Ingest Bucket
                   |            |
-              Delete SQS message
+         Delete SQS message + write audit log
 ```
 
 1. A file lands in the **Ingest Bucket** (uploaded by a user, application, or pipeline)
@@ -51,7 +51,7 @@ For more information, see the [Vision One File Security Helm chart repository](h
    - **Malicious** (`scanResult > 0`) — file is copied to the Quarantine Bucket
 6. The original file is deleted from the Ingest Bucket and the SQS message is removed
 
-If scanning fails, the message stays in the queue and is retried. After 3 failures it moves to a Dead Letter Queue for investigation.
+If scanning fails, the message stays in the queue and is retried. After 3 failures it moves to a Dead Letter Queue, where a Lambda function automatically re-queues it with exponential backoff (60s, 300s, 900s). After 3 DLQ retries (9 total scan attempts), the message is logged as a permanent failure and discarded. Each scan result is written to a CloudWatch Logs audit trail for compliance and troubleshooting.
 
 ## Architecture
 
@@ -67,8 +67,11 @@ The `eks-v1fs.yaml` template creates everything:
 | **Node Group** | `r7i.large` system nodes (2 vCPU, 16 GiB) in private subnets, min 3 / max 6 — hosts system components only |
 | **ECR Repository** | Hosts the scanner app container image, scan-on-push enabled |
 | **S3 Buckets** | Ingest (with event notifications), Clean, Quarantine — all have `DeletionPolicy: Retain` to preserve files when the stack is deleted |
-| **SQS Queues** | Main queue (600s visibility timeout, 20s long polling) + Dead Letter Queue |
-| **IAM Roles** | Least-privilege roles for nodes, bastion, scanner app, KEDA operator, and Karpenter |
+| **SQS Queues** | Main queue (600s visibility timeout, 20s long polling) + Dead Letter Queue (120s visibility timeout) |
+| **DLQ Remediation Lambda** | Re-queues failed messages with exponential backoff (60s/300s/900s), max 3 DLQ retries before permanent discard |
+| **CloudWatch Alarms** | DLQ messages (any > 0) and queue age (> 5 min for 3 consecutive minutes) via SNS topic |
+| **Scan Audit Log** | CloudWatch log group with structured JSON per scan (file, verdict, malware names, SHA256, duration), 30-day retention |
+| **IAM Roles** | Least-privilege roles for nodes, bastion, scanner app, KEDA operator, Karpenter, and DLQ remediation |
 | **Pod Identity** | Binds IAM roles to Kubernetes service accounts — no access keys needed |
 | **Secrets Manager** | Stores the V1FS registration token and API key |
 | **Metrics Server** | Provides CPU/memory metrics for cluster monitoring |
@@ -86,7 +89,9 @@ A Python asyncio application built for speed. Scan requests use **gRPC** — a b
 - **In-memory scanning** — files are downloaded as byte buffers and passed directly to the scanner over gRPC, never written to disk
 - **50 concurrent scans per pod** — each pod maintains 50 in-flight scan requests simultaneously (configurable via `MAX_CONCURRENT_SCANS`), fully saturating the scanner backend
 - **Visibility heartbeat** — automatically extends SQS message visibility during long-running scans to prevent duplicate processing
-- **Graceful shutdown** — handles SIGTERM to drain in-flight scans before exiting (5-minute grace period)
+- **Health probes** — liveness (`/healthz`) and readiness (`/readyz`) endpoints on port 8080. Liveness catches deadlocked event loops (pod is restarted); readiness gates traffic until the gRPC scan handle is initialized
+- **Scan audit trail** — every scan result is written to CloudWatch Logs as structured JSON (file key, size, verdict, malware names, SHA256, scan duration, pod name), batched for efficiency
+- **Graceful shutdown** — handles SIGTERM to drain in-flight scans and flush audit entries before exiting (5-minute grace period)
 - **Predictive Machine Learning** — PML can be enabled for advanced threat detection (requires account-level PML support)
 
 ### Database & Storage
@@ -291,7 +296,7 @@ eks-v1fs.yaml              CloudFormation template (all infrastructure)
 app/
   Dockerfile               python:3.11-slim, non-root UID 999
   requirements.txt         Pinned dependencies (visionone-filesecurity, aiobotocore, boto3)
-  scanner.py               Async SQS polling, S3 download, V1FS scan, file routing
+  scanner.py               Async SQS polling, S3 download, V1FS scan, file routing, health server, audit trail
   config.py                Environment variable loading and validation
 k8s/
   serviceaccount.yaml      Kubernetes ServiceAccount (Pod Identity, no annotations)
