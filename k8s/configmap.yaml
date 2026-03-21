@@ -13,4 +13,5 @@ data:
   AWS_REGION: "us-east-1"
   LOG_LEVEL: "INFO"
   MAX_CONCURRENT_SCANS: "50"
+  TM_AM_SCAN_TIMEOUT_SECS: "600"
   PML_ENABLED: "false"

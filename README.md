@@ -73,7 +73,7 @@ The `eks-v1fs.yaml` template creates everything:
 | **Secrets Manager** | Stores the V1FS registration token and API key |
 | **Metrics Server** | Provides CPU/memory metrics for cluster monitoring |
 | **KEDA** | Scales both scanner-app and V1FS scanner pods based on SQS queue depth |
-| **Cluster Autoscaler** | Adds/removes EKS nodes when pods can't be scheduled or nodes are underutilized |
+| **Karpenter NodePool** | Provisions xlarge scanner nodes (r7i/r7a/r6i) directly via EC2 Fleet API; consolidates underutilized nodes automatically |
 | **EFS Filesystem** | Encrypted shared storage (ReadWriteMany) for V1FS scanner ephemeral volume across multiple pods |
 | **Bastion Host** | Provisions the cluster, installs Helm charts, builds and deploys the scanner app |
 
@@ -102,9 +102,9 @@ The database configuration is immutable after initial deployment — changing st
 
 ### Performance-Optimized Compute
 
-The default instance type, `r7i.large` (2 vCPU, 16 GiB memory), is deliberately chosen for memory-intensive scanning workloads. The R7i family provides consistent, non-burstable CPU performance backed by 4th Generation Intel Xeon processors — unlike burstable T-series instances that throttle under sustained load. The 8:1 memory-to-vCPU ratio ensures scanner pods have ample headroom to hold multiple large files in memory simultaneously without triggering OOM kills.
+The cluster uses two tiers of compute. A small managed node group of `r7i.large` instances (2 vCPU, 16 GiB) hosts system components (CoreDNS, KEDA, Karpenter, CSI drivers). Scanner workloads run on Karpenter-provisioned xlarge instances — `r7i.xlarge`, `r7a.xlarge`, or `r6i.xlarge` (4 vCPU, 32 GiB each). The R7i/R7a/R6i families provide consistent, non-burstable CPU performance with high memory-to-vCPU ratios, ensuring scanner pods have ample headroom for signature databases and in-memory file analysis without triggering OOM kills.
 
-Each node fits 2 V1FS scanner pods (800m CPU / 2Gi memory each) alongside scanner-app pods, maximizing pod density without resource contention.
+Each xlarge node fits 4 V1FS scanner pods (800m CPU / 2Gi memory each) alongside scanner-app pods, maximizing pod density while requiring fewer nodes to provision at scale.
 
 ### Autoscaling
 
@@ -122,7 +122,7 @@ Three independent scaling systems work in concert, each reacting to different si
 - Range: 1 to 150 scanner pods
 - Each scanner pod requests 800m CPU and 2Gi memory
 
-**Infrastructure scaling (Karpenter)** — When KEDA creates pods that can't be scheduled due to insufficient cluster capacity, Karpenter provisions new nodes directly via the EC2 Fleet API in 30-60 seconds — roughly 2x faster than the traditional Cluster Autoscaler/ASG approach. Karpenter selects the optimal instance type from a flexible set (r7i, r7a, r6i in large/xlarge sizes) based on pending pod requirements and availability, eliminating capacity failures from single-instance-type dependency. When load subsides, Karpenter consolidates underutilized nodes after 2 minutes, intelligently bin-packing remaining pods onto fewer nodes before removing excess capacity. Pod Disruption Budgets protect active scan workloads from premature eviction during consolidation.
+**Infrastructure scaling (Karpenter)** — When KEDA creates pods that can't be scheduled due to insufficient cluster capacity, Karpenter provisions new nodes directly via the EC2 Fleet API in 30-60 seconds — roughly 2x faster than the traditional Cluster Autoscaler/ASG approach. Karpenter selects the optimal instance type from a flexible set (r7i.xlarge, r7a.xlarge, r6i.xlarge) based on pending pod requirements and availability, eliminating capacity failures from single-instance-type dependency. When load subsides, Karpenter consolidates underutilized nodes after 2 minutes, intelligently bin-packing remaining pods onto fewer nodes before removing excess capacity. Pod Disruption Budgets protect active scan workloads from premature eviction during consolidation.
 
 A small managed node group (3-6 nodes) hosts system components (CoreDNS, KEDA, EBS/EFS CSI drivers, LB controller, metrics server, Karpenter itself). Scanner workloads are directed to Karpenter-provisioned nodes via nodeAffinity, keeping the system plane isolated from workload scaling turbulence.
 
@@ -132,7 +132,7 @@ A small managed node group (3-6 nodes) hosts system components (CoreDNS, KEDA, E
 
 | Setting | Value | Rationale |
 |---|---|---|
-| Instance types | r7i, r7a, r6i (large/xlarge) | Memory-optimized for signature databases, multiple types for availability |
+| Instance types | r7i.xlarge, r7a.xlarge, r6i.xlarge | Memory-optimized (32 GiB), xlarge only for fewer nodes at scale |
 | Capacity type | On-demand only | No spot — scan visibility timeouts make interruptions expensive |
 | CPU limit | 200 vCPU | Matches AWS account quota, prevents over-provisioning |
 | Memory limit | 1,600 GiB | Proportional to CPU limit |
@@ -150,7 +150,7 @@ A small managed node group (3-6 nodes) hosts system components (CoreDNS, KEDA, E
 |---|---|---|---|
 | Scanner-app pods (KEDA) | 1 | 150 | 50 concurrent scans each |
 | V1FS scanner pods (KEDA) | 1 | 150 | gRPC scan workers |
-| Nodes (Karpenter) | 3 | ~100 | 2-4 vCPU each (flexible instance types) |
+| Nodes (Karpenter) | 3 | ~50 | 4 vCPU each (xlarge only) |
 | **Total concurrent scans** | **50** | **7,500** | **150x scale-out** |
 
 **Important:** At full scale (150+150 pods), the cluster requires approximately 195 on-demand vCPUs for pod requests alone (150 × 500m scanner-app + 150 × 800m V1FS scanner), plus 6 vCPU for the 3 system nodes. The default AWS account limit is 64 vCPUs — request an increase to at least 200 via the AWS Service Quotas console for "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances." The Karpenter NodePool enforces a CPU limit of 200 to prevent exceeding the account quota.

@@ -49,6 +49,6 @@ def load_config() -> Config:
         v1fs_api_key_secret_arn=required["V1FS_API_KEY_SECRET_ARN"],
         aws_region=required["AWS_REGION"],
         log_level=log_level,
-        max_concurrent_scans=int(os.environ.get("MAX_CONCURRENT_SCANS", "20")),
+        max_concurrent_scans=int(os.environ.get("MAX_CONCURRENT_SCANS", "50")),
         pml_enabled=os.environ.get("PML_ENABLED", "false").lower() == "true",
     )

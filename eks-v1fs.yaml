@@ -34,18 +34,15 @@ Parameters:
       - "false"
   NodeInstanceType:
     Type: String
-    Description: EC2 instance type for EKS worker nodes (r7i.large recommended for consistent CPU under sustained scanning load)
+    Description: EC2 instance type for system node group (hosts CoreDNS, KEDA, Karpenter, CSI drivers). Scanner workloads run on Karpenter-provisioned xlarge nodes.
     Default: r7i.large
     AllowedValues:
       - r7i.large
       - r7i.xlarge
-      - r7i.2xlarge
       - r7a.large
       - r7a.xlarge
-      - r7a.2xlarge
-      - t3.large
-      - t3.xlarge
-      - t3.2xlarge
+      - r6i.large
+      - r6i.xlarge
 
 Mappings:
   RegionMap:
@@ -1269,7 +1266,7 @@ Resources:
             --set region=${AWS::Region} \
             --wait --timeout 5m
 
-          # ---- Install Metrics Server (required for V1FS scanner HPA) ----
+          # ---- Install Metrics Server (cluster monitoring) ----
           kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
           kubectl rollout status deployment/metrics-server -n kube-system --timeout=120s
 
