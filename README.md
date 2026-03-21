@@ -69,8 +69,9 @@ The `eks-v1fs.yaml` template creates everything:
 | **S3 Buckets** | Ingest (with event notifications), Clean, Quarantine — all have `DeletionPolicy: Retain` to preserve files when the stack is deleted |
 | **SQS Queues** | Main queue (600s visibility timeout, 20s long polling) + Dead Letter Queue (120s visibility timeout) |
 | **DLQ Remediation Lambda** | Re-queues failed messages with exponential backoff (60s/300s/900s), max 3 DLQ retries before permanent discard |
-| **CloudWatch Alarms** | DLQ messages (any > 0) and queue age (> 5 min for 3 consecutive minutes) via SNS topic |
+| **CloudWatch Alarms** | DLQ messages (any > 0) and queue age (> 30 min for 5 consecutive minutes) via SNS topic |
 | **Scan Audit Log** | CloudWatch log group with structured JSON per scan (file, verdict, malware names, SHA256, duration), 30-day retention |
+| **CloudWatch Dashboard** | 26-widget dashboard with queue health, scan throughput/latency, malware detection stats, DLQ remediation, pod distribution, and recent scan results |
 | **IAM Roles** | Least-privilege roles for nodes, bastion, scanner app, KEDA operator, Karpenter, and DLQ remediation |
 | **Pod Identity** | Binds IAM roles to Kubernetes service accounts — no access keys needed |
 | **Secrets Manager** | Stores the V1FS registration token and API key |
