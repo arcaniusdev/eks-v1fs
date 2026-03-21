@@ -1721,6 +1721,7 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub file-scan-dlq-${AWS::StackName}
+      VisibilityTimeout: 120
       MessageRetentionPeriod: 1209600
       SqsManagedSseEnabled: true
       Tags:
