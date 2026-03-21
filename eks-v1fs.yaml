@@ -1873,7 +1873,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub Queue-Age-${AWS::StackName}
-      AlarmDescription: Oldest message age exceeds 5 minutes — scanners may be falling behind
+      AlarmDescription: Oldest message age exceeds 30 minutes for 5 consecutive minutes — scanners may be stuck or unable to keep up
       Namespace: AWS/SQS
       MetricName: ApproximateAgeOfOldestMessage
       Dimensions:
@@ -1881,8 +1881,8 @@ Resources:
           Value: !GetAtt FileScanQueue.QueueName
       Statistic: Maximum
       Period: 60
-      EvaluationPeriods: 3
-      Threshold: 300
+      EvaluationPeriods: 5
+      Threshold: 1800
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
