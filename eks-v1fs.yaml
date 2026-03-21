@@ -1873,7 +1873,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub Queue-Age-${AWS::StackName}
-      AlarmDescription: Oldest message age exceeds 30 minutes for 5 consecutive minutes — scanners may be stuck or unable to keep up
+      AlarmDescription: Oldest message age exceeds 20 minutes for 5 consecutive minutes — scanners may be stuck or unable to keep up
       Namespace: AWS/SQS
       MetricName: ApproximateAgeOfOldestMessage
       Dimensions:
@@ -1882,7 +1882,7 @@ Resources:
       Statistic: Maximum
       Period: 60
       EvaluationPeriods: 5
-      Threshold: 1800
+      Threshold: 1200
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
@@ -2009,9 +2009,9 @@ Resources:
             {"type":"log","x":6,"y":1,"width":3,"height":3,
               "properties":{"query":"SOURCE '${ScanAuditLogGroup}' | stats count(*) as Scans",
                 "region":"${AWS::Region}","title":"Scans (1h)","view":"singleValue"}},
-            {"type":"log","x":9,"y":1,"width":3,"height":3,
-              "properties":{"query":"SOURCE '${ScanAuditLogGroup}' | stats count(*) / dateceil(@timestamp, 1m) as rate by bin(1m) | stats avg(rate) as Scans_per_min",
-                "region":"${AWS::Region}","title":"Scan Rate","view":"singleValue"}},
+            {"type":"metric","x":9,"y":1,"width":3,"height":3,
+              "properties":{"metrics":[["AWS/SQS","NumberOfMessagesDeleted","QueueName","${FileScanQueue.QueueName}",{"stat":"Sum","color":"#1f77b4","label":"Scans/min"}]],
+                "view":"singleValue","region":"${AWS::Region}","title":"Scan Rate","period":60,"sparkline":true}},
             {"type":"metric","x":12,"y":1,"width":3,"height":3,
               "properties":{"metrics":[["AWS/SQS","ApproximateAgeOfOldestMessage","QueueName","${FileScanQueue.QueueName}",{"stat":"Maximum","color":"#ff7f0e","label":"Queue Age"}]],
                 "view":"singleValue","region":"${AWS::Region}","title":"Queue Age (s)","period":60,"sparkline":true}},
