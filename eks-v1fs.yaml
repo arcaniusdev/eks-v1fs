@@ -1062,16 +1062,9 @@ Resources:
                       }
                     },
                     {
-                      "Sid": "AllowInstanceProfileActions",
+                      "Sid": "AllowGetInstanceProfile",
                       "Effect": "Allow",
-                      "Action": [
-                        "iam:CreateInstanceProfile",
-                        "iam:DeleteInstanceProfile",
-                        "iam:AddRoleToInstanceProfile",
-                        "iam:RemoveRoleFromInstanceProfile",
-                        "iam:TagInstanceProfile",
-                        "iam:GetInstanceProfile"
-                      ],
+                      "Action": "iam:GetInstanceProfile",
                       "Resource": "*"
                     },
                     {
@@ -1104,6 +1097,13 @@ Resources:
       ClusterName: !Sub EKSCluster-${AWS::StackName}
       PrincipalArn: !GetAtt NodeInstanceRole.Arn
       Type: EC2_LINUX
+
+  KarpenterNodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub KarpenterNodeProfile-${AWS::StackName}
+      Roles:
+        - !Ref NodeInstanceRole
 
   V1FSRegistrationSecret:
     Type: AWS::SecretsManager::Secret
@@ -1289,7 +1289,7 @@ Resources:
           metadata:
             name: scanner-nodes
           spec:
-            role: EKSNodeRole-${AWS::StackName}
+            instanceProfile: KarpenterNodeProfile-${AWS::StackName}
             amiSelectorTerms:
               - alias: al2023@latest
             subnetSelectorTerms:
