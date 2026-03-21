@@ -521,7 +521,7 @@ Resources:
                   - ecr:BatchGetImage
                   - ecr:GetDownloadUrlForLayer
                   - ecr:BatchCheckLayerAvailability
-                Resource: "*"
+                Resource: !GetAtt ScannerAppECRRepo.Arn
               - Sid: ECRPush
                 Effect: Allow
                 Action:
@@ -610,7 +610,7 @@ Resources:
                   - elasticfilesystem:CreateAccessPoint
                   - elasticfilesystem:DeleteAccessPoint
                   - elasticfilesystem:TagResource
-                Resource: "*"
+                Resource: !GetAtt EFSFileSystem.Arn
               - Sid: EC2Describe
                 Effect: Allow
                 Action:
