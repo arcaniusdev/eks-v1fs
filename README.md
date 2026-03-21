@@ -241,6 +241,31 @@ Stack creation takes approximately 20-30 minutes. Monitor progress:
 aws cloudformation describe-stacks --stack-name my-scanner --query 'Stacks[0].StackStatus'
 ```
 
+### Stack Outputs
+
+After creation, the stack exports key resource identifiers:
+
+| Output | Description |
+|---|---|
+| `DashboardUrl` | CloudWatch dashboard URL — real-time pipeline monitoring |
+| `IngestBucketName` | S3 bucket for uploading files to scan |
+| `CleanBucketName` | S3 bucket for files that passed scanning |
+| `QuarantineBucketName` | S3 bucket for malicious files |
+| `FileScanQueueUrl` | SQS queue URL for S3 file events |
+| `FileScanDLQUrl` | SQS dead letter queue URL |
+| `AlarmSNSTopicArn` | SNS topic for scan alarms (subscribe for notifications) |
+| `ScanAuditLogGroupName` | CloudWatch log group for scan audit trail |
+| `ECRRepoUrl` | ECR repository for the scanner app image |
+| `ClusterName` | EKS cluster name |
+| `BastionPublicIP` | Bastion host IP (connect via SSM, not SSH) |
+
+Retrieve any output:
+
+```bash
+aws cloudformation describe-stacks --stack-name my-scanner \
+  --query 'Stacks[0].Outputs[?OutputKey==`DashboardUrl`].OutputValue' --output text
+```
+
 ### Verify
 
 Connect to the bastion via Session Manager:
