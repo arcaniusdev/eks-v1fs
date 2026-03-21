@@ -1489,8 +1489,8 @@ Resources:
               budgets:
                 - nodes: "10%"
             limits:
-              cpu: 200
-              memory: 1600Gi
+              cpu: 300
+              memory: 2400Gi
             weight: 10
           EOFKARPENTER
 

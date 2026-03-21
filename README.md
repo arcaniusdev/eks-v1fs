@@ -139,8 +139,8 @@ A small managed node group (3-6 nodes) hosts system components (CoreDNS, KEDA, E
 |---|---|---|
 | Instance types | r7i.xlarge, r7a.xlarge, r6i.xlarge | Memory-optimized (32 GiB), xlarge only for fewer nodes at scale |
 | Capacity type | On-demand only | No spot — scan visibility timeouts make interruptions expensive |
-| CPU limit | 200 vCPU | Matches AWS account quota, prevents over-provisioning |
-| Memory limit | 1,600 GiB | Proportional to CPU limit |
+| CPU limit | 300 vCPU | Matches AWS account quota, prevents over-provisioning |
+| Memory limit | 2,400 GiB | Proportional to CPU limit |
 | Consolidation policy | WhenEmptyOrUnderutilized | Bin-packs pods onto fewer nodes when load drops |
 | Consolidation delay | 2 minutes | Balances cost savings against scaling churn |
 | Disruption budget | 10% of nodes | Limits how many nodes can be drained simultaneously |
@@ -155,10 +155,10 @@ A small managed node group (3-6 nodes) hosts system components (CoreDNS, KEDA, E
 |---|---|---|---|
 | Scanner-app pods (KEDA) | 1 | 150 | 50 concurrent scans each |
 | V1FS scanner pods (KEDA) | 1 | 150 | gRPC scan workers |
-| Nodes (Karpenter) | 3 | ~50 | 4 vCPU each (xlarge only) |
+| Nodes (Karpenter) | 3 | ~75 | 4 vCPU each (xlarge only) |
 | **Total concurrent scans** | **50** | **7,500** | **150x scale-out** |
 
-**Important:** At full scale (150+150 pods), the cluster requires approximately 195 on-demand vCPUs for pod requests alone (150 × 500m scanner-app + 150 × 800m V1FS scanner), plus 6 vCPU for the 3 system nodes. The default AWS account limit is 64 vCPUs — request an increase to at least 200 via the AWS Service Quotas console for "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances." The Karpenter NodePool enforces a CPU limit of 200 to prevent exceeding the account quota.
+**Important:** At full scale (150+150 pods), the cluster requires approximately 195 on-demand vCPUs for pod requests alone (150 × 500m scanner-app + 150 × 800m V1FS scanner), plus 6 vCPU for the 3 system nodes. The default AWS account limit is 64 vCPUs — request an increase to at least 300 via the AWS Service Quotas console for "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances." The Karpenter NodePool enforces a CPU limit of 300 to prevent exceeding the account quota, providing headroom above the ~200 vCPU pod request total.
 
 **How they work together:**
 
