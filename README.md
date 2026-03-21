@@ -79,6 +79,7 @@ The `eks-v1fs.yaml` template creates everything:
 | **KEDA** | Scales both scanner-app and V1FS scanner pods based on SQS queue depth |
 | **Karpenter NodePool** | Provisions xlarge scanner nodes (r7i/r7a/r6i) directly via EC2 Fleet API; consolidates underutilized nodes automatically |
 | **EFS Filesystem** | Encrypted shared storage (ReadWriteMany) for V1FS scanner ephemeral volume across multiple pods |
+| **Pre-delete Cleanup Lambda** | Runs automatically during stack deletion — terminates Karpenter EC2 instances, cleans up orphaned instance profiles, and deletes orphaned EBS volumes before CloudFormation deletes the roles and cluster |
 | **Bastion Host** | Provisions the cluster, installs Helm charts, builds and deploys the scanner app |
 
 ### Scanner Application
