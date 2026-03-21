@@ -56,17 +56,19 @@ def random_text(min_words=50, max_words=500):
 
 SIZES = {
     "tiny": (100, 2_000),           # scripts, configs
-    "small": (2_000, 50_000),       # documents, small executables
-    "medium": (50_000, 500_000),    # typical office docs, PDFs
-    "large": (500_000, 5_000_000),  # large documents, images, archives
-    "xlarge": (5_000_000, 20_000_000),  # big executables, media
+    "small": (2_000, 20_000),       # small scripts, text files
+    "medium": (20_000, 100_000),    # typical documents, small executables
+    "large": (100_000, 500_000),    # larger documents, images
+    "xlarge": (500_000, 2_000_000), # big executables, archives
 }
 
+# Weighted toward small/medium to match real-world distribution
+# Average file ~50-80 KB, total ~2-4 GB for 50K files
 SIZE_WEIGHTS = {
-    "tiny": 10,
+    "tiny": 15,
     "small": 30,
     "medium": 35,
-    "large": 20,
+    "large": 15,
     "xlarge": 5,
 }
 
@@ -305,37 +307,35 @@ def generate_xlsx(target_size):
 
 def generate_png(target_size):
     """Generate a valid PNG image with random pixel data."""
-    # Calculate dimensions to approximate target size (3 bytes per pixel + overhead)
-    pixels_needed = max(target_size // 3, 100)
-    width = min(int(pixels_needed ** 0.5), 4096)
-    height = max(pixels_needed // width, 1)
+    import zlib
 
-    # PNG signature
+    # Keep dimensions small for speed, pad with ancillary chunks
+    width = min(int((target_size // 4) ** 0.5), 256)
+    height = max(width, 1)
+
     sig = b"\x89PNG\r\n\x1a\n"
 
     def chunk(ctype, data):
-        import zlib
         c = ctype + data
         crc = struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
         return struct.pack(">I", len(data)) + c + crc
 
-    # IHDR
     ihdr_data = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
     ihdr = chunk(b"IHDR", ihdr_data)
 
-    # IDAT - raw pixel data with filter bytes
-    import zlib
-    raw = bytearray()
-    for _ in range(height):
-        raw.append(0)  # filter: None
-        raw.extend(os.urandom(width * 3))
-    compressed = zlib.compress(bytes(raw), 1)
+    raw = b"\x00" * (width * 3 + 1) * height  # all-zero pixels (fast, compresses well)
+    compressed = zlib.compress(raw, 1)
     idat = chunk(b"IDAT", compressed)
 
-    # IEND
-    iend = chunk(b"IEND", b"")
+    # Pad to target size with tEXt chunks (valid PNG ancillary chunks)
+    padding = b""
+    current = len(sig) + len(ihdr) + len(idat) + 12  # 12 for IEND
+    while current + len(padding) < target_size:
+        text_data = b"Comment\x00" + os.urandom(min(target_size - current - len(padding) - 12, 8192))
+        padding += chunk(b"tEXt", text_data)
 
-    return sig + ihdr + idat + iend
+    iend = chunk(b"IEND", b"")
+    return sig + ihdr + idat + padding + iend
 
 
 # --- Valid JPEG image ---
