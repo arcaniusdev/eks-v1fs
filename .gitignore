@@ -4,3 +4,4 @@ CLAUDE.md
 docs/
 __pycache__/
 *.pyc
+scripts/generate-test-files.py

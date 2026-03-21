@@ -557,15 +557,6 @@ Resources:
                 Resource:
                   - !GetAtt IngestBucket.Arn
                   - !Sub ${IngestBucket.Arn}/*
-              - Sid: S3MalwareSamplesCache
-                Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:PutObject
-                  - s3:ListBucket
-                Resource:
-                  - arn:aws:s3:::eks-v1fs-malware-samples-REDACTED
-                  - arn:aws:s3:::eks-v1fs-malware-samples-REDACTED/*
       Tags:
         - Key: Name
           Value: !Sub BastionRole-${AWS::StackName}
