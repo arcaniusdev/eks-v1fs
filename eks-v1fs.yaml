@@ -2168,3 +2168,6 @@ Outputs:
   AlarmSNSTopicArn:
     Description: SNS topic ARN for scan alarms (subscribe for notifications)
     Value: !Ref AlarmSNSTopic
+  DashboardUrl:
+    Description: CloudWatch dashboard URL for the scanner pipeline
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards/dashboard/scanner-${AWS::StackName}
