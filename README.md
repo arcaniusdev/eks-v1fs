@@ -69,7 +69,7 @@ The `eks-v1fs.yaml` template creates everything:
 | **S3 Buckets** | Ingest (with event notifications), Clean, Quarantine — all have `DeletionPolicy: Retain` to preserve files when the stack is deleted |
 | **SQS Queues** | Main queue (600s visibility timeout, 20s long polling) + Dead Letter Queue (120s visibility timeout) |
 | **DLQ Remediation Lambda** | Re-queues failed messages with exponential backoff (60s/300s/900s), max 3 DLQ retries before permanent discard |
-| **CloudWatch Alarms** | DLQ messages (any > 0) and queue age (> 30 min for 5 consecutive minutes) via SNS topic |
+| **CloudWatch Alarms** | DLQ messages (any > 0) and queue age (> 20 min for 5 consecutive minutes) via SNS topic |
 | **Scan Audit Log** | CloudWatch log group with structured JSON per scan (file, verdict, malware names, SHA256, duration), 30-day retention |
 | **CloudWatch Dashboard** | 26-widget dashboard with queue health, scan throughput/latency, malware detection stats, DLQ remediation, pod distribution, and recent scan results |
 | **IAM Roles** | Least-privilege roles for nodes, bastion, scanner app, KEDA operator, Karpenter, and DLQ remediation |
@@ -415,6 +415,8 @@ kubectl describe pod -n visionone-filesecurity -l app.kubernetes.io/component=sc
 ```bash
 aws cloudformation delete-stack --stack-name my-scanner
 ```
+
+A pre-delete cleanup Lambda runs automatically during stack deletion — it terminates Karpenter-managed EC2 instances, cleans up orphaned instance profiles, and deletes orphaned EBS volumes before CloudFormation removes the roles and cluster. No manual cleanup is needed for these resources.
 
 Note: All S3 buckets (ingest, clean, quarantine) have `DeletionPolicy: Retain` and are **not deleted** with the stack. This prevents accidental data loss — scanned files and quarantined malware are preserved for forensic investigation or audit. The ECR repository and its images **are** deleted with the stack. To clean up retained buckets after stack deletion:
 
