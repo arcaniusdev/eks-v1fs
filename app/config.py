@@ -15,6 +15,8 @@ class Config:
     log_level: str
     max_concurrent_scans: int
     pml_enabled: bool
+    audit_log_group: str
+    health_port: int
 
 
 def load_config() -> Config:
@@ -51,4 +53,6 @@ def load_config() -> Config:
         log_level=log_level,
         max_concurrent_scans=int(os.environ.get("MAX_CONCURRENT_SCANS", "50")),
         pml_enabled=os.environ.get("PML_ENABLED", "false").lower() == "true",
+        audit_log_group=os.environ.get("AUDIT_LOG_GROUP", ""),
+        health_port=int(os.environ.get("HEALTH_PORT", "8080")),
     )

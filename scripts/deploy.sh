@@ -11,7 +11,8 @@ K8S_DIR="$SCRIPT_DIR/../k8s"
 # If any resource env var is missing, fall back to reading stack Outputs
 if [ -z "${SQS_QUEUE_URL:-}" ] || [ -z "${S3_INGEST_BUCKET:-}" ] || \
    [ -z "${S3_CLEAN_BUCKET:-}" ] || [ -z "${S3_QUARANTINE_BUCKET:-}" ] || \
-   [ -z "${V1FS_API_KEY_SECRET_ARN:-}" ] || [ -z "${ECR_REPO_URL:-}" ]; then
+   [ -z "${V1FS_API_KEY_SECRET_ARN:-}" ] || [ -z "${ECR_REPO_URL:-}" ] || \
+   [ -z "${AUDIT_LOG_GROUP:-}" ]; then
 
   : "${CFN_STACK_NAME:?ERROR: Either set all resource env vars or set CFN_STACK_NAME}"
   echo "Fetching CloudFormation outputs for stack: $CFN_STACK_NAME"
@@ -38,6 +39,7 @@ for o in outputs:
   S3_QUARANTINE_BUCKET="${S3_QUARANTINE_BUCKET:-$(get_output QuarantineBucketName)}"
   V1FS_API_KEY_SECRET_ARN="${V1FS_API_KEY_SECRET_ARN:-$(get_output ApiKeySecretArn)}"
   ECR_REPO_URL="${ECR_REPO_URL:-$(get_output ECRRepoUrl)}"
+  AUDIT_LOG_GROUP="${AUDIT_LOG_GROUP:-$(get_output ScanAuditLogGroupName)}"
 fi
 
 # Determine image tag: use IMAGE_TAG env var, git SHA, or "latest"
@@ -54,6 +56,7 @@ echo "Ingest:    $S3_INGEST_BUCKET"
 echo "Clean:     $S3_CLEAN_BUCKET"
 echo "Quarantine:$S3_QUARANTINE_BUCKET"
 echo "ECR:       $ECR_REPO_URL"
+echo "Audit log: ${AUDIT_LOG_GROUP:-disabled}"
 echo "Image tag: $IMAGE_TAG"
 
 echo "Applying ServiceAccount..."
@@ -81,6 +84,7 @@ data:
   MAX_CONCURRENT_SCANS: "50"
   TM_AM_SCAN_TIMEOUT_SECS: "600"
   PML_ENABLED: "${PML_ENABLED:-false}"
+  AUDIT_LOG_GROUP: "${AUDIT_LOG_GROUP:-}"
 EOF
 
 echo "Applying Deployment..."

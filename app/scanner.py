@@ -3,6 +3,8 @@ import json
 import logging
 import random
 import signal
+import socket
+import time
 import urllib.parse
 from contextlib import AsyncExitStack
 
@@ -28,6 +30,10 @@ class ScannerApp:
         self.session = AioSession()
         self._exit_stack = AsyncExitStack()
         self._consecutive_errors = 0
+        self._ready = False
+        self._audit_queue = asyncio.Queue(maxsize=1000)
+        self._health_server = None
+        self._audit_task = None
 
     async def start(self):
         self.s3_client = await self._exit_stack.enter_async_context(
@@ -36,6 +42,11 @@ class ScannerApp:
         self.sqs_client = await self._exit_stack.enter_async_context(
             self.session.create_client("sqs", region_name=self.config.aws_region)
         )
+        if self.config.audit_log_group:
+            self.logs_client = await self._exit_stack.enter_async_context(
+                self.session.create_client("logs", region_name=self.config.aws_region)
+            )
+
         logger.info("Retrieving V1FS API key from Secrets Manager")
         sm_client = boto3.client(
             "secretsmanager", region_name=self.config.aws_region
@@ -53,6 +64,11 @@ class ScannerApp:
         self.scan_handle = amaas.grpc.aio.init(
             self.config.v1fs_server_addr, api_key, False
         )
+
+        self._ready = True
+        await self._start_health_server()
+        if self.config.audit_log_group:
+            self._audit_task = asyncio.create_task(self._audit_flush_loop())
 
         logger.info(
             "Scanner started — polling %s (concurrency=%d, pml=%s)",
@@ -169,6 +185,7 @@ class ScannerApp:
                 TaggingDirective="REPLACE",
             )
             await self._delete_object(bucket, key)
+            self._enqueue_audit(key, size, "oversize", {}, 0, message_id)
             return
 
         # Download into memory
@@ -184,6 +201,7 @@ class ScannerApp:
             raise
 
         # Scan
+        scan_start = time.monotonic()
         result_json = await amaas.grpc.aio.scan_buffer(
             self.scan_handle,
             file_bytes,
@@ -191,6 +209,7 @@ class ScannerApp:
             pml=self.config.pml_enabled,
             tags=["S3-Scan"],
         )
+        scan_duration_ms = int((time.monotonic() - scan_start) * 1000)
         result = json.loads(result_json)
         is_malicious = result.get("scanResult", 0) > 0
 
@@ -213,6 +232,8 @@ class ScannerApp:
         tag = "S3-Malware" if is_malicious else "S3-Clean"
         await self._upload(dest_bucket, key, file_bytes, tag)
         await self._delete_object(bucket, key)
+        verdict = "malicious" if is_malicious else "clean"
+        self._enqueue_audit(key, size, verdict, result, scan_duration_ms, message_id)
 
     async def _extend_visibility(self, receipt_handle, interval=240):
         while True:
@@ -246,12 +267,116 @@ class ScannerApp:
             ReceiptHandle=receipt_handle,
         )
 
+    # --- Health Server ---
+
+    async def _start_health_server(self):
+        self._health_server = await asyncio.start_server(
+            self._handle_health_request, "0.0.0.0", self.config.health_port
+        )
+        logger.info("Health server listening on port %d", self.config.health_port)
+
+    async def _handle_health_request(self, reader, writer):
+        try:
+            data = await asyncio.wait_for(reader.read(1024), timeout=5)
+            parts = data.decode("utf-8", errors="replace").split(" ")
+            path = parts[1] if len(parts) > 1 else "/"
+            if path == "/healthz":
+                code, reason, body = 200, "OK", "ok"
+            elif path == "/readyz":
+                if self._ready:
+                    code, reason, body = 200, "OK", "ready"
+                else:
+                    code, reason, body = 503, "Service Unavailable", "not ready"
+            else:
+                code, reason, body = 404, "Not Found", "not found"
+            resp = f"HTTP/1.1 {code} {reason}\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n{body}"
+            writer.write(resp.encode())
+            await writer.drain()
+        except Exception:
+            pass
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    # --- Audit Trail ---
+
+    def _enqueue_audit(self, key, size, verdict, result, scan_duration_ms, message_id):
+        if not self.config.audit_log_group:
+            return
+        entry = {
+            "timestamp": time.time(),
+            "file": key,
+            "size": size,
+            "verdict": verdict,
+            "scanResult": result.get("scanResult", -1),
+            "sha256": result.get("fileSHA256", ""),
+            "malware": [m.get("malwareName", "") for m in result.get("foundMalwares", [])],
+            "scanDurationMs": scan_duration_ms,
+            "pod": socket.gethostname(),
+            "messageId": message_id,
+        }
+        try:
+            self._audit_queue.put_nowait(entry)
+        except asyncio.QueueFull:
+            logger.warning("Audit queue full, dropping entry for %s", key)
+
+    async def _audit_flush_loop(self):
+        stream_name = socket.gethostname()
+        try:
+            await self.logs_client.create_log_stream(
+                logGroupName=self.config.audit_log_group,
+                logStreamName=stream_name,
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "ResourceAlreadyExistsException":
+                logger.error("Failed to create audit log stream", exc_info=True)
+                return
+        logger.info("Audit trail: %s/%s", self.config.audit_log_group, stream_name)
+        while not self.shutdown_event.is_set() or not self._audit_queue.empty():
+            batch = []
+            try:
+                entry = await asyncio.wait_for(self._audit_queue.get(), timeout=1.0)
+                batch.append(entry)
+                while len(batch) < 25:
+                    try:
+                        batch.append(self._audit_queue.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+            except asyncio.TimeoutError:
+                continue
+            if batch:
+                try:
+                    await self.logs_client.put_log_events(
+                        logGroupName=self.config.audit_log_group,
+                        logStreamName=stream_name,
+                        logEvents=sorted(
+                            [{"timestamp": int(e["timestamp"] * 1000), "message": json.dumps(e)} for e in batch],
+                            key=lambda x: x["timestamp"],
+                        ),
+                    )
+                except Exception:
+                    logger.warning("Failed to write %d audit entries", len(batch), exc_info=True)
+
+    # --- Shutdown ---
+
     async def _shutdown(self):
+        self._ready = False
         logger.info(
             "Shutting down — waiting for %d in-flight tasks", len(self.in_flight)
         )
         if self.in_flight:
             await asyncio.gather(*self.in_flight, return_exceptions=True)
+        if self._audit_task:
+            try:
+                await asyncio.wait_for(self._audit_task, timeout=10)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+        if self._health_server:
+            self._health_server.close()
+            await self._health_server.wait_closed()
         if self.scan_handle:
             await amaas.grpc.aio.quit(self.scan_handle)
         await self._exit_stack.aclose()

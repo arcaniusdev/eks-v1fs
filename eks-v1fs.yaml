@@ -1588,6 +1588,7 @@ Resources:
           export S3_CLEAN_BUCKET="${CleanBucket}"
           export S3_QUARANTINE_BUCKET="${QuarantineBucket}"
           export V1FS_API_KEY_SECRET_ARN="${V1FSApiKeySecret}"
+          export AUDIT_LOG_GROUP="scan-audit-${AWS::StackName}"
           export PML_ENABLED="${PMLEnabled}"
 
           git clone https://github.com/arcaniusdev/eks-v1fs.git /opt/eks-v1fs
@@ -1808,6 +1809,12 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Ref V1FSApiKeySecret
+              - Sid: CloudWatchAuditLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt ScanAuditLogGroup.Arn
       Tags:
         - Key: Name
           Value: !Sub ScannerAppRole-${AWS::StackName}
@@ -1820,6 +1827,167 @@ Resources:
       Namespace: visionone-filesecurity
       ServiceAccount: scanner-app
       RoleArn: !GetAtt ScannerAppRole.Arn
+
+  # --- Monitoring & Observability ---
+
+  ScanAuditLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub scan-audit-${AWS::StackName}
+      RetentionInDays: 30
+      Tags:
+        - Key: Name
+          Value: !Sub ScanAuditLogGroup-${AWS::StackName}
+
+  AlarmSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub scan-alarms-${AWS::StackName}
+      Tags:
+        - Key: Name
+          Value: !Sub AlarmSNSTopic-${AWS::StackName}
+
+  DLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub DLQ-Messages-${AWS::StackName}
+      AlarmDescription: Messages in the dead-letter queue indicate scan failures after 3 retries
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt FileScanDLQ.QueueName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmSNSTopic
+      OKActions:
+        - !Ref AlarmSNSTopic
+
+  QueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub Queue-Age-${AWS::StackName}
+      AlarmDescription: Oldest message age exceeds 5 minutes — scanners may be falling behind
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt FileScanQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 300
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmSNSTopic
+      OKActions:
+        - !Ref AlarmSNSTopic
+
+  # --- DLQ Remediation ---
+
+  DLQRemediationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub DLQRemediationRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DLQRemediationPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DLQRead
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt FileScanDLQ.Arn
+              - Sid: MainQueueWrite
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt FileScanQueue.Arn
+
+  DLQRemediationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub dlq-remediation-${AWS::StackName}
+      Runtime: python3.12
+      Timeout: 60
+      Handler: index.handler
+      Role: !GetAtt DLQRemediationRole.Arn
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref FileScanQueue
+          MAX_DLQ_RETRIES: "3"
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+
+          sqs = boto3.client('sqs')
+          QUEUE_URL = os.environ['QUEUE_URL']
+          MAX_RETRIES = int(os.environ.get('MAX_DLQ_RETRIES', '3'))
+
+          def handler(event, context):
+              for record in event['Records']:
+                  msg_id = record['messageId']
+                  body = record['body']
+                  attrs = record.get('messageAttributes', {})
+
+                  retry = 0
+                  if 'DLQRetryCount' in attrs:
+                      retry = int(attrs['DLQRetryCount']['stringValue'])
+
+                  if retry >= MAX_RETRIES:
+                      print(f"PERMANENT_FAILURE: message {msg_id} exceeded {MAX_RETRIES} DLQ retries, discarding")
+                      try:
+                          parsed = json.loads(body)
+                          for r in parsed.get('Records', []):
+                              s3info = r.get('s3', {})
+                              print(f"  file: s3://{s3info.get('bucket',{}).get('name','?')}/{s3info.get('object',{}).get('key','?')}")
+                      except Exception:
+                          pass
+                      continue
+
+                  retry += 1
+                  delay = min(60 * (5 ** (retry - 1)), 900)
+                  print(f"RE-QUEUE: message {msg_id} DLQ retry {retry}/{MAX_RETRIES} delay={delay}s")
+
+                  sqs.send_message(
+                      QueueUrl=QUEUE_URL,
+                      MessageBody=body,
+                      DelaySeconds=delay,
+                      MessageAttributes={
+                          'DLQRetryCount': {
+                              'DataType': 'Number',
+                              'StringValue': str(retry),
+                          }
+                      },
+                  )
+
+  DLQEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt FileScanDLQ.Arn
+      FunctionName: !Ref DLQRemediationLambda
+      BatchSize: 10
+      Enabled: true
 
 Outputs:
   ClusterName:
@@ -1888,3 +2056,9 @@ Outputs:
   EFSFileSystemId:
     Description: EFS filesystem ID for scanner ephemeral volume
     Value: !Ref EFSFileSystem
+  ScanAuditLogGroupName:
+    Description: CloudWatch log group for scan audit trail
+    Value: !Ref ScanAuditLogGroup
+  AlarmSNSTopicArn:
+    Description: SNS topic ARN for scan alarms (subscribe for notifications)
+    Value: !Ref AlarmSNSTopic
