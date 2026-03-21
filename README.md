@@ -108,18 +108,18 @@ Each node fits 2 V1FS scanner pods (800m CPU / 2Gi memory each) alongside scanne
 
 ### Autoscaling
 
-Three independent scaling systems work in concert, each reacting to different signals but coordinating automatically through Kubernetes to deliver elastic throughput from a single idle pod to **5,000 concurrent scan slots** in under a minute.
+Three independent scaling systems work in concert, each reacting to different signals but coordinating automatically through Kubernetes to deliver elastic throughput from a single idle pod to **7,500 concurrent scan slots** in under a minute.
 
-**Queue-driven pod scaling (KEDA)** — KEDA watches the SQS queue every 15 seconds and scales scanner-app pods proportionally to the backlog. When thousands of files land in the ingest bucket, the resulting SQS messages trigger rapid scale-out — 1 pod for every 5 queued messages, up to 100 pods. Each pod immediately begins pulling messages and scanning files at 50 concurrent scans. When the queue drains, KEDA scales back down after a 90-second cooldown, keeping costs aligned with demand.
+**Queue-driven pod scaling (KEDA)** — KEDA watches the SQS queue every 10 seconds and scales scanner-app pods proportionally to the backlog. When thousands of files land in the ingest bucket, the resulting SQS messages trigger rapid scale-out — 1 pod for every 5 queued messages, up to 150 pods. Each pod immediately begins pulling messages and scanning files at 50 concurrent scans. When the queue drains, KEDA scales back down after a 90-second cooldown, keeping costs aligned with demand.
 
-- Polls SQS queue depth every 15 seconds for fast reaction to bursts
+- Polls SQS queue depth every 10 seconds for fast reaction to bursts
 - Includes in-flight messages (being scanned but not yet deleted) in scaling decisions
-- Range: 1 to 100 pods (always at least 1 pod running, ready for immediate processing)
+- Range: 1 to 150 pods (always at least 1 pod running, ready for immediate processing)
 
-**Queue-driven scanner scaling (KEDA)** — The V1FS scanner pods also scale based on SQS queue depth, ensuring scan backend capacity grows proportionally to demand. KEDA adds 1 scanner pod per 200 queued messages, up to 100 pods. This replaced the original CPU-based HPA which was too conservative and only scaled to 4 pods under heavy load.
+**Queue-driven scanner scaling (KEDA)** — The V1FS scanner pods also scale based on SQS queue depth, ensuring scan backend capacity grows proportionally to demand. KEDA adds 1 scanner pod per 50 queued messages, up to 150 pods. This replaced the original CPU-based HPA which was too conservative and only scaled to 4 pods under heavy load.
 
-- Scales based on SQS queue depth (200 messages per scanner pod)
-- Range: 1 to 100 scanner pods
+- Scales based on SQS queue depth (50 messages per scanner pod)
+- Range: 1 to 150 scanner pods
 - Each scanner pod requests 800m CPU and 2Gi memory
 
 **Infrastructure scaling (Karpenter)** — When KEDA creates pods that can't be scheduled due to insufficient cluster capacity, Karpenter provisions new nodes directly via the EC2 Fleet API in 30-60 seconds — roughly 2x faster than the traditional Cluster Autoscaler/ASG approach. Karpenter selects the optimal instance type from a flexible set (r7i, r7a, r6i, m7i in large/xlarge sizes) based on pending pod requirements and availability, eliminating capacity failures from single-instance-type dependency. When load subsides, Karpenter consolidates underutilized nodes after 2 minutes, intelligently bin-packing remaining pods onto fewer nodes before removing excess capacity. Pod Disruption Budgets protect active scan workloads from premature eviction during consolidation.
@@ -132,10 +132,10 @@ A small managed node group (2-6 nodes) hosts system components (CoreDNS, KEDA, E
 
 | Layer | Min | Max | Multiplier |
 |---|---|---|---|
-| Scanner-app pods (KEDA) | 1 | 100 | 50 concurrent scans each |
-| V1FS scanner pods (KEDA) | 1 | 100 | gRPC scan workers |
-| Nodes (Karpenter) | 2 | ~100 | 2-4 vCPU each (flexible instance types) |
-| **Total concurrent scans** | **50** | **5,000** | **100x scale-out** |
+| Scanner-app pods (KEDA) | 1 | 150 | 50 concurrent scans each |
+| V1FS scanner pods (KEDA) | 1 | 150 | gRPC scan workers |
+| Nodes (Karpenter) | 3 | ~100 | 2-4 vCPU each (flexible instance types) |
+| **Total concurrent scans** | **50** | **7,500** | **150x scale-out** |
 
 **Important:** At full scale, the cluster requires approximately 200 on-demand vCPUs. The default AWS account limit for on-demand standard instances is 64 vCPUs, which will cap the system at ~30 nodes. To unlock full scaling capacity, request a vCPU quota increase via the AWS Service Quotas console for the "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances" quota.
 
@@ -148,19 +148,19 @@ Thousands of files arrive in S3
 SQS queue depth spikes
          |
          v
-KEDA detects backlog, scales scanner-app from 1 to 100 pods
+KEDA detects backlog, scales scanner-app from 1 to 150 pods
          |
          v
 Scanner-app pods open concurrent gRPC streams to V1FS scanner
          |
          v
-KEDA scales V1FS scanner pods from 1 to 100 based on queue depth
+KEDA scales V1FS scanner pods from 1 to 150 based on queue depth
          |
          v
 Karpenter provisions nodes via EC2 Fleet API in 30-60 seconds
          |
          v
-5,000 concurrent scans running — queue drains rapidly
+7,500 concurrent scans running — queue drains rapidly
          |
          v
 Queue empty → KEDA scales pods back down → Karpenter consolidates idle nodes
