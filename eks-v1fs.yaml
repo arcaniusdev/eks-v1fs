@@ -1336,11 +1336,8 @@ Resources:
                   - key: node.kubernetes.io/instance-type
                     operator: In
                     values:
-                      - r7i.large
                       - r7i.xlarge
-                      - r7a.large
                       - r7a.xlarge
-                      - r6i.large
                       - r6i.xlarge
                 expireAfter: 720h
             disruption:
