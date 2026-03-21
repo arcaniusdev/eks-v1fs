@@ -1351,8 +1351,6 @@ Resources:
                       - r7a.xlarge
                       - r6i.large
                       - r6i.xlarge
-                      - m7i.large
-                      - m7i.xlarge
                 expireAfter: 720h
             disruption:
               consolidationPolicy: WhenEmptyOrUnderutilized
