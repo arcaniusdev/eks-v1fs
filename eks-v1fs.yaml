@@ -1990,6 +1990,111 @@ Resources:
       BatchSize: 10
       Enabled: true
 
+  # --- Dashboard ---
+
+  ScannerDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub scanner-${AWS::StackName}
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {"type":"text","x":0,"y":0,"width":24,"height":1,
+              "properties":{"markdown":"# Scanner Pipeline \u2014 ${AWS::StackName}"}},
+            {"type":"alarm","x":0,"y":1,"width":6,"height":3,
+              "properties":{"title":"Alarm Status","alarms":[
+                "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:DLQ-Messages-${AWS::StackName}",
+                "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:Queue-Age-${AWS::StackName}"
+              ]}},
+            {"type":"metric","x":6,"y":1,"width":3,"height":3,
+              "properties":{"metrics":[["AWS/SQS","NumberOfMessagesDeleted","QueueName","${FileScanQueue.QueueName}",{"stat":"Sum","color":"#2ca02c"}]],
+                "view":"singleValue","region":"${AWS::Region}","title":"Scans (1h)","period":3600,"sparkline":true}},
+            {"type":"metric","x":9,"y":1,"width":3,"height":3,
+              "properties":{"metrics":[["AWS/SQS","NumberOfMessagesDeleted","QueueName","${FileScanQueue.QueueName}",{"stat":"Sum","color":"#1f77b4","label":"/min"}]],
+                "view":"singleValue","region":"${AWS::Region}","title":"Scan Rate","period":60,"sparkline":true}},
+            {"type":"metric","x":12,"y":1,"width":3,"height":3,
+              "properties":{"metrics":[["AWS/SQS","ApproximateAgeOfOldestMessage","QueueName","${FileScanQueue.QueueName}",{"stat":"Maximum","color":"#ff7f0e"}]],
+                "view":"singleValue","region":"${AWS::Region}","title":"Queue Age (s)","period":60,"sparkline":true}},
+            {"type":"metric","x":15,"y":1,"width":3,"height":3,
+              "properties":{"metrics":[["AWS/SQS","ApproximateNumberOfMessagesVisible","QueueName","${FileScanQueue.QueueName}",{"stat":"Maximum","color":"#1f77b4"}]],
+                "view":"singleValue","region":"${AWS::Region}","title":"Queued","period":60,"sparkline":true}},
+            {"type":"metric","x":18,"y":1,"width":3,"height":3,
+              "properties":{"metrics":[["AWS/SQS","ApproximateNumberOfMessagesNotVisible","QueueName","${FileScanQueue.QueueName}",{"stat":"Maximum","color":"#9467bd"}]],
+                "view":"singleValue","region":"${AWS::Region}","title":"In Flight","period":60,"sparkline":true}},
+            {"type":"metric","x":21,"y":1,"width":3,"height":3,
+              "properties":{"metrics":[["AWS/SQS","ApproximateNumberOfMessagesVisible","QueueName","${FileScanDLQ.QueueName}",{"stat":"Maximum","color":"#d62728"}]],
+                "view":"singleValue","region":"${AWS::Region}","title":"DLQ","period":60,"sparkline":true}},
+            {"type":"text","x":0,"y":4,"width":24,"height":1,
+              "properties":{"markdown":"## Queue Health"}},
+            {"type":"metric","x":0,"y":5,"width":12,"height":6,
+              "properties":{"metrics":[
+                  ["AWS/SQS","NumberOfMessagesSent","QueueName","${FileScanQueue.QueueName}",{"stat":"Sum","color":"#1f77b4","label":"Sent (ingested)"}],
+                  ["AWS/SQS","NumberOfMessagesReceived","QueueName","${FileScanQueue.QueueName}",{"stat":"Sum","color":"#ff7f0e","label":"Received (picked up)"}],
+                  ["AWS/SQS","NumberOfMessagesDeleted","QueueName","${FileScanQueue.QueueName}",{"stat":"Sum","color":"#2ca02c","label":"Deleted (completed)"}]],
+                "view":"timeSeries","stacked":false,"region":"${AWS::Region}","title":"Message Flow","period":60,
+                "yAxis":{"left":{"label":"Messages","showUnits":false}}}},
+            {"type":"metric","x":12,"y":5,"width":12,"height":6,
+              "properties":{"metrics":[
+                  ["AWS/SQS","ApproximateNumberOfMessagesVisible","QueueName","${FileScanQueue.QueueName}",{"stat":"Maximum","color":"#1f77b4","label":"Visible"}],
+                  ["AWS/SQS","ApproximateNumberOfMessagesNotVisible","QueueName","${FileScanQueue.QueueName}",{"stat":"Maximum","color":"#9467bd","label":"In Flight"}],
+                  ["AWS/SQS","ApproximateAgeOfOldestMessage","QueueName","${FileScanQueue.QueueName}",{"stat":"Maximum","color":"#d62728","label":"Age (s)","yAxis":"right"}]],
+                "view":"timeSeries","stacked":false,"region":"${AWS::Region}","title":"Queue Depth & Message Age","period":60,
+                "yAxis":{"left":{"label":"Messages","showUnits":false},"right":{"label":"Seconds","showUnits":false}}}},
+            {"type":"text","x":0,"y":11,"width":24,"height":1,
+              "properties":{"markdown":"## Scan Performance"}},
+            {"type":"log","x":0,"y":12,"width":12,"height":6,
+              "properties":{"query":"SOURCE '${ScanAuditLogGroup}' | stats count(*) as scans by bin(1m)",
+                "region":"${AWS::Region}","title":"Throughput (scans/min)","view":"timeSeries"}},
+            {"type":"log","x":12,"y":12,"width":12,"height":6,
+              "properties":{"query":"SOURCE '${ScanAuditLogGroup}' | filter scanDurationMs > 0 | stats avg(scanDurationMs) as avg_ms, pct(scanDurationMs, 50) as p50, pct(scanDurationMs, 90) as p90, pct(scanDurationMs, 99) as p99 by bin(5m)",
+                "region":"${AWS::Region}","title":"Scan Duration (ms) \u2014 avg / p50 / p90 / p99","view":"timeSeries"}},
+            {"type":"text","x":0,"y":18,"width":24,"height":1,
+              "properties":{"markdown":"## Detection Analysis"}},
+            {"type":"log","x":0,"y":19,"width":8,"height":6,
+              "properties":{"query":"SOURCE '${ScanAuditLogGroup}' | stats count(*) as total by verdict",
+                "region":"${AWS::Region}","title":"Verdict Breakdown","view":"pie"}},
+            {"type":"log","x":8,"y":19,"width":8,"height":6,
+              "properties":{"query":"SOURCE '${ScanAuditLogGroup}' | filter verdict = 'malicious' | stats count(*) as detections by bin(5m)",
+                "region":"${AWS::Region}","title":"Malicious Detections Over Time","view":"timeSeries"}},
+            {"type":"log","x":16,"y":19,"width":8,"height":6,
+              "properties":{"query":"SOURCE '${ScanAuditLogGroup}' | filter verdict = 'malicious' | stats count(*) as detections by malware.0 as malware_name | sort detections desc | limit 10",
+                "region":"${AWS::Region}","title":"Top Malware Names","view":"table"}},
+            {"type":"text","x":0,"y":25,"width":24,"height":1,
+              "properties":{"markdown":"## DLQ & Remediation"}},
+            {"type":"metric","x":0,"y":26,"width":8,"height":6,
+              "properties":{"metrics":[
+                  ["AWS/SQS","ApproximateNumberOfMessagesVisible","QueueName","${FileScanDLQ.QueueName}",{"stat":"Maximum","color":"#d62728","label":"DLQ Depth"}],
+                  ["AWS/SQS","NumberOfMessagesSent","QueueName","${FileScanDLQ.QueueName}",{"stat":"Sum","color":"#ff7f0e","label":"Messages Arriving"}]],
+                "view":"timeSeries","stacked":false,"region":"${AWS::Region}","title":"Dead Letter Queue","period":60,
+                "yAxis":{"left":{"label":"Messages","showUnits":false}}}},
+            {"type":"metric","x":8,"y":26,"width":8,"height":6,
+              "properties":{"metrics":[
+                  ["AWS/Lambda","Invocations","FunctionName","${DLQRemediationLambda}",{"stat":"Sum","color":"#1f77b4","label":"Invocations"}],
+                  ["AWS/Lambda","Errors","FunctionName","${DLQRemediationLambda}",{"stat":"Sum","color":"#d62728","label":"Errors"}]],
+                "view":"timeSeries","stacked":false,"region":"${AWS::Region}","title":"DLQ Remediation Lambda","period":60,
+                "yAxis":{"left":{"label":"Count","showUnits":false}}}},
+            {"type":"metric","x":16,"y":26,"width":8,"height":6,
+              "properties":{"metrics":[
+                  ["AWS/Lambda","Duration","FunctionName","${DLQRemediationLambda}",{"stat":"Average","color":"#9467bd","label":"Avg"}],
+                  ["AWS/Lambda","Duration","FunctionName","${DLQRemediationLambda}",{"stat":"Maximum","color":"#d62728","label":"Max"}]],
+                "view":"timeSeries","stacked":false,"region":"${AWS::Region}","title":"Lambda Duration (ms)","period":60,
+                "yAxis":{"left":{"label":"ms","showUnits":false}}}},
+            {"type":"text","x":0,"y":32,"width":24,"height":1,
+              "properties":{"markdown":"## Pod & File Distribution"}},
+            {"type":"log","x":0,"y":33,"width":12,"height":6,
+              "properties":{"query":"SOURCE '${ScanAuditLogGroup}' | stats count(*) as scans by pod | sort scans desc | limit 20",
+                "region":"${AWS::Region}","title":"Scans Per Pod","view":"bar"}},
+            {"type":"log","x":12,"y":33,"width":12,"height":6,
+              "properties":{"query":"SOURCE '${ScanAuditLogGroup}' | stats avg(size)/1024 as avg_kb, pct(size, 90)/1024 as p90_kb, max(size)/1024 as max_kb by bin(5m)",
+                "region":"${AWS::Region}","title":"File Size (KB) \u2014 avg / p90 / max","view":"timeSeries"}},
+            {"type":"text","x":0,"y":39,"width":24,"height":1,
+              "properties":{"markdown":"## Recent Scans"}},
+            {"type":"log","x":0,"y":40,"width":24,"height":6,
+              "properties":{"query":"SOURCE '${ScanAuditLogGroup}' | fields @timestamp, file, verdict, scanDurationMs as duration_ms, size, sha256, pod | sort @timestamp desc | limit 50",
+                "region":"${AWS::Region}","title":"Latest Scan Results","view":"table"}}
+          ]
+        }
+
 Outputs:
   ClusterName:
     Description: EKS cluster name
