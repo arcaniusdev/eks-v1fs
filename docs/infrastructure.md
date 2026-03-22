@@ -38,9 +38,10 @@ All resources are created by `eks-v1fs.yaml`. The scanner application should NOT
 ## S3 Buckets
 - **Ingest Bucket**: receives incoming files; `s3:ObjectCreated:*` event notification wired to SQS; versioning enabled; AES256 encryption; public access blocked; **7-day lifecycle policy** expires unprocessed objects. Check `IngestBucketName` output.
 - **Clean Bucket**: destination for files that pass scanning; AES256 encryption; public access blocked. Check `CleanBucketName` output.
-- **Quarantine Bucket**: destination for malicious files; AES256 encryption; public access blocked.
+- **Quarantine Bucket**: destination for malicious files; versioning enabled; AES256 encryption; public access blocked.
+- **Review Bucket**: destination for files that scanned clean but exceeded decompression limits (nesting depth, file count, compression ratio, or decompressed size); AES256 encryption; public access blocked. Requires manual review.
 
-All three S3 buckets have `DeletionPolicy: Retain` — they survive stack deletion to preserve files. The ECR repository is deleted with the stack.
+All four S3 buckets have `DeletionPolicy: Retain` — they survive stack deletion to preserve files. The ECR repository is deleted with the stack.
 
 ## EFS
 - **EFS Filesystem**: encrypted at rest, general purpose performance mode, elastic throughput. Used by V1FS scanner pods for shared ephemeral storage (ReadWriteMany).
@@ -53,7 +54,7 @@ All three S3 buckets have `DeletionPolicy: Retain` — they survive stack deleti
 - **FileScanDLQ**: dead letter queue; SSE encrypted; 14-day retention; receives messages after 3 failed processing attempts.
 
 ## IAM
-- **ScannerAppRole**: least-privilege, bound to `scanner-app` SA in `visionone-filesecurity` via Pod Identity. Permissions: SQS poll/delete/visibility on FileScanQueue; S3 get/delete on ingest; S3 put/tag on clean and quarantine; Secrets Manager read on API key secret.
+- **ScannerAppRole**: least-privilege, bound to `scanner-app` SA in `visionone-filesecurity` via Pod Identity. Permissions: SQS poll/delete/visibility on FileScanQueue; S3 get/delete on ingest; S3 put/tag on clean, review, and quarantine; Secrets Manager read on API key secret; CloudWatch Logs create stream and put events for scan audit trail.
 - **Node role**: EKS worker node policy, CNI policy, ECR read-only, SSM, CloudWatch Logs.
 - **Bastion role**: EKS describe/access, ECR read/push, STS, CloudFormation signal/describe, Secrets Manager read.
 - **KedaOperatorRole**: bound to `keda-operator` in `keda` via Pod Identity. SQS GetQueueAttributes/GetQueueUrl (read-only).

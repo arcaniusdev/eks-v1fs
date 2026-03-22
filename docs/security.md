@@ -34,7 +34,7 @@
 - Scanner app retrieves API key from Secrets Manager at startup via ARN
 
 ## Application Resilience
-- 500MB file size limit prevents OOM — oversized files quarantined via server-side S3 copy
+- Configurable file size limit (`MAX_FILE_SIZE_MB`, default 500) prevents OOM — oversized files quarantined via server-side S3 copy
 - S3 records within a message processed independently — one failure doesn't block siblings
 - SQS polling: jittered exponential backoff (2^n, max 60s)
 - SQS visibility heartbeat extends timeout every 240s for long-running scans

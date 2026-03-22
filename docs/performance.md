@@ -49,8 +49,8 @@
 
 ## Performance Characteristics
 - **Scanner is I/O and memory bound, not CPU bound** — CPU stays below 4% even at 150+74 pods. The bottleneck is the V1FS scan engine analysis time
-- **Real malware scan latency**: p50 = 4.3s, p90 = 43s, p99 = 103s, max = 238s (fresh stack, no cache)
-- **Cached scan latency**: p50 = 28ms (155x faster — cache lookup, not real analysis)
+- **Real malware scan latency** (eks-v1fs-27, fresh stack, no cache): p50 = 7.2s, avg = 16.1s, p90 = 43.4s, p95 = 59.5s, p99 = 92.4s, max = 131.6s
+- **Cached scan latency**: p50 = 28ms (cache lookup, not real analysis)
 - **KEDA scaling speed**: 1 → 150 pods in 105 seconds (doubles every ~15s)
 - **Karpenter provisioning**: 39 r6i.xlarge nodes in ~2 minutes via EC2 Fleet API
 

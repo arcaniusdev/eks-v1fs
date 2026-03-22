@@ -18,7 +18,7 @@
 - **Do not create S3 buckets, SQS queues, ECR repos, or IAM roles from application code.** All provisioned by CloudFormation.
 - **Do not modify `visionone-filesecurity` namespace secrets.** `token-secret` and `device-token-secret` are managed by bastion provisioning.
 - **Do not set explicit S3 bucket names or ECR repository names in CloudFormation.** Let CloudFormation auto-generate names. ECR names must be lowercase — removing the explicit `RepositoryName` property avoids uppercase stack name conflicts entirely.
-- **All S3 buckets survive stack deletion** (`DeletionPolicy: Retain`). Delete manually after stack teardown. Versioned buckets (ingest, quarantine) require deleting all object versions and delete markers before the bucket can be removed.
+- **All S3 buckets survive stack deletion** (`DeletionPolicy: Retain`). Delete manually after stack teardown (ingest, clean, review, quarantine). Versioned buckets (ingest, quarantine) require deleting all object versions and delete markers before the bucket can be removed.
 
 ### V1FS Helm and SDK
 - **Do not add `--wait` to V1FS Helm install.** Scanner pods need time to register with Vision One cloud on first startup.

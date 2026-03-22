@@ -55,9 +55,11 @@ await amaas.grpc.aio.quit(handle)
 ```
 
 Key details:
-- `scanResult > 0` = malware; `scanResult == 0` = clean
+- `scanResult > 0` = malware; `scanResult == 0` = clean; `scanResult == 0` with `foundErrors` = review (decompression limits exceeded)
+- `foundErrors` array contains `{name, description}` entries: `ATSE_ZIP_RATIO_ERR`, `ATSE_MAXDECOM_ERR`, `ATSE_ZIP_FILE_COUNT_ERR`, `ATSE_EXTRACT_TOO_BIG_ERR`
 - `init()` is synchronous; `quit()` and `scan_buffer()` are async
 - `scan_buffer()` positional args: `(channel, bytes_buffer, uid, tags=None, pml=False, ...)`
+- SDK response keys: `scanResult`, `fileSHA256`, `fileSHA1`, `foundMalwares`, `foundErrors`, `scanId`, `scannerVersion`, `scanTimestamp`, `fileName`, `schemaVersion`
 - PML not currently supported on this account — use `pml=False`
 
 ## Core Application Logic
@@ -66,10 +68,11 @@ Key details:
 2. **Poll Loop**: Long-poll SQS (`WaitTimeSeconds=20`). Jittered exponential backoff on errors (2^n, max 60s).
 3. **Per message** (records processed independently):
    - Parse S3 event JSON, extract bucket/key/size (`unquote_plus()` the key)
-   - Files >500MB: server-side copy to quarantine with tag `ScanResult=S3-Oversize`
+   - Files exceeding `MAX_FILE_SIZE_MB` (default 500): server-side copy to quarantine with tag `ScanResult=S3-Oversize`
    - Download to memory, scan with `scan_buffer()`
-   - Malicious: upload to quarantine (`ScanResult=S3-Malware`), delete from ingest
-   - Clean: upload to clean (`ScanResult=S3-Clean`), delete from ingest
+   - Malicious (`scanResult > 0`): upload to quarantine (`ScanResult=S3-Malware`), delete from ingest
+   - Review (`scanResult == 0` with `foundErrors` indicating decompression limits exceeded): upload to review bucket (`ScanResult=S3-Review`), delete from ingest
+   - Clean (`scanResult == 0`, no errors): upload to clean (`ScanResult=S3-Clean`), delete from ingest
    - All records succeed: delete SQS message. Any failure: leave for retry.
 4. **Error handling**: Failed scans stay in queue; after 3 failures → DLQ. Heartbeat extends visibility every 240s.
 5. **Graceful shutdown**: SIGTERM handler drains in-flight scans (5-minute grace period).
@@ -106,12 +109,15 @@ Notes: `aiobotocore==3.3.0` requires `botocore>=1.42.62,<1.42.71` — keep `boto
 | `S3_INGEST_BUCKET` | Source bucket | `IngestBucketName` |
 | `S3_QUARANTINE_BUCKET` | Quarantine bucket | `QuarantineBucketName` |
 | `S3_CLEAN_BUCKET` | Clean bucket | `CleanBucketName` |
+| `S3_REVIEW_BUCKET` | Review bucket (decompression limits exceeded) | `ReviewBucketName` |
 | `V1FS_SERVER_ADDR` | Scanner gRPC endpoint | `my-release-visionone-filesecurity-scanner:50051` |
 | `V1FS_API_KEY_SECRET_ARN` | Secrets Manager ARN | `ApiKeySecretArn` |
 | `AWS_REGION` | AWS region | `us-east-1` |
 | `MAX_CONCURRENT_SCANS` | Concurrent scans per pod | `50` |
+| `MAX_FILE_SIZE_MB` | Max file size before quarantine without scanning | `500` |
 | `PML_ENABLED` | Predictive ML scanning | `false` |
 | `LOG_LEVEL` | Logging verbosity | `INFO` |
+| `AUDIT_LOG_GROUP` | CloudWatch log group for scan audit trail | `ScanAuditLogGroupName` |
 
 ## Deployment Specs
 

@@ -228,11 +228,12 @@ class ScannerApp:
             dest_bucket = self.config.s3_quarantine_bucket
             verdict = "malicious"
             tag = "S3-Malware"
+            malware_names = [m.get("malwareName", "") for m in result.get("foundMalwares", [])]
             logger.warning(
-                "MALICIOUS: s3://%s/%s → s3://%s/%s sha256=%s result=%s",
+                "MALICIOUS: s3://%s/%s → s3://%s/%s sha256=%s malware=%s",
                 bucket, key, dest_bucket, key,
                 result.get("fileSHA256", "unknown"),
-                json.dumps(result.get("result", {})),
+                malware_names,
             )
         elif decompression_errors:
             dest_bucket = self.config.s3_review_bucket
