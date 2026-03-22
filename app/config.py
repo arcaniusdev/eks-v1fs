@@ -9,6 +9,7 @@ class Config:
     s3_ingest_bucket: str
     s3_clean_bucket: str
     s3_quarantine_bucket: str
+    s3_review_bucket: str
     v1fs_server_addr: str
     v1fs_api_key_secret_arn: str
     aws_region: str
@@ -17,6 +18,7 @@ class Config:
     pml_enabled: bool
     audit_log_group: str
     health_port: int
+    max_file_size_mb: int
 
 
 def load_config() -> Config:
@@ -25,6 +27,7 @@ def load_config() -> Config:
         "S3_INGEST_BUCKET": os.environ.get("S3_INGEST_BUCKET"),
         "S3_CLEAN_BUCKET": os.environ.get("S3_CLEAN_BUCKET"),
         "S3_QUARANTINE_BUCKET": os.environ.get("S3_QUARANTINE_BUCKET"),
+        "S3_REVIEW_BUCKET": os.environ.get("S3_REVIEW_BUCKET"),
         "V1FS_API_KEY_SECRET_ARN": os.environ.get("V1FS_API_KEY_SECRET_ARN"),
         "AWS_REGION": os.environ.get("AWS_REGION"),
     }
@@ -44,6 +47,7 @@ def load_config() -> Config:
         s3_ingest_bucket=required["S3_INGEST_BUCKET"],
         s3_clean_bucket=required["S3_CLEAN_BUCKET"],
         s3_quarantine_bucket=required["S3_QUARANTINE_BUCKET"],
+        s3_review_bucket=required["S3_REVIEW_BUCKET"],
         v1fs_server_addr=os.environ.get(
             "V1FS_SERVER_ADDR",
             "my-release-visionone-filesecurity-scanner:50051",
@@ -55,4 +59,5 @@ def load_config() -> Config:
         pml_enabled=os.environ.get("PML_ENABLED", "false").lower() == "true",
         audit_log_group=os.environ.get("AUDIT_LOG_GROUP", ""),
         health_port=int(os.environ.get("HEALTH_PORT", "8080")),
+        max_file_size_mb=int(os.environ.get("MAX_FILE_SIZE_MB", "500")),
     )

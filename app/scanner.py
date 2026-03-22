@@ -17,7 +17,15 @@ from config import load_config
 
 logger = logging.getLogger("scanner")
 
-MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB
+# V1FS SDK foundErrors names indicating decompression limits were exceeded.
+# Files with these errors return scanResult=0 (clean) but were not fully inspected.
+# The SDK returns these in the "foundErrors" array with "name" and "description" fields.
+DECOMPRESSION_ERROR_NAMES = frozenset({
+    "ATSE_ZIP_RATIO_ERR",       # Compression ratio exceeded (ATSE -71)
+    "ATSE_MAXDECOM_ERR",        # Nesting depth exceeded (ATSE -78)
+    "ATSE_ZIP_FILE_COUNT_ERR",  # File count exceeded (ATSE -69)
+    "ATSE_EXTRACT_TOO_BIG_ERR", # Decompressed size exceeded (ATSE -76)
+})
 
 
 class ScannerApp:
@@ -26,6 +34,7 @@ class ScannerApp:
         self.shutdown_event = asyncio.Event()
         self.semaphore = asyncio.Semaphore(config.max_concurrent_scans)
         self.in_flight: set[asyncio.Task] = set()
+        self.max_file_size = config.max_file_size_mb * 1024 * 1024
         self.scan_handle = None
         self.session = AioSession()
         self._exit_stack = AsyncExitStack()
@@ -170,11 +179,11 @@ class ScannerApp:
             bucket, key, size, message_id,
         )
 
-        if size > MAX_FILE_SIZE:
+        if size > self.max_file_size:
             logger.error(
                 "File s3://%s/%s exceeds size limit (%d > %d bytes), "
                 "moving to quarantine via server-side copy",
-                bucket, key, size, MAX_FILE_SIZE,
+                bucket, key, size, self.max_file_size,
             )
             # Server-side copy — no download into pod memory
             await self.s3_client.copy_object(
@@ -212,28 +221,49 @@ class ScannerApp:
         scan_duration_ms = int((time.monotonic() - scan_start) * 1000)
         result = json.loads(result_json)
         is_malicious = result.get("scanResult", 0) > 0
+        decompression_errors = self._get_decompression_errors(result)
 
-        # Route
+        # Route: malicious → quarantine, decompression errors → review, clean → clean
         if is_malicious:
             dest_bucket = self.config.s3_quarantine_bucket
+            verdict = "malicious"
+            tag = "S3-Malware"
             logger.warning(
                 "MALICIOUS: s3://%s/%s → s3://%s/%s sha256=%s result=%s",
                 bucket, key, dest_bucket, key,
                 result.get("fileSHA256", "unknown"),
                 json.dumps(result.get("result", {})),
             )
+        elif decompression_errors:
+            dest_bucket = self.config.s3_review_bucket
+            verdict = "review"
+            tag = "S3-Review"
+            logger.warning(
+                "REVIEW: s3://%s/%s → s3://%s/%s (decompression limit errors: %s)",
+                bucket, key, dest_bucket, key, decompression_errors,
+            )
         else:
             dest_bucket = self.config.s3_clean_bucket
+            verdict = "clean"
+            tag = "S3-Clean"
             logger.info(
                 "CLEAN: s3://%s/%s → s3://%s/%s",
                 bucket, key, dest_bucket, key,
             )
 
-        tag = "S3-Malware" if is_malicious else "S3-Clean"
         await self._upload(dest_bucket, key, file_bytes, tag)
         await self._delete_object(bucket, key)
-        verdict = "malicious" if is_malicious else "clean"
         self._enqueue_audit(key, size, verdict, result, scan_duration_ms, message_id)
+
+    @staticmethod
+    def _get_decompression_errors(result: dict) -> list[str]:
+        """Return decompression limit error names from scan result, if any."""
+        found_errors = result.get("foundErrors", [])
+        return [
+            e.get("name", "")
+            for e in found_errors
+            if e.get("name", "") in DECOMPRESSION_ERROR_NAMES
+        ]
 
     async def _extend_visibility(self, receipt_handle, interval=240):
         while True:
@@ -314,6 +344,10 @@ class ScannerApp:
             "scanResult": result.get("scanResult", -1),
             "sha256": result.get("fileSHA256", ""),
             "malware": [m.get("malwareName", "") for m in result.get("foundMalwares", [])],
+            "foundErrors": [e.get("name", "") for e in result.get("foundErrors", [])],
+            "scanId": result.get("scanId", ""),
+            "scannerVersion": result.get("scannerVersion", ""),
+            "fileSHA1": result.get("fileSHA1", ""),
             "scanDurationMs": scan_duration_ms,
             "pod": socket.gethostname(),
             "messageId": message_id,

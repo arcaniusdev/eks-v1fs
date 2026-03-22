@@ -20,10 +20,10 @@ Trend Micro has rebranded to **TrendAI**. Always use "TrendAI" in user-facing te
 
 ## Project Overview
 
-Containerized Python application on EKS that polls an SQS queue for S3 object-creation events, scans each file for malware using the Vision One File Security SDK (gRPC to in-cluster scanner pods), and routes files to either a quarantine bucket (malicious) or clean bucket (clean). All infrastructure is provisioned by a single CloudFormation template (`eks-v1fs.yaml`).
+Containerized Python application on EKS that polls an SQS queue for S3 object-creation events, scans each file for malware using the Vision One File Security SDK (gRPC to in-cluster scanner pods), and routes files to a clean bucket, review bucket (decompression limits exceeded), or quarantine bucket (malicious). All infrastructure is provisioned by a single CloudFormation template (`eks-v1fs.yaml`).
 
 ```
-S3 (Ingest) → SQS Queue → EKS Pod (scan via gRPC) → Clean or Quarantine Bucket
+S3 (Ingest) → SQS Queue → EKS Pod (scan via gRPC) → Clean, Review, or Quarantine Bucket
                   └→ DLQ (after 3 failures)
 ```
 
@@ -111,6 +111,9 @@ project/
 - **To modify settings on a live cluster**: `kubectl exec deploy/my-release-visionone-filesecurity-management-service -n visionone-filesecurity -- clish scanner scan-policy modify --max-decompression-layer=<N> ...`
 - **Changes take effect immediately** — no pod restart required. The scanner detects ConfigMap updates and reloads
 - **CLISH also has agent management commands** (`clish agent`) for ONTAP storage agent integration — not relevant to our SDK-based scanning architecture
+- **Decompression limit violations route to the review bucket** — when the V1FS scanner returns `scanResult=0` (clean) but includes `foundErrors` entries indicating decompression limits were exceeded, scanner-app routes the file to the review bucket instead of the clean bucket. This allows security teams to manually inspect files the scanner could not fully analyze
+- **V1FS SDK `foundErrors` names**: `ATSE_ZIP_RATIO_ERR` (compression ratio exceeded), `ATSE_MAXDECOM_ERR` (nesting depth exceeded), `ATSE_ZIP_FILE_COUNT_ERR` (file count exceeded), `ATSE_EXTRACT_TOO_BIG_ERR` (decompressed size exceeded). These are returned in `result.foundErrors[].name` of the SDK response
+- **MAX_FILE_SIZE_MB is configurable** — files exceeding this limit (default 500 MB) are moved directly to quarantine without scanning via server-side S3 copy. Set via the `MAX_FILE_SIZE_MB` environment variable in the configmap
 
 ### Karpenter & Scaling
 - **Karpenter replaces Cluster Autoscaler** — provisions nodes directly via EC2 Fleet API (30-60s vs 1-2min). NodePool and EC2NodeClass CRDs are applied in bastion UserData. Managed node group (max 6) is for system components only; scanner workloads run on Karpenter nodes via nodeAffinity

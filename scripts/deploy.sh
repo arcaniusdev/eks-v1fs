@@ -11,6 +11,7 @@ K8S_DIR="$SCRIPT_DIR/../k8s"
 # If any resource env var is missing, fall back to reading stack Outputs
 if [ -z "${SQS_QUEUE_URL:-}" ] || [ -z "${S3_INGEST_BUCKET:-}" ] || \
    [ -z "${S3_CLEAN_BUCKET:-}" ] || [ -z "${S3_QUARANTINE_BUCKET:-}" ] || \
+   [ -z "${S3_REVIEW_BUCKET:-}" ] || \
    [ -z "${V1FS_API_KEY_SECRET_ARN:-}" ] || [ -z "${ECR_REPO_URL:-}" ] || \
    [ -z "${AUDIT_LOG_GROUP:-}" ]; then
 
@@ -37,6 +38,7 @@ for o in outputs:
   S3_INGEST_BUCKET="${S3_INGEST_BUCKET:-$(get_output IngestBucketName)}"
   S3_CLEAN_BUCKET="${S3_CLEAN_BUCKET:-$(get_output CleanBucketName)}"
   S3_QUARANTINE_BUCKET="${S3_QUARANTINE_BUCKET:-$(get_output QuarantineBucketName)}"
+  S3_REVIEW_BUCKET="${S3_REVIEW_BUCKET:-$(get_output ReviewBucketName)}"
   V1FS_API_KEY_SECRET_ARN="${V1FS_API_KEY_SECRET_ARN:-$(get_output ApiKeySecretArn)}"
   ECR_REPO_URL="${ECR_REPO_URL:-$(get_output ECRRepoUrl)}"
   AUDIT_LOG_GROUP="${AUDIT_LOG_GROUP:-$(get_output ScanAuditLogGroupName)}"
@@ -55,6 +57,7 @@ echo "SQS Queue: $SQS_QUEUE_URL"
 echo "Ingest:    $S3_INGEST_BUCKET"
 echo "Clean:     $S3_CLEAN_BUCKET"
 echo "Quarantine:$S3_QUARANTINE_BUCKET"
+echo "Review:    $S3_REVIEW_BUCKET"
 echo "ECR:       $ECR_REPO_URL"
 echo "Audit log: ${AUDIT_LOG_GROUP:-disabled}"
 echo "Image tag: $IMAGE_TAG"
@@ -77,11 +80,13 @@ data:
   S3_INGEST_BUCKET: "$S3_INGEST_BUCKET"
   S3_QUARANTINE_BUCKET: "$S3_QUARANTINE_BUCKET"
   S3_CLEAN_BUCKET: "$S3_CLEAN_BUCKET"
+  S3_REVIEW_BUCKET: "$S3_REVIEW_BUCKET"
   V1FS_SERVER_ADDR: "my-release-visionone-filesecurity-scanner:50051"
   V1FS_API_KEY_SECRET_ARN: "$V1FS_API_KEY_SECRET_ARN"
   AWS_REGION: "$AWS_REGION"
   LOG_LEVEL: "INFO"
   MAX_CONCURRENT_SCANS: "50"
+  MAX_FILE_SIZE_MB: "${MAX_FILE_SIZE_MB:-500}"
   TM_AM_SCAN_TIMEOUT_SECS: "600"
   PML_ENABLED: "${PML_ENABLED:-false}"
   AUDIT_LOG_GROUP: "${AUDIT_LOG_GROUP:-}"

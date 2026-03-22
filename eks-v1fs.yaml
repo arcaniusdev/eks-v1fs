@@ -81,6 +81,15 @@ Parameters:
     Default: 512
     MinValue: 0
     MaxValue: 2048
+  MaxFileSizeMB:
+    Type: Number
+    Description: >
+      Maximum file size in MB that the scanner will download and scan. Files exceeding
+      this limit are moved directly to quarantine via server-side S3 copy without scanning.
+      This protects scanner pods from memory exhaustion on very large files.
+    Default: 500
+    MinValue: 1
+    MaxValue: 2048
 
 Mappings:
   RegionMap:
@@ -1647,9 +1656,11 @@ Resources:
           export S3_INGEST_BUCKET="${IngestBucket}"
           export S3_CLEAN_BUCKET="${CleanBucket}"
           export S3_QUARANTINE_BUCKET="${QuarantineBucket}"
+          export S3_REVIEW_BUCKET="${ReviewBucket}"
           export V1FS_API_KEY_SECRET_ARN="${V1FSApiKeySecret}"
           export AUDIT_LOG_GROUP="scan-audit-${AWS::StackName}"
           export PML_ENABLED="${PMLEnabled}"
+          export MAX_FILE_SIZE_MB="${MaxFileSizeMB}"
 
           git clone https://github.com/arcaniusdev/eks-v1fs.git /opt/eks-v1fs
           chmod +x /opt/eks-v1fs/scripts/*.sh
@@ -1777,6 +1788,26 @@ Resources:
         - Key: Purpose
           Value: file-scan-quarantine
 
+  ReviewBucket:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub ReviewBucket-${AWS::StackName}
+        - Key: Purpose
+          Value: file-scan-review
+
   FileScanDLQ:
     Type: AWS::SQS::Queue
     Properties:
@@ -1865,6 +1896,12 @@ Resources:
                   - s3:PutObject
                   - s3:PutObjectTagging
                 Resource: !Sub ${QuarantineBucket.Arn}/*
+              - Sid: S3ReviewWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectTagging
+                Resource: !Sub ${ReviewBucket.Arn}/*
               - Sid: SecretsManagerApiKey
                 Effect: Allow
                 Action:
@@ -2198,6 +2235,9 @@ Outputs:
   QuarantineBucketName:
     Description: S3 bucket for malicious files
     Value: !Ref QuarantineBucket
+  ReviewBucketName:
+    Description: S3 bucket for files requiring manual review (decompression limits exceeded)
+    Value: !Ref ReviewBucket
   FileScanQueueUrl:
     Description: SQS queue URL for S3 file events
     Value: !Ref FileScanQueue

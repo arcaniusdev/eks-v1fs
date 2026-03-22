@@ -1,6 +1,6 @@
 # EKS Vision One File Security Scanner
 
-Automated malware scanning pipeline on AWS. Files uploaded to an S3 bucket are automatically scanned using [TrendAI Vision One File Security](https://docs.trendmicro.com/en-us/documentation/article/trend-vision-one-file-security-intro-origin) and routed to a clean bucket or quarantine bucket based on the scan result.
+Automated malware scanning pipeline on AWS. Files uploaded to an S3 bucket are automatically scanned using [TrendAI Vision One File Security](https://docs.trendmicro.com/en-us/documentation/article/trend-vision-one-file-security-intro-origin) and routed to a clean bucket, review bucket, or quarantine bucket based on the scan result.
 
 Everything deploys from a single CloudFormation template — the EKS cluster, networking, storage, queues, IAM, and the scanner application itself.
 
@@ -30,15 +30,16 @@ For more information, see the [Vision One File Security Helm chart repository](h
                    Download file   Scan via      max 3 DLQ retries)
                    from S3         gRPC
                         |        (in-cluster
-                  +-----+------+  V1FS pods)
-                  |            |
-              CLEAN        MALICIOUS
-                  |            |
-                  v            v
-           Clean Bucket   Quarantine Bucket
-                  |            |
+                  +-----+------+------+  V1FS pods)
+                  |            |      |
+              CLEAN       REVIEW   MALICIOUS
+                  |            |      |
+                  v            v      v
+           Clean Bucket  Review   Quarantine
+                         Bucket   Bucket
+                  |         |         |
               Delete from Ingest Bucket
-                  |            |
+                  |         |         |
          Delete SQS message + write audit log
 ```
 
@@ -47,7 +48,8 @@ For more information, see the [Vision One File Security Helm chart repository](h
 3. The **scanner app pod** long-polls the queue, picks up the message, and downloads the file into memory
 4. The file is scanned using the **Vision One File Security Python SDK** over gRPC to the in-cluster scanner pods
 5. Based on the result:
-   - **Clean** (`scanResult == 0`) — file is copied to the Clean Bucket
+   - **Clean** (`scanResult == 0`, no errors) — file is copied to the Clean Bucket
+   - **Review** (`scanResult == 0`, decompression limit errors) — file is copied to the Review Bucket for manual inspection. The scanner could not fully analyze the archive due to nesting depth, file count, compression ratio, or decompressed size limits
    - **Malicious** (`scanResult > 0`) — file is copied to the Quarantine Bucket
 6. The original file is deleted from the Ingest Bucket and the SQS message is removed
 
@@ -66,7 +68,7 @@ The `eks-v1fs.yaml` template creates everything:
 | **EKS Cluster** | Private API endpoint, full audit logging, managed addons (vpc-cni, CoreDNS, kube-proxy, Pod Identity Agent, EBS CSI Driver, EFS CSI Driver) |
 | **Node Group** | `r7i.large` system nodes (2 vCPU, 16 GiB) in private subnets, min 3 / max 6 — hosts system components only |
 | **ECR Repository** | Hosts the scanner app container image, scan-on-push enabled |
-| **S3 Buckets** | Ingest (with event notifications), Clean, Quarantine — all have `DeletionPolicy: Retain` to preserve files when the stack is deleted |
+| **S3 Buckets** | Ingest (with event notifications), Clean, Review, Quarantine — all have `DeletionPolicy: Retain` to preserve files when the stack is deleted |
 | **SQS Queues** | Main queue (600s visibility timeout, 20s long polling) + Dead Letter Queue (120s visibility timeout) |
 | **DLQ Remediation Lambda** | Re-queues failed messages with exponential backoff (60s/300s/900s), max 3 DLQ retries before permanent discard |
 | **CloudWatch Alarms** | DLQ messages (any > 0) and queue age (> 20 min for 5 consecutive minutes) via SNS topic |
@@ -225,6 +227,7 @@ Optional parameters:
 | **NodeInstanceType** | `r7i.large` | EC2 instance type for EKS worker nodes |
 | **DesiredCapacity** | `3` | Number of system nodes in managed node group (3–6) |
 | **PMLEnabled** | `false` | Enable Predictive Machine Learning scanning (requires account support) |
+| **MaxFileSizeMB** | `500` | Maximum file size in MB the scanner will download and scan (1–2048). Files exceeding this limit are moved directly to quarantine via server-side S3 copy without scanning, protecting scanner pods from memory exhaustion |
 
 #### Scan Policy Parameters
 
@@ -281,6 +284,7 @@ After creation, the stack exports key resource identifiers:
 | `IngestBucketName` | S3 bucket for uploading files to scan |
 | `CleanBucketName` | S3 bucket for files that passed scanning |
 | `QuarantineBucketName` | S3 bucket for malicious files |
+| `ReviewBucketName` | S3 bucket for files requiring manual review (decompression limits exceeded) |
 | `FileScanQueueUrl` | SQS queue URL for S3 file events |
 | `FileScanDLQUrl` | SQS dead letter queue URL |
 | `AlarmSNSTopicArn` | SNS topic for scan alarms (subscribe for notifications) |
@@ -474,11 +478,12 @@ aws cloudformation delete-stack --stack-name my-scanner
 
 A pre-delete cleanup Lambda runs automatically during stack deletion — it terminates Karpenter-managed EC2 instances, cleans up orphaned instance profiles, and deletes orphaned EBS volumes before CloudFormation removes the roles and cluster. No manual cleanup is needed for these resources.
 
-Note: All S3 buckets (ingest, clean, quarantine) have `DeletionPolicy: Retain` and are **not deleted** with the stack. This prevents accidental data loss — scanned files and quarantined malware are preserved for forensic investigation or audit. The ECR repository and its images **are** deleted with the stack. To clean up retained buckets after stack deletion:
+Note: All S3 buckets (ingest, clean, review, quarantine) have `DeletionPolicy: Retain` and are **not deleted** with the stack. This prevents accidental data loss — scanned files, review items, and quarantined malware are preserved for forensic investigation or audit. The ECR repository and its images **are** deleted with the stack. To clean up retained buckets after stack deletion:
 
 ```bash
 # List retained buckets (names are in the stack outputs, saved before deletion)
 aws s3 rb s3://<ingest-bucket> --force
 aws s3 rb s3://<clean-bucket> --force
+aws s3 rb s3://<review-bucket> --force
 aws s3 rb s3://<quarantine-bucket> --force
 ```
