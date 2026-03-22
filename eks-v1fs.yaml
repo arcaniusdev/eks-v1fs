@@ -43,6 +43,44 @@ Parameters:
       - r7a.xlarge
       - r6i.large
       - r6i.xlarge
+  MaxDecompressionLayer:
+    Type: Number
+    Description: >
+      Maximum archive nesting depth the scanner will unpack (e.g., a zip inside a zip).
+      Higher values catch deeply nested malware but increase scan time and memory usage.
+      Range: 1-20. Default is unset (unlimited) in the scanner; we default to 10 for
+      balanced protection against nested archive attacks without excessive resource use.
+    Default: 10
+    MinValue: 1
+    MaxValue: 20
+  MaxDecompressionFileCount:
+    Type: Number
+    Description: >
+      Maximum number of files the scanner will extract from a single archive before
+      stopping. Protects against archive bombs containing millions of tiny files that
+      could exhaust memory or stall scanning. 0 means unlimited.
+    Default: 1000
+    MinValue: 0
+  MaxDecompressionRatio:
+    Type: Number
+    Description: >
+      Maximum allowed compression ratio (decompressed size / compressed size). A small
+      file that decompresses to a massive payload is a classic zip bomb indicator. The
+      scanner skips entries exceeding this ratio. Range: 100-2147483647. Default 150
+      means a 1 MB compressed file is allowed to decompress to at most 150 MB.
+    Default: 150
+    MinValue: 100
+    MaxValue: 2147483647
+  MaxDecompressionSize:
+    Type: Number
+    Description: >
+      Maximum total decompressed size in MB the scanner will process from a single
+      archive. Caps total memory/disk consumed when unpacking large archives.
+      Range: 0-2048. 0 means unlimited. Default 512 MB provides headroom for
+      legitimate large archives while capping resource use.
+    Default: 512
+    MinValue: 0
+    MaxValue: 2048
 
 Mappings:
   RegionMap:
@@ -1561,6 +1599,28 @@ Resources:
             --set scanner.ephemeralVolume.storageClass=efs-sc \
             --set scanner.ephemeralVolume.accessMode=ReadWriteMany \
             --set scanner.ephemeralVolume.size=100Gi
+
+          # ---- Configure V1FS scan policy via CLISH ----
+          # The management service needs to be ready before we can run CLISH.
+          # Wait for the management-service deployment rollout, then apply
+          # scan policy settings from CloudFormation parameters.
+          echo "Waiting for V1FS management service to be ready..."
+          kubectl rollout status deployment/my-release-visionone-filesecurity-management-service \
+            -n visionone-filesecurity --timeout=180s
+
+          echo "Applying scan policy settings via CLISH..."
+          kubectl exec deploy/my-release-visionone-filesecurity-management-service \
+            -n visionone-filesecurity -- \
+            clish scanner scan-policy modify \
+              --max-decompression-layer=${MaxDecompressionLayer} \
+              --max-decompression-file-count=${MaxDecompressionFileCount} \
+              --max-decompression-ratio=${MaxDecompressionRatio} \
+              --max-decompression-size=${MaxDecompressionSize}
+
+          echo "Verifying scan policy..."
+          kubectl exec deploy/my-release-visionone-filesecurity-management-service \
+            -n visionone-filesecurity -- \
+            clish scanner scan-policy show
 
           # ---- Install Docker (needed to build scanner app image) ----
           apt-get install -y ca-certificates gnupg lsb-release

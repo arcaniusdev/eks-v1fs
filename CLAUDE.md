@@ -95,6 +95,23 @@ project/
 - **Live cluster patching**: the deploy script substitutes `<SQS_QUEUE_URL>` and `<AWS_REGION>` placeholders with real values. Applying the template file directly with `kubectl apply` will break KEDA with "invalid input region" errors
 - **NodeInstanceType parameter is for the managed node group only** — it controls system nodes (r7i.large default), NOT Karpenter scanner nodes. Karpenter's instance types are defined in the NodePool CRD in bastion UserData
 
+### V1FS Scan Policy (CLISH)
+- **Scan policy is configured via CLISH after Helm install** — the V1FS management service exposes a CLI (`clish`) for runtime scanner configuration. Four decompression settings are available, all controlled via CloudFormation parameters and applied automatically during bastion provisioning
+- **Settings are applied post-install, not via Helm values** — scan policy is a runtime ConfigMap managed by the management service, not a Helm chart value. The bastion UserData waits for the management service rollout, then runs `clish scanner scan-policy modify` with the CloudFormation parameter values
+- **Defaults are unset (unlimited) in the scanner** — without explicit configuration, the scanner has no decompression limits. Our CloudFormation template provides sensible defaults to protect against archive-based attacks
+
+| Parameter | Default | Range | Purpose |
+|---|---|---|---|
+| `MaxDecompressionLayer` | 10 | 1-20 | Max archive nesting depth (zip in zip). Protects against deeply nested malware |
+| `MaxDecompressionFileCount` | 1000 | 0+ (0=unlimited) | Max files extracted from one archive. Protects against file-count bombs |
+| `MaxDecompressionRatio` | 150 | 100-2147483647 | Max compression ratio. A 1 MB file decompressing to >150 MB is flagged as a zip bomb |
+| `MaxDecompressionSize` | 512 | 0-2048 MB (0=unlimited) | Max total decompressed size per archive. Caps memory/disk usage |
+
+- **To view current settings on a live cluster**: `kubectl exec deploy/my-release-visionone-filesecurity-management-service -n visionone-filesecurity -- clish scanner scan-policy show`
+- **To modify settings on a live cluster**: `kubectl exec deploy/my-release-visionone-filesecurity-management-service -n visionone-filesecurity -- clish scanner scan-policy modify --max-decompression-layer=<N> ...`
+- **Changes take effect immediately** — no pod restart required. The scanner detects ConfigMap updates and reloads
+- **CLISH also has agent management commands** (`clish agent`) for ONTAP storage agent integration — not relevant to our SDK-based scanning architecture
+
 ### Karpenter & Scaling
 - **Karpenter replaces Cluster Autoscaler** — provisions nodes directly via EC2 Fleet API (30-60s vs 1-2min). NodePool and EC2NodeClass CRDs are applied in bastion UserData. Managed node group (max 6) is for system components only; scanner workloads run on Karpenter nodes via nodeAffinity
 - **Karpenter instance flexibility** — NodePool allows r7i.xlarge, r7a.xlarge, r6i.xlarge only. On-demand only (no spot). CPU limit of 300 matches vCPU quota
