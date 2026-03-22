@@ -35,6 +35,10 @@
 - **Do not use loose version pins (>=).** Pin exact versions (==). Keep `aiobotocore` and `boto3` botocore versions in sync.
 - **Do not use `:latest` image tags.** Use immutable git SHA tags with ECR `ImageTagMutability: IMMUTABLE`.
 
+### Debugging V1FS
+- **V1FS SDK response and scanner pod logs have different formats.** The SDK returns `foundErrors` with string names (e.g., `ATSE_ZIP_RATIO_ERR`). The V1FS scanner pod logs (fluent-bit) show `atse.error` with numeric codes (e.g., `-71`). Do not look for `atse.error` in the SDK response — it does not exist there.
+- **`kubectl cp` fails on scanner-app pods.** The read-only root filesystem blocks writes. To run scripts inside the pod, upload to S3 and use `kubectl exec` with inline Python, or mount a writable path. Do not attempt `kubectl cp` — it will silently fail.
+
 ### Testing and Operations
 - **`aws s3 sync --quiet` silently swallows errors.** Always verify S3 write access with a single test file before relying on sync results. A sync that completes in seconds for thousands of files likely means it failed silently.
 - **Apply ScaledObject templates through the deploy script, not raw kubectl.** The template file has `<SQS_QUEUE_URL>` and `<AWS_REGION>` placeholders that must be substituted. Applying the raw file breaks KEDA with "invalid input region" errors.
