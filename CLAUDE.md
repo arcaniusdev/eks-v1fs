@@ -39,14 +39,6 @@ Topic-specific docs are in the `docs/` directory:
 | [docs/guardrails.md](docs/guardrails.md) | Do NOT do list, workflow rules, lessons learned, bastion environment notes |
 | [docs/performance.md](docs/performance.md) | KEDA scaling config and performance characteristics |
 
-## Slash Commands
-
-| Command | Purpose |
-|---|---|
-| `/regenerate` | Full teardown + redeploy a fresh stack |
-| `/teardown` | Delete all billable resources in the AWS account |
-| `/upgrade-v1fs` | Safely upgrade V1FS scanner Helm chart with all custom values |
-
 ## File Structure
 
 ```
@@ -81,7 +73,7 @@ project/
 | Managed node group (system only) | 6 | `eks-v1fs.yaml` MaxSize |
 | MAX_CONCURRENT_SCANS | 50 | `k8s/configmap.yaml` |
 | Full-scale concurrent scans | 7,500 | 150 pods × 50 concurrent |
-| vCPU required at full scale | ~200 | Account quota increased to 300 |
+| vCPU required at full scale | ~200 | Default quota is 64 — request increase to at least 300 |
 
 ## Quick Reference — Critical Rules
 
@@ -109,7 +101,7 @@ project/
 - **Karpenter uses a CloudFormation-managed instance profile** — the EC2NodeClass specifies `instanceProfile` (not `role`) referencing `KarpenterNodeInstanceProfile`. Do NOT switch to `role:` — that causes Karpenter to create dynamic instance profiles that orphan on stack deletion
 - **Both scanner-app AND V1FS scanner scale via KEDA on SQS depth** — no CPU-based HPA. The Helm chart's `scanner.autoscaling.enabled` must be `false` to prevent HPA conflicts. Tuned values: scanner-app threshold=5, V1FS threshold=50, polling interval=10s, cooldown=90s
 - **PodDisruptionBudgets are required** — `k8s/pdb.yaml` protects scanner-app (maxUnavailable 25%) and V1FS scanner (minAvailable 1) from Karpenter consolidation during active scanning
-- **AWS on-demand vCPU quota** — 300. Karpenter NodePool `limits.cpu` is set to 300 to match
+- **AWS on-demand vCPU quota** — the default is 64; request an increase to at least 300 via AWS Service Quotas. Set Karpenter NodePool `limits.cpu` in `eks-v1fs.yaml` bastion UserData to match your approved quota
 - **Default VPC must have subnets** — Karpenter v1.3.0 does a dry-run `RunInstances` to validate IAM permissions, which defaults to the default VPC. If the default VPC has no subnets, validation fails with "MissingInput". Do not delete default VPC subnets during account cleanup
 - **V1FS scan cache affects benchmark results** — the scanner caches results by file hash. Running the same files on the same stack produces artificially fast results (~28ms vs ~4.3s real). Clear the cache without redeploying: `kubectl rollout restart deployment/my-release-visionone-filesecurity-scan-cache -n visionone-filesecurity`
 - **V1FS scanner pods do not expose Prometheus metrics** — no `/metrics` HTTP endpoint. Custom I/O-based HPA metrics are not possible without a sidecar proxy
@@ -176,7 +168,7 @@ The deploy script (`scripts/deploy.sh`) waits up to 300s for the scanner-app rol
 
 Karpenter does not interfere with Helm chart upgrades. Rolling updates are handled by the Kubernetes Deployment controller at the pod level. Karpenter only manages nodes. PDBs prevent Karpenter from consolidating nodes during an upgrade.
 
-**V1FS Helm upgrades require re-specifying all custom `--set` values.** A plain `helm upgrade` without them reverts to chart defaults, re-enabling HPA (conflicts with KEDA) and resetting resources. See the "Updating the V1FS Scanner" section in README.md or use the `/upgrade-v1fs` slash command.
+**V1FS Helm upgrades require re-specifying all custom `--set` values.** A plain `helm upgrade` without them reverts to chart defaults, re-enabling HPA (conflicts with KEDA) and resetting resources. See the "Updating the V1FS Scanner" section in README.md.
 
 ## Performance Characteristics
 
