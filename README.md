@@ -226,14 +226,42 @@ Optional parameters:
 | **DesiredCapacity** | `3` | Number of system nodes in managed node group (3–6) |
 | **PMLEnabled** | `false` | Enable Predictive Machine Learning scanning (requires account support) |
 
+#### Scan Policy Parameters
+
+These parameters configure the V1FS scanner's decompression behavior, controlling how the scanner handles compressed archives (ZIP, RAR, nested archives, etc.). Without explicit limits, the scanner defaults to unlimited — these parameters provide protection against archive-based attacks while allowing legitimate files through.
+
+| Parameter | Default | Range | Description |
+|---|---|---|---|
+| **MaxDecompressionLayer** | `10` | 1–20 | Maximum archive nesting depth. Controls how many levels of nested archives the scanner will unpack (e.g., a zip inside a zip inside a zip). Higher values catch deeply nested malware but increase scan time and memory usage. A value of 10 handles virtually all legitimate archives while blocking excessive nesting used in evasion techniques |
+| **MaxDecompressionFileCount** | `1000` | 0+ (0 = unlimited) | Maximum number of files the scanner will extract from a single archive before stopping. Protects against archive bombs that contain millions of tiny files designed to exhaust memory or stall scanning. 1000 is sufficient for most legitimate archives including large software packages |
+| **MaxDecompressionRatio** | `150` | 100–2147483647 | Maximum allowed compression ratio (decompressed size ÷ compressed size). A classic zip bomb is a small file that decompresses to an enormous payload — the scanner skips entries exceeding this ratio. At the default of 150, a 1 MB compressed file is allowed to decompress to at most 150 MB |
+| **MaxDecompressionSize** | `512` | 0–2048 MB (0 = unlimited) | Maximum total decompressed size in MB the scanner will process from a single archive. Caps the total memory and disk consumed when unpacking large archives. 512 MB provides ample headroom for legitimate large archives while preventing resource exhaustion |
+
+These settings are applied automatically during stack creation via the V1FS management service CLI (CLISH). To view or modify settings on a running cluster:
+
+```bash
+# View current scan policy
+kubectl exec deploy/my-release-visionone-filesecurity-management-service \
+  -n visionone-filesecurity -- clish scanner scan-policy show
+
+# Modify settings (changes take effect immediately, no pod restart required)
+kubectl exec deploy/my-release-visionone-filesecurity-management-service \
+  -n visionone-filesecurity -- clish scanner scan-policy modify \
+  --max-decompression-layer=10 \
+  --max-decompression-file-count=1000 \
+  --max-decompression-ratio=150 \
+  --max-decompression-size=512
+```
+
 You don't need to clone the repo to deploy. The bastion host UserData automatically:
 
 1. Installs kubectl, Helm, eksctl, Docker, and the AWS CLI
 2. Configures kubeconfig and creates the `visionone-filesecurity` namespace
 3. Installs Karpenter and KEDA via Helm
 4. Deploys the Vision One File Security scanner pods via Helm (GPG-verified)
-5. Clones this repo, builds the scanner app Docker image, pushes it to ECR
-6. Deploys the scanner app (ServiceAccount, ConfigMap, Deployment, KEDA ScaledObject) to the cluster
+5. Configures the scan policy decompression limits via CLISH
+6. Clones this repo, builds the scanner app Docker image, pushes it to ECR
+7. Deploys the scanner app (ServiceAccount, ConfigMap, Deployment, KEDA ScaledObject) to the cluster
 
 If you want to further develop the application using [Claude Code](https://claude.ai/claude-code), clone the repo — it includes `CLAUDE.md` and supporting files in the `docs/` directory that provide Claude with comprehensive project context, architectural constraints, and operational guardrails.
 
@@ -406,6 +434,7 @@ These resources are managed separately from the Helm chart and are not affected 
 - **PodDisruptionBudgets** — applied via `kubectl`
 - **Pod Identity associations** — managed by CloudFormation
 - **Scanner-app deployment** — separate deployment, not part of the V1FS chart
+- **Scan policy (CLISH settings)** — stored in the management service ConfigMap, not in Helm values. Decompression limits persist across `helm upgrade`
 
 ### Verify after upgrade
 
