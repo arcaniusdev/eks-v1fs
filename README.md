@@ -226,7 +226,7 @@ Optional parameters:
 | **DesiredCapacity** | `3` | Number of system nodes in managed node group (3–6) |
 | **PMLEnabled** | `false` | Enable Predictive Machine Learning scanning (requires account support) |
 
-You don't need to clone the repo. The bastion host UserData automatically:
+You don't need to clone the repo to deploy. The bastion host UserData automatically:
 
 1. Installs kubectl, Helm, eksctl, Docker, and the AWS CLI
 2. Configures kubeconfig and creates the `visionone-filesecurity` namespace
@@ -234,6 +234,8 @@ You don't need to clone the repo. The bastion host UserData automatically:
 4. Deploys the Vision One File Security scanner pods via Helm (GPG-verified)
 5. Clones this repo, builds the scanner app Docker image, pushes it to ECR
 6. Deploys the scanner app (ServiceAccount, ConfigMap, Deployment, KEDA ScaledObject) to the cluster
+
+If you want to further develop the application using [Claude Code](https://claude.ai/claude-code), clone the repo — it includes `CLAUDE.md` and supporting files in the `docs/` directory that provide Claude with comprehensive project context, architectural constraints, and operational guardrails.
 
 Stack creation takes approximately 20-30 minutes. Monitor progress:
 
