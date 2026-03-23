@@ -149,7 +149,7 @@ The review scanner uses the **same Docker image** as the main scanner — behavi
 
 - **`SQS_QUEUE_URL`**: points to the review SQS queue (`ReviewScanQueueUrl`)
 - **`S3_INGEST_BUCKET`**: points to the review bucket (reads files from review, not ingest)
-- **`V1FS_SERVER_ADDR`**: points to `review-release-visionone-filesecurity-scanner:50051` (the review V1FS scanner release with no decompression limits)
+- **`V1FS_SERVER_ADDR`**: points to `rv-visionone-filesecurity-scanner:50051` (the review V1FS scanner release with no decompression limits)
 - **`REVIEW_ROUTING_ENABLED=false`**: prevents routing files back to the review bucket, which would create an infinite loop. Files are routed only to clean or quarantine
 - **`AUDIT_LOG_GROUP`**: points to `review-audit-${StackName}` for separate audit trail
 

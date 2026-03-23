@@ -26,7 +26,7 @@
 - **Do not `await` `amaas.grpc.aio.init()`.** It's synchronous despite being in the `aio` module. `quit()` and `scan_buffer()` ARE async.
 - **Do not enable PML unless the account supports it.** `pml=True` on unsupported accounts returns gRPC UNIMPLEMENTED.
 - **V1FS scanner pods do not expose Prometheus metrics.** No `/metrics` HTTP endpoint on any port. Tested ports 9090, 9091, 8080, 8081, 2112 — all connection refused. Custom I/O-based HPA metrics require a sidecar proxy (Envoy/Istio), which is not worth the complexity.
-- **Do not apply CLISH scan policy to `review-release`** — it must run with unlimited decompression to properly analyze files that exceeded the main scanner's limits.
+- **Do not apply CLISH scan policy to `rv`** — it must run with unlimited decompression to properly analyze files that exceeded the main scanner's limits.
 - **Do not set `REVIEW_ROUTING_ENABLED=true` on the review scanner** — it will create an infinite routing loop where files are perpetually routed back to the review bucket and re-scanned.
 
 ### Networking

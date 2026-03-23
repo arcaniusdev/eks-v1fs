@@ -28,7 +28,7 @@ All resources are created by `eks-v1fs.yaml`. The scanner application should NOT
 - **LB Controller Helm release**: `aws-load-balancer-controller` in `kube-system`
 - **Karpenter Helm release**: `karpenter` in `kube-system` — provisions scanner workload nodes directly via EC2 Fleet API. NodePool `scanner-pool` and EC2NodeClass `scanner-nodes` applied inline in bastion UserData. EC2NodeClass uses `instanceProfile` (not `role`) referencing the CloudFormation-managed `KarpenterNodeInstanceProfile` — this ensures clean deletion with the stack
 - **KEDA Helm release**: `keda` in `keda` namespace — scales scanner app replicas based on SQS queue depth
-- **Review scanner Helm release**: `review-release` from `visionone-filesecurity/visionone-filesecurity` chart, same custom values as `my-release` (HPA disabled, 800m CPU / 2Gi memory, dbEnabled, EFS ephemeral volume). No CLISH scan policy applied — runs with unlimited decompression for deep analysis. Shares the same `token-secret` as the main release
+- **Review scanner Helm release**: `rv` from `visionone-filesecurity/visionone-filesecurity` chart, same custom values as `my-release` (HPA disabled, 800m CPU / 2Gi memory, dbEnabled, EFS ephemeral volume). No CLISH scan policy applied — runs with unlimited decompression for deep analysis. Shares the same `token-secret` as the main release
 - **KEDA ScaledObjects**: Two SQS-driven scalers sharing the same TriggerAuthentication (`provider: aws`, `identityOwner: keda`):
   - `scanner-app-sqs-scaler` — 1 pod per 5 messages, min 1 / max 150, polling 10s, cooldown 90s
   - `v1fs-scanner-sqs-scaler` — 1 pod per 50 messages, min 1 / max 150, polling 10s, cooldown 90s

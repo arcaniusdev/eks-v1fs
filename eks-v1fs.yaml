@@ -1643,8 +1643,8 @@ Resources:
           kubectl create secret generic device-token-secret \
             -n visionone-review 2>/dev/null || true
 
-          echo "Installing review-release V1FS scanner (unlimited decompression)..."
-          helm install review-release visionone-filesecurity/visionone-filesecurity \
+          echo "Installing rv V1FS scanner (unlimited decompression)..."
+          helm install rv visionone-filesecurity/visionone-filesecurity \
             -n visionone-review \
             --set scanner.autoscaling.enabled=false \
             --set scanner.resources.requests.cpu=800m \
@@ -1658,7 +1658,7 @@ Resources:
             --set scanner.ephemeralVolume.accessMode=ReadWriteMany \
             --set scanner.ephemeralVolume.size=100Gi
 
-          # No CLISH scan-policy for review-release — defaults are unlimited.
+          # No CLISH scan-policy for rv — defaults are unlimited.
           # The review pipeline re-scans files that exceeded limits in the main pipeline.
 
           # ---- Install Docker (needed to build scanner app image) ----

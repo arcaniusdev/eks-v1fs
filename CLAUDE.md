@@ -62,7 +62,7 @@ project/
 │   ├── scaledobject.yaml         # KEDA ScaledObjects + TriggerAuthentication for SQS-driven autoscaling (both scanner-app and V1FS scanner)
 │   ├── review-serviceaccount.yaml  # ServiceAccount: review-scanner-app (Pod Identity, NO annotations)
 │   ├── review-deployment.yaml      # Review scanner deployment (same image, different config)
-│   ├── review-networkpolicy.yaml   # Egress restricted to DNS, review-release V1FS scanner, AWS HTTPS
+│   ├── review-networkpolicy.yaml   # Egress restricted to DNS, rv V1FS scanner, AWS HTTPS
 │   └── review-scaledobject.yaml    # KEDA ScaledObjects for review pipeline (scale to zero, max 5)
 └── scripts/
     ├── build-and-push.sh         # Build Docker image and push to ECR (tagged with git SHA)
@@ -126,7 +126,7 @@ Review pipeline scales to zero when idle (min replicas = 0).
 - **MAX_FILE_SIZE_MB is configurable** — files exceeding this limit (default 500 MB) are moved directly to quarantine without scanning via server-side S3 copy. Set via the `MAX_FILE_SIZE_MB` environment variable in the configmap
 
 ### Review Pipeline (Deep Analysis)
-- **Second Helm release `review-release`** — installed with no CLISH scan policy applied (unlimited decompression). This allows the review scanner to fully analyze archives that exceeded the main scanner's decompression limits
+- **Second Helm release `rv`** — installed with no CLISH scan policy applied (unlimited decompression). This allows the review scanner to fully analyze archives that exceeded the main scanner's decompression limits
 - **Review scanner reads from the review bucket** — routes files ONLY to clean or quarantine (never back to review). `REVIEW_ROUTING_ENABLED=false` in the review scanner ConfigMap prevents infinite routing loops
 - **Scale to zero when idle** — min 0, max 5 pods, cooldown 300s. The review pipeline handles low-volume deep analysis, not high-throughput scanning
 - **Shares the same `token-secret`** — no second V1FS registration token is needed. Both Helm releases use the same token

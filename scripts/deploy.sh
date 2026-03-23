@@ -150,7 +150,7 @@ data:
   S3_CLEAN_BUCKET: "$S3_CLEAN_BUCKET"
   S3_QUARANTINE_BUCKET: "$S3_QUARANTINE_BUCKET"
   S3_REVIEW_BUCKET: ""
-  V1FS_SERVER_ADDR: "review-release-visionone-filesecurity-scanner:50051"
+  V1FS_SERVER_ADDR: "rv-visionone-filesecurity-scanner:50051"
   V1FS_API_KEY_SECRET_ARN: "$V1FS_API_KEY_SECRET_ARN"
   AWS_REGION: "$AWS_REGION"
   LOG_LEVEL: "INFO"

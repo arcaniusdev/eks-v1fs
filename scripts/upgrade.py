@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Safely upgrade both V1FS Helm releases (my-release and review-release)
+Safely upgrade both V1FS Helm releases (my-release and rv)
 while preserving all custom values required by the EKS scanning pipeline.
 
 Usage:
@@ -43,7 +43,7 @@ NAMESPACE = "visionone-filesecurity"
 REVIEW_NAMESPACE = "visionone-review"
 RELEASES = [
     ("my-release", NAMESPACE),
-    ("review-release", REVIEW_NAMESPACE),
+    ("rv", REVIEW_NAMESPACE),
 ]
 MGMT_DEPLOY = "my-release-visionone-filesecurity-management-service"
 
@@ -170,7 +170,7 @@ def main():
                 f"kubectl exec deploy/{MGMT_DEPLOY} -n {NAMESPACE} -- "
                 f"clish scanner scan-policy show"
             )
-    print("  NOTE: review-release intentionally has NO scan policy (unlimited decompression).")
+    print("  NOTE: rv intentionally has NO scan policy (unlimited decompression).")
 
     # Step 6: Verify no HPA conflict
     print("\n[6/7] Checking for HPA conflicts...")

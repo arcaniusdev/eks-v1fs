@@ -53,7 +53,7 @@ For more information, see the [Vision One File Security Helm chart repository](h
        Review Scanner Pod (EKS)      Review DLQ Lambda
           |            |
      Download file   Scan via gRPC
-     from Review     (review-release
+     from Review     (rv
      Bucket          V1FS — no limits)
           |
      +----+----+
@@ -103,7 +103,7 @@ The `eks-v1fs.yaml` template creates everything:
 | **Metrics Server** | Provides CPU/memory metrics for cluster monitoring |
 | **KEDA** | Scales both scanner-app and V1FS scanner pods based on SQS queue depth; also scales review pipeline pods |
 | **Karpenter NodePool** | Provisions xlarge scanner nodes (r7i/r7a/r6i) directly via EC2 Fleet API; consolidates underutilized nodes automatically |
-| **V1FS Review Release** | Second Helm release (`review-release`) with no CLISH scan policy — unlimited decompression for deep analysis of review bucket files |
+| **V1FS Review Release** | Second Helm release (`rv`) with no CLISH scan policy — unlimited decompression for deep analysis of review bucket files |
 | **EFS Filesystem** | Encrypted shared storage (ReadWriteMany) for V1FS scanner ephemeral volume across multiple pods |
 | **Pre-delete Cleanup Lambda** | Runs automatically during stack deletion — terminates Karpenter EC2 instances, cleans up orphaned instance profiles, and deletes orphaned EBS volumes before CloudFormation deletes the roles and cluster |
 | **Bastion Host** | Provisions the cluster, installs Helm charts, builds and deploys the scanner app |
@@ -291,7 +291,7 @@ You don't need to clone the repo to deploy. The bastion host UserData automatica
 3. Installs Karpenter and KEDA via Helm
 4. Deploys the Vision One File Security scanner pods via Helm (GPG-verified)
 5. Configures the scan policy decompression limits via CLISH
-6. Installs second V1FS scanner release (`review-release`) with unlimited decompression (no CLISH scan policy)
+6. Installs second V1FS scanner release (`rv`) with unlimited decompression (no CLISH scan policy)
 7. Clones this repo, builds the scanner app Docker image, pushes it to ECR
 8. Deploys the scanner app and review scanner app (`deploy.sh --review`) to the cluster
 
@@ -434,7 +434,7 @@ The Helm chart's default behavior conflicts with our architecture in several way
 
 ### Safe upgrade procedure
 
-Both V1FS Helm releases (`my-release` and `review-release`) must be upgraded together. When TrendAI releases a new scanner image, upgrade via the bastion host using Session Manager:
+Both V1FS Helm releases (`my-release` and `rv`) must be upgraded together. When TrendAI releases a new scanner image, upgrade via the bastion host using Session Manager:
 
 ```bash
 aws ssm start-session --target <bastion-instance-id>
@@ -459,8 +459,8 @@ helm upgrade my-release visionone-filesecurity/visionone-filesecurity \
   --set scanner.ephemeralVolume.accessMode=ReadWriteMany \
   --set scanner.ephemeralVolume.size=100Gi
 
-# Upgrade the review-release (same values, but do NOT apply CLISH scan policy after)
-helm upgrade review-release visionone-filesecurity/visionone-filesecurity \
+# Upgrade the rv (same values, but do NOT apply CLISH scan policy after)
+helm upgrade rv visionone-filesecurity/visionone-filesecurity \
   -n visionone-filesecurity \
   --set scanner.autoscaling.enabled=false \
   --set scanner.resources.requests.cpu=800m \
@@ -475,7 +475,7 @@ helm upgrade review-release visionone-filesecurity/visionone-filesecurity \
   --set scanner.ephemeralVolume.size=100Gi
 ```
 
-**Do not apply CLISH scan policy to `review-release`** — it must run with unlimited decompression to properly analyze files that exceeded the main scanner's limits.
+**Do not apply CLISH scan policy to `rv`** — it must run with unlimited decompression to properly analyze files that exceeded the main scanner's limits.
 
 **Do not use `--reuse-values`** — if the new chart version renames or adds values, `--reuse-values` can cause silent misconfiguration.
 
@@ -490,7 +490,7 @@ aws ssm start-session --target <bastion-instance-id>
 python3 /opt/eks-v1fs/scripts/upgrade.py
 ```
 
-The script upgrades both `my-release` and `review-release` with all required custom values, verifies no HPA conflict was introduced, checks all KEDA ScaledObjects, and runs a sanity scan. Use `--dry-run` to preview commands without executing, or `--version X.Y.Z` to target a specific chart version.
+The script upgrades both `my-release` and `rv` with all required custom values, verifies no HPA conflict was introduced, checks all KEDA ScaledObjects, and runs a sanity scan. Use `--dry-run` to preview commands without executing, or `--version X.Y.Z` to target a specific chart version.
 
 ### What does not need re-applying after upgrade
 

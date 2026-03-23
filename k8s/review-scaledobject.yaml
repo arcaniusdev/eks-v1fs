@@ -38,7 +38,7 @@ metadata:
   namespace: visionone-review
 spec:
   scaleTargetRef:
-    name: review-release-visionone-filesecurity-scanner
+    name: rv-visionone-filesecurity-scanner
     kind: Deployment
   minReplicaCount: 0
   maxReplicaCount: 5
