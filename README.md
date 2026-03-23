@@ -16,65 +16,55 @@ For more information, see the [Vision One File Security Helm chart repository](h
 
 ## How It Works
 
-```
-                         S3 Ingest Bucket
-                               |
-                    s3:ObjectCreated event
-                               |
-                               v
-                          SQS Queue ---------> Dead Letter Queue
-                               |                (after 3 failures)
-                               v                       |
-                     Scanner App Pod (EKS)      DLQ Remediation Lambda
-                        |            |          (re-queue with backoff,
-                   Download file   Scan via      max 3 DLQ retries)
-                   from S3         gRPC
-                        |        (in-cluster
-                  +-----+------+------+  V1FS pods)
-                  |            |      |
-              CLEAN       REVIEW   MALICIOUS
-                  |            |      |
-                  v            v      v
-           Clean Bucket  Review   Quarantine
-                         Bucket   Bucket
-                  |         |         |
-              Delete from Ingest Bucket
-                  |         |         |
-         Delete SQS message + write audit log
+The pipeline has two stages: a **main pipeline** that scans every file with decompression limits enforced, and a **review pipeline** that re-scans files whose archives exceeded those limits with no restrictions.
 
-           Review Bucket
-                |
-         s3:ObjectCreated
-                |
-                v
-         Review SQS Queue ---------> Review DLQ
-                |                     (after 3 failures)
-                v
-       Review Scanner Pod (EKS)      Review DLQ Lambda
-          |            |
-     Download file   Scan via gRPC
-     from Review     (rv
-     Bucket          V1FS — no limits)
-          |
-     +----+----+
-     |         |
-   CLEAN    MALICIOUS
-     |         |
-     v         v
-Clean Bucket  Quarantine
+### Main Pipeline
+
+```
+S3 Ingest ──▶ SQS Queue ──▶ Scanner App (EKS) ──▶ V1FS Scanner (gRPC)
+                  │                                       │
+                  ▼                                 ┌─────┼─────┐
+               DLQ (3 failures)                  CLEAN  REVIEW  MALICIOUS
+                  │                                │      │      │
+           Lambda auto-retry                       ▼      ▼      ▼
+          (backoff → discard)               Clean Bucket  │  Quarantine
+                                                          ▼
+                                                   Review Bucket
 ```
 
-1. A file lands in the **Ingest Bucket** (uploaded by a user, application, or pipeline)
-2. S3 sends an event notification to an **SQS queue**
-3. The **scanner app pod** long-polls the queue, picks up the message, and downloads the file into memory
-4. The file is scanned using the **Vision One File Security Python SDK** over gRPC to the in-cluster scanner pods
-5. Based on the result:
-   - **Clean** (`scanResult == 0`, no errors) — file is copied to the Clean Bucket
-   - **Review** (`scanResult == 0`, decompression limit errors) — file is copied to the Review Bucket. The scanner could not fully analyze the archive due to nesting depth, file count, compression ratio, or decompressed size limits. The review pipeline automatically re-scans these files with a second V1FS scanner release that has no decompression limits
-   - **Malicious** (`scanResult > 0`) — file is copied to the Quarantine Bucket
-6. The original file is deleted from the Ingest Bucket and the SQS message is removed
+| Step | What happens |
+|---|---|
+| **Ingest** | A file lands in the S3 Ingest Bucket (uploaded by a user, application, or pipeline). S3 sends an `ObjectCreated` event to the SQS queue. |
+| **Scan** | A scanner-app pod long-polls the queue, downloads the file into memory, and scans it via the V1FS Python SDK over gRPC to the in-cluster scanner pods. |
+| **Route** | The file is copied to one of three destinations based on the scan result, then deleted from the Ingest Bucket. The SQS message is removed and the result is written to the CloudWatch audit trail. |
 
-If scanning fails, the message stays in the queue and is retried. After 3 failures it moves to a Dead Letter Queue, where a Lambda function automatically re-queues it with exponential backoff (60s, 300s, 900s). After 3 DLQ retries (9 total scan attempts), the message is logged as a permanent failure and discarded. Each scan result is written to a CloudWatch Logs audit trail for compliance and troubleshooting.
+**Routing rules:**
+
+| Verdict | Condition | Destination |
+|---|---|---|
+| **Clean** | `scanResult == 0`, no decompression errors | Clean Bucket |
+| **Review** | `scanResult == 0`, decompression limit exceeded | Review Bucket (re-scanned by the review pipeline) |
+| **Malicious** | `scanResult > 0` | Quarantine Bucket |
+
+### Review Pipeline
+
+Files routed to the Review Bucket are archives the main scanner could not fully analyze — the nesting depth, file count, compression ratio, or decompressed size exceeded the configured limits. The review pipeline re-scans these with a second V1FS scanner release (`rv`) that has **no decompression limits**, then routes to Clean or Quarantine.
+
+```
+Review Bucket ──▶ Review SQS ──▶ Review Scanner (EKS) ──▶ V1FS rv (no limits)
+                      │                                          │
+                      ▼                                    ┌─────┴─────┐
+                Review DLQ (3 failures)                 CLEAN      MALICIOUS
+                      │                                    │           │
+               Lambda auto-retry                           ▼           ▼
+                                                    Clean Bucket  Quarantine
+```
+
+The review pipeline scales to zero when idle and uses the same Docker image as the main scanner — behavior is controlled entirely by environment variables.
+
+### Failure Handling
+
+If a scan fails, the SQS message stays in the queue and is retried. After 3 consecutive failures, it moves to a Dead Letter Queue. A Lambda function automatically re-queues DLQ messages with exponential backoff (60s → 300s → 900s). After 3 DLQ retries (9 total scan attempts), the message is logged as a permanent failure and discarded. Both pipelines have independent DLQs and remediation Lambdas.
 
 ## Architecture
 
