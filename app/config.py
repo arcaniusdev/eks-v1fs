@@ -19,6 +19,7 @@ class Config:
     audit_log_group: str
     health_port: int
     max_file_size_mb: int
+    review_routing_enabled: bool
 
 
 def load_config() -> Config:
@@ -27,7 +28,6 @@ def load_config() -> Config:
         "S3_INGEST_BUCKET": os.environ.get("S3_INGEST_BUCKET"),
         "S3_CLEAN_BUCKET": os.environ.get("S3_CLEAN_BUCKET"),
         "S3_QUARANTINE_BUCKET": os.environ.get("S3_QUARANTINE_BUCKET"),
-        "S3_REVIEW_BUCKET": os.environ.get("S3_REVIEW_BUCKET"),
         "V1FS_API_KEY_SECRET_ARN": os.environ.get("V1FS_API_KEY_SECRET_ARN"),
         "AWS_REGION": os.environ.get("AWS_REGION"),
     }
@@ -35,6 +35,11 @@ def load_config() -> Config:
     missing = [k for k, v in required.items() if not v]
     if missing:
         raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+
+    review_routing_enabled = os.environ.get("REVIEW_ROUTING_ENABLED", "true").lower() == "true"
+    s3_review_bucket = os.environ.get("S3_REVIEW_BUCKET", "")
+    if review_routing_enabled and not s3_review_bucket:
+        raise ValueError("S3_REVIEW_BUCKET is required when REVIEW_ROUTING_ENABLED is true")
 
     log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
@@ -47,7 +52,7 @@ def load_config() -> Config:
         s3_ingest_bucket=required["S3_INGEST_BUCKET"],
         s3_clean_bucket=required["S3_CLEAN_BUCKET"],
         s3_quarantine_bucket=required["S3_QUARANTINE_BUCKET"],
-        s3_review_bucket=required["S3_REVIEW_BUCKET"],
+        s3_review_bucket=s3_review_bucket,
         v1fs_server_addr=os.environ.get(
             "V1FS_SERVER_ADDR",
             "my-release-visionone-filesecurity-scanner:50051",
@@ -60,4 +65,5 @@ def load_config() -> Config:
         audit_log_group=os.environ.get("AUDIT_LOG_GROUP", ""),
         health_port=int(os.environ.get("HEALTH_PORT", "8080")),
         max_file_size_mb=int(os.environ.get("MAX_FILE_SIZE_MB", "500")),
+        review_routing_enabled=review_routing_enabled,
     )

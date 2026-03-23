@@ -1023,7 +1023,9 @@ Resources:
                 Action:
                   - sqs:GetQueueAttributes
                   - sqs:GetQueueUrl
-                Resource: !GetAtt FileScanQueue.Arn
+                Resource:
+                  - !GetAtt FileScanQueue.Arn
+                  - !GetAtt ReviewScanQueue.Arn
       Tags:
         - Key: Name
           Value: !Sub KedaOperatorRole-${AWS::StackName}
@@ -1631,6 +1633,25 @@ Resources:
             -n visionone-filesecurity -- \
             clish scanner scan-policy show
 
+          # ---- Install second V1FS release for review pipeline (no decompression limits) ----
+          echo "Installing review-release V1FS scanner (unlimited decompression)..."
+          helm install review-release visionone-filesecurity/visionone-filesecurity \
+            -n visionone-filesecurity \
+            --set scanner.autoscaling.enabled=false \
+            --set scanner.resources.requests.cpu=800m \
+            --set scanner.resources.requests.memory=2Gi \
+            --set visiononeFilesecurity.management.dbEnabled=true \
+            --set databaseContainer.storageClass.create=false \
+            --set databaseContainer.persistence.storageClassName=gp3 \
+            --set databaseContainer.persistence.size=100Gi \
+            --set scanner.ephemeralVolume.enabled=true \
+            --set scanner.ephemeralVolume.storageClass=efs-sc \
+            --set scanner.ephemeralVolume.accessMode=ReadWriteMany \
+            --set scanner.ephemeralVolume.size=100Gi
+
+          # No CLISH scan-policy for review-release — defaults are unlimited.
+          # The review pipeline re-scans files that exceeded limits in the main pipeline.
+
           # ---- Install Docker (needed to build scanner app image) ----
           apt-get install -y ca-certificates gnupg lsb-release
           install -m 0755 -d /etc/apt/keyrings
@@ -1667,6 +1688,11 @@ Resources:
 
           /opt/eks-v1fs/scripts/build-and-push.sh
           /opt/eks-v1fs/scripts/deploy.sh
+
+          # Deploy review scanner pipeline
+          export REVIEW_SQS_QUEUE_URL="${ReviewScanQueue}"
+          export REVIEW_AUDIT_LOG_GROUP="review-audit-${AWS::StackName}"
+          /opt/eks-v1fs/scripts/deploy.sh --review
 
           # If we reach here, everything succeeded
           SIGNAL_STATUS="SUCCESS"
@@ -1788,9 +1814,54 @@ Resources:
         - Key: Purpose
           Value: file-scan-quarantine
 
+  ReviewScanDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub review-scan-dlq-${AWS::StackName}
+      VisibilityTimeout: 120
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub ReviewScanDLQ-${AWS::StackName}
+
+  ReviewScanQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub review-scan-queue-${AWS::StackName}
+      VisibilityTimeout: 600
+      MessageRetentionPeriod: 345600
+      ReceiveMessageWaitTimeSeconds: 20
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ReviewScanDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Name
+          Value: !Sub ReviewScanQueue-${AWS::StackName}
+
+  ReviewSQSQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref ReviewScanQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowS3Notification
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt ReviewScanQueue.Arn
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
   ReviewBucket:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
+    DependsOn: ReviewSQSQueuePolicy
     Type: AWS::S3::Bucket
     Properties:
       BucketEncryption:
@@ -1802,6 +1873,10 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:*
+            Queue: !GetAtt ReviewScanQueue.Arn
       Tags:
         - Key: Name
           Value: !Sub ReviewBucket-${AWS::StackName}
@@ -2087,6 +2162,178 @@ Resources:
       BatchSize: 10
       Enabled: true
 
+  # --- Review Pipeline ---
+
+  ReviewScannerAppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ReviewScannerAppRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: ReviewScannerAppPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: SQSPoll
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource: !GetAtt ReviewScanQueue.Arn
+              - Sid: S3ReviewRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:DeleteObject
+                Resource: !Sub ${ReviewBucket.Arn}/*
+              - Sid: S3CleanWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectTagging
+                Resource: !Sub ${CleanBucket.Arn}/*
+              - Sid: S3QuarantineWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectTagging
+                Resource: !Sub ${QuarantineBucket.Arn}/*
+              - Sid: SecretsManagerApiKey
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref V1FSApiKeySecret
+              - Sid: CloudWatchAuditLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt ReviewAuditLogGroup.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub ReviewScannerAppRole-${AWS::StackName}
+
+  ReviewScannerAppPodIdentity:
+    DependsOn: PodIdentityAgentAddon
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !Sub EKSCluster-${AWS::StackName}
+      Namespace: visionone-filesecurity
+      ServiceAccount: review-scanner-app
+      RoleArn: !GetAtt ReviewScannerAppRole.Arn
+
+  ReviewAuditLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub review-audit-${AWS::StackName}
+      RetentionInDays: 30
+      Tags:
+        - Key: Name
+          Value: !Sub ReviewAuditLogGroup-${AWS::StackName}
+
+  ReviewDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub Review-DLQ-Messages-${AWS::StackName}
+      AlarmDescription: Messages in the review dead-letter queue indicate deep scan failures
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ReviewScanDLQ.QueueName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmSNSTopic
+      OKActions:
+        - !Ref AlarmSNSTopic
+
+  ReviewDLQRemediationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ReviewDLQRemRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ReviewDLQRemediationPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DLQRead
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt ReviewScanDLQ.Arn
+              - Sid: QueueWrite
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt ReviewScanQueue.Arn
+
+  ReviewDLQRemediationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub review-dlq-remediation-${AWS::StackName}
+      Runtime: python3.12
+      Timeout: 60
+      Handler: index.handler
+      Role: !GetAtt ReviewDLQRemediationRole.Arn
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref ReviewScanQueue
+          MAX_DLQ_RETRIES: "3"
+      Code:
+        ZipFile: |
+          import boto3, json, os
+          sqs = boto3.client('sqs')
+          QUEUE_URL = os.environ['QUEUE_URL']
+          MAX_RETRIES = int(os.environ.get('MAX_DLQ_RETRIES', '3'))
+          def handler(event, context):
+              for record in event['Records']:
+                  msg_id = record['messageId']
+                  body = record['body']
+                  attrs = record.get('messageAttributes', {})
+                  retry = int(attrs.get('DLQRetryCount', {}).get('stringValue', '0'))
+                  if retry >= MAX_RETRIES:
+                      print(f"PERMANENT_FAILURE: message {msg_id} exceeded {MAX_RETRIES} DLQ retries, discarding")
+                      continue
+                  retry += 1
+                  delay = min(60 * (5 ** (retry - 1)), 900)
+                  print(f"RE-QUEUE: message {msg_id} DLQ retry {retry}/{MAX_RETRIES} delay={delay}s")
+                  sqs.send_message(QueueUrl=QUEUE_URL, MessageBody=body, DelaySeconds=delay,
+                      MessageAttributes={'DLQRetryCount': {'DataType': 'Number', 'StringValue': str(retry)}})
+
+  ReviewDLQEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt ReviewScanDLQ.Arn
+      FunctionName: !Ref ReviewDLQRemediationLambda
+      BatchSize: 10
+      Enabled: true
+
   # --- Dashboard ---
 
   ScannerDashboard:
@@ -2244,6 +2491,15 @@ Outputs:
   ReviewBucketName:
     Description: S3 bucket for files requiring manual review (decompression limits exceeded)
     Value: !Ref ReviewBucket
+  ReviewScanQueueUrl:
+    Description: SQS queue URL for review bucket scan events
+    Value: !Ref ReviewScanQueue
+  ReviewScanDLQUrl:
+    Description: SQS dead letter queue URL for failed review scans
+    Value: !Ref ReviewScanDLQ
+  ReviewAuditLogGroupName:
+    Description: CloudWatch log group for review scan audit trail
+    Value: !Ref ReviewAuditLogGroup
   FileScanQueueUrl:
     Description: SQS queue URL for S3 file events
     Value: !Ref FileScanQueue

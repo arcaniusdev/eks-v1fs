@@ -8,6 +8,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 K8S_DIR="$SCRIPT_DIR/../k8s"
 
+DEPLOY_REVIEW=false
+for arg in "$@"; do
+  case "$arg" in
+    --review) DEPLOY_REVIEW=true ;;
+  esac
+done
+
 # If any resource env var is missing, fall back to reading stack Outputs
 if [ -z "${SQS_QUEUE_URL:-}" ] || [ -z "${S3_INGEST_BUCKET:-}" ] || \
    [ -z "${S3_CLEAN_BUCKET:-}" ] || [ -z "${S3_QUARANTINE_BUCKET:-}" ] || \
@@ -42,6 +49,10 @@ for o in outputs:
   V1FS_API_KEY_SECRET_ARN="${V1FS_API_KEY_SECRET_ARN:-$(get_output ApiKeySecretArn)}"
   ECR_REPO_URL="${ECR_REPO_URL:-$(get_output ECRRepoUrl)}"
   AUDIT_LOG_GROUP="${AUDIT_LOG_GROUP:-$(get_output ScanAuditLogGroupName)}"
+  if [ "$DEPLOY_REVIEW" = "true" ]; then
+    REVIEW_SQS_QUEUE_URL="${REVIEW_SQS_QUEUE_URL:-$(get_output ReviewScanQueueUrl)}"
+    REVIEW_AUDIT_LOG_GROUP="${REVIEW_AUDIT_LOG_GROUP:-$(get_output ReviewAuditLogGroupName)}"
+  fi
 fi
 
 # Determine image tag: use IMAGE_TAG env var, git SHA, or "latest"
@@ -112,3 +123,58 @@ else
   echo "WARNING: Rollout not yet complete after 300s. This is expected on first deploy while Karpenter provisions a node. The pod will start once the node is ready."
 fi
 kubectl get pods -n visionone-filesecurity -l app=scanner-app
+
+# --- Review Scanner Pipeline (optional) ---
+if [ "$DEPLOY_REVIEW" = "true" ]; then
+  echo ""
+  echo "=== Deploying Review Scanner Pipeline ==="
+
+  echo "Applying review-scanner ServiceAccount..."
+  kubectl apply -f "$K8S_DIR/review-serviceaccount.yaml"
+
+  echo "Applying review-scanner NetworkPolicy..."
+  kubectl apply -f "$K8S_DIR/review-networkpolicy.yaml"
+
+  echo "Generating and applying review-scanner ConfigMap..."
+  cat <<REOF | kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: review-scanner-app-config
+  namespace: visionone-filesecurity
+data:
+  SQS_QUEUE_URL: "$REVIEW_SQS_QUEUE_URL"
+  S3_INGEST_BUCKET: "$S3_REVIEW_BUCKET"
+  S3_CLEAN_BUCKET: "$S3_CLEAN_BUCKET"
+  S3_QUARANTINE_BUCKET: "$S3_QUARANTINE_BUCKET"
+  S3_REVIEW_BUCKET: ""
+  V1FS_SERVER_ADDR: "review-release-visionone-filesecurity-scanner:50051"
+  V1FS_API_KEY_SECRET_ARN: "$V1FS_API_KEY_SECRET_ARN"
+  AWS_REGION: "$AWS_REGION"
+  LOG_LEVEL: "INFO"
+  MAX_CONCURRENT_SCANS: "50"
+  MAX_FILE_SIZE_MB: "${MAX_FILE_SIZE_MB:-500}"
+  TM_AM_SCAN_TIMEOUT_SECS: "600"
+  PML_ENABLED: "${PML_ENABLED:-false}"
+  AUDIT_LOG_GROUP: "${REVIEW_AUDIT_LOG_GROUP:-}"
+  REVIEW_ROUTING_ENABLED: "false"
+REOF
+
+  echo "Applying review-scanner Deployment..."
+  sed -e "s|<ECR_REPO_URL>|${ECR_REPO_URL}|g" \
+      -e "s|<IMAGE_TAG>|${IMAGE_TAG}|g" \
+      "$K8S_DIR/review-deployment.yaml" | kubectl apply -f -
+
+  echo "Applying review-scanner KEDA ScaledObject..."
+  sed -e "s|<SQS_QUEUE_URL>|${REVIEW_SQS_QUEUE_URL}|g" \
+      -e "s|<AWS_REGION>|${AWS_REGION}|g" \
+      "$K8S_DIR/review-scaledobject.yaml" | kubectl apply -f -
+
+  echo "Waiting for review-scanner rollout..."
+  if kubectl rollout status deployment/review-scanner-app -n visionone-filesecurity --timeout=300s; then
+    echo "Review scanner deploy complete."
+  else
+    echo "WARNING: Review scanner rollout not yet complete after 300s."
+  fi
+  kubectl get pods -n visionone-filesecurity -l app=review-scanner-app
+fi

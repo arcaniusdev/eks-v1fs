@@ -235,7 +235,7 @@ class ScannerApp:
                 result.get("fileSHA256", "unknown"),
                 malware_names,
             )
-        elif decompression_errors:
+        elif decompression_errors and self.config.review_routing_enabled:
             dest_bucket = self.config.s3_review_bucket
             verdict = "review"
             tag = "S3-Review"
