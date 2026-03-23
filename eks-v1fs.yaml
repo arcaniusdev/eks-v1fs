@@ -90,6 +90,22 @@ Parameters:
     Default: 500
     MinValue: 1
     MaxValue: 2048
+  ScanTimeoutSeconds:
+    Type: Number
+    Description: >
+      gRPC scan timeout in seconds. Also sets the SQS queue visibility timeout
+      to match, ensuring messages stay invisible while scans are in progress.
+    Default: 600
+    MinValue: 60
+    MaxValue: 3600
+  KarpenterCPULimit:
+    Type: Number
+    Description: >
+      Maximum vCPU Karpenter can provision. Must match your AWS on-demand vCPU
+      quota (Service Quotas). Default quota is 64; request increase to at least 300.
+    Default: 300
+    MinValue: 16
+    MaxValue: 1000
 
 Mappings:
   RegionMap:
@@ -1538,7 +1554,7 @@ Resources:
               budgets:
                 - nodes: "10%"
             limits:
-              cpu: 300
+              cpu: ${KarpenterCPULimit}
               memory: 2400Gi
             weight: 10
           EOFKARPENTER
@@ -1691,6 +1707,7 @@ Resources:
           export AUDIT_LOG_GROUP="scan-audit-${AWS::StackName}"
           export PML_ENABLED="${PMLEnabled}"
           export MAX_FILE_SIZE_MB="${MaxFileSizeMB}"
+          export TM_AM_SCAN_TIMEOUT_SECS="${ScanTimeoutSeconds}"
 
           git clone https://github.com/arcaniusdev/eks-v1fs.git /opt/eks-v1fs
           chmod +x /opt/eks-v1fs/scripts/*.sh
@@ -1838,7 +1855,7 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub review-scan-queue-${AWS::StackName}
-      VisibilityTimeout: 600
+      VisibilityTimeout: !Ref ScanTimeoutSeconds
       MessageRetentionPeriod: 345600
       ReceiveMessageWaitTimeSeconds: 20
       SqsManagedSseEnabled: true
@@ -1907,7 +1924,7 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub file-scan-queue-${AWS::StackName}
-      VisibilityTimeout: 600
+      VisibilityTimeout: !Ref ScanTimeoutSeconds
       MessageRetentionPeriod: 345600
       ReceiveMessageWaitTimeSeconds: 20
       SqsManagedSseEnabled: true

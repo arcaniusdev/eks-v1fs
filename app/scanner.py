@@ -40,7 +40,7 @@ class ScannerApp:
         self._exit_stack = AsyncExitStack()
         self._consecutive_errors = 0
         self._ready = False
-        self._audit_queue = asyncio.Queue(maxsize=1000)
+        self._audit_queue = asyncio.Queue(maxsize=config.audit_queue_max_size)
         self._health_server = None
         self._audit_task = None
 
@@ -278,14 +278,16 @@ class ScannerApp:
             if e.get("name", "") in DECOMPRESSION_ERROR_NAMES
         ]
 
-    async def _extend_visibility(self, receipt_handle, interval=240):
+    async def _extend_visibility(self, receipt_handle, interval=None):
+        if interval is None:
+            interval = max(self.config.sqs_visibility_timeout - 60, 30)
         while True:
             await asyncio.sleep(interval)
             try:
                 await self.sqs_client.change_message_visibility(
                     QueueUrl=self.config.sqs_queue_url,
                     ReceiptHandle=receipt_handle,
-                    VisibilityTimeout=300,
+                    VisibilityTimeout=self.config.sqs_visibility_timeout,
                 )
             except Exception:
                 logger.warning("Failed to extend visibility", exc_info=True)

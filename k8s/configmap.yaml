@@ -9,7 +9,7 @@ data:
   S3_QUARANTINE_BUCKET: "<from QuarantineBucketName output>"
   S3_CLEAN_BUCKET: "<from CleanBucketName output>"
   S3_REVIEW_BUCKET: "<from ReviewBucketName output>"
-  V1FS_SERVER_ADDR: "my-release-visionone-filesecurity-scanner:50051"
+  V1FS_SERVER_ADDR: "<V1FS_RELEASE_NAME>-visionone-filesecurity-scanner:50051"
   V1FS_API_KEY_SECRET_ARN: "<from ApiKeySecretArn output>"
   AWS_REGION: "us-east-1"
   LOG_LEVEL: "INFO"

@@ -20,6 +20,8 @@ class Config:
     health_port: int
     max_file_size_mb: int
     review_routing_enabled: bool
+    sqs_visibility_timeout: int
+    audit_queue_max_size: int
 
 
 def load_config() -> Config:
@@ -66,4 +68,6 @@ def load_config() -> Config:
         health_port=int(os.environ.get("HEALTH_PORT", "8080")),
         max_file_size_mb=int(os.environ.get("MAX_FILE_SIZE_MB", "500")),
         review_routing_enabled=review_routing_enabled,
+        sqs_visibility_timeout=int(os.environ.get("SQS_VISIBILITY_TIMEOUT", "300")),
+        audit_queue_max_size=int(os.environ.get("AUDIT_QUEUE_MAX_SIZE", "1000")),
     )
