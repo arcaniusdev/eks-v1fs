@@ -119,13 +119,13 @@ def main():
     print("=" * 70)
 
     # Step 1: Check current versions
-    print("\n[1/8] Checking current versions...")
+    print("\n[1/9] Checking current versions...")
     for release, ns in RELEASES:
         chart, app = get_installed_version(release, ns)
         print(f"  {release} ({ns}): chart={chart}, app_version={app}")
 
     # Step 2: Capture current scan policy before upgrade
-    print("\n[2/8] Capturing current CLISH scan policy...")
+    print("\n[2/9] Capturing current CLISH scan policy...")
     current_policy = get_current_scan_policy()
     if current_policy:
         for k, v in current_policy.items():
@@ -134,14 +134,14 @@ def main():
         print("  No scan policy values found (will skip re-application).")
 
     # Step 3: Update repo and check available versions
-    print("\n[3/8] Updating Helm repository...")
+    print("\n[3/9] Updating Helm repository...")
     run("helm repo update visionone-filesecurity")
     print("\nAvailable versions:")
     run("helm search repo visionone-filesecurity/visionone-filesecurity --versions | head -5")
 
     # Step 4: Upgrade both releases
     for release, ns in RELEASES:
-        print(f"\n[4/8] Upgrading {release} in {ns}...")
+        print(f"\n[4/9] Upgrading {release} in {ns}...")
         cmd = build_upgrade_cmd(release, ns, args.version)
         if args.dry_run:
             print(f"  DRY RUN: {cmd}")
@@ -150,7 +150,7 @@ def main():
             print(f"  {release} upgraded successfully.")
 
     # Step 5: Re-apply captured CLISH scan policy to my-release only
-    print("\n[5/8] Re-applying CLISH scan policy to my-release...")
+    print("\n[5/9] Re-applying CLISH scan policy to my-release...")
     if not current_policy:
         print("  SKIPPED — no scan policy was set before upgrade.")
     else:
@@ -173,7 +173,7 @@ def main():
     print("  NOTE: rv intentionally has NO scan policy (unlimited decompression).")
 
     # Step 6: Verify no HPA conflict
-    print("\n[6/8] Checking for HPA conflicts...")
+    print("\n[6/9] Checking for HPA conflicts...")
     result = run(f"kubectl get hpa -n {NAMESPACE} --no-headers 2>&1", check=False)
     if result.stdout.strip() and "No resources found" not in result.stdout:
         print("  WARNING: HPA detected! This conflicts with KEDA. Deleting...")
@@ -183,7 +183,7 @@ def main():
         print("  OK — no HPA found.")
 
     # Step 7: Verify ScaledObjects and pods
-    print("\n[7/8] Verifying infrastructure...")
+    print("\n[7/9] Verifying infrastructure...")
     run(f"kubectl get scaledobject -n {NAMESPACE}")
     run(f"kubectl get pods -n {NAMESPACE}")
     print("\n  Scanner pod resources:")
@@ -194,9 +194,9 @@ def main():
 
     # Step 8: Sanity scan
     if args.skip_sanity:
-        print("\n[8/8] Skipping sanity scan (--skip-sanity)")
+        print("\n[8/9] Skipping sanity scan (--skip-sanity)")
     else:
-        print("\n[8/8] Sanity scan...")
+        print("\n[8/9] Sanity scan...")
         if args.dry_run:
             print("  DRY RUN: Would upload clean + EICAR test files")
         else:
@@ -221,6 +221,40 @@ def main():
                 )
             else:
                 print("  WARNING: Could not determine ingest bucket. Skipping sanity scan.")
+
+    # Step 9: Update SSM version parameters for dashboard widget
+    print("\n[9/9] Updating version in SSM Parameter Store...")
+    chart, app = get_installed_version("my-release", NAMESPACE)
+    if not args.dry_run:
+        # Detect stack name from existing SSM parameters or environment
+        stack_result = run(
+            "aws ssm get-parameters-by-path --path /eks-v1fs/ --query 'Parameters[0].Name' --output text 2>/dev/null",
+            check=False,
+        )
+        stack_name = None
+        if stack_result.returncode == 0 and stack_result.stdout.strip():
+            # Extract stack name from parameter path: /eks-v1fs/<stack>/...
+            parts = stack_result.stdout.strip().split("/")
+            if len(parts) >= 3:
+                stack_name = parts[2]
+        if stack_name:
+            region_result = run("aws configure get region 2>/dev/null || echo us-east-1", check=False)
+            region = region_result.stdout.strip() or "us-east-1"
+            run(
+                f'aws ssm put-parameter --name "/eks-v1fs/{stack_name}/v1fs-chart-version" '
+                f'--value "{chart}" --type String --overwrite --region {region}',
+                check=False,
+            )
+            run(
+                f'aws ssm put-parameter --name "/eks-v1fs/{stack_name}/v1fs-app-version" '
+                f'--value "{app}" --type String --overwrite --region {region}',
+                check=False,
+            )
+            print(f"  SSM updated: chart={chart}, app={app}")
+        else:
+            print("  WARNING: Could not detect stack name from SSM. Dashboard version not updated.")
+    else:
+        print(f"  DRY RUN: Would write chart={chart}, app={app} to SSM")
 
     # Summary
     print("\n" + "=" * 70)

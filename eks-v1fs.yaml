@@ -601,6 +601,12 @@ Resources:
                 Resource:
                   - !GetAtt IngestBucket.Arn
                   - !Sub ${IngestBucket.Arn}/*
+              - Sid: SSMVersionParams
+                Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/eks-v1fs/${AWS::StackName}/*
       Tags:
         - Key: Name
           Value: !Sub BastionRole-${AWS::StackName}
@@ -1661,6 +1667,16 @@ Resources:
           # No CLISH scan-policy for rv — defaults are unlimited.
           # The review pipeline re-scans files that exceeded limits in the main pipeline.
 
+          # ---- Write installed V1FS version to SSM Parameter Store ----
+          # The CloudWatch dashboard custom widget reads these to display version info.
+          CHART_VER=$(helm list -n visionone-filesecurity -o json | jq -r '.[0].chart // "unknown"')
+          APP_VER=$(helm list -n visionone-filesecurity -o json | jq -r '.[0].app_version // "unknown"')
+          aws ssm put-parameter --name "/eks-v1fs/${AWS::StackName}/v1fs-chart-version" \
+            --value "$CHART_VER" --type String --overwrite --region ${AWS::Region} || true
+          aws ssm put-parameter --name "/eks-v1fs/${AWS::StackName}/v1fs-app-version" \
+            --value "$APP_VER" --type String --overwrite --region ${AWS::Region} || true
+          echo "V1FS version recorded: chart=$CHART_VER app=$APP_VER"
+
           # ---- Install Docker (needed to build scanner app image) ----
           apt-get install -y ca-certificates gnupg lsb-release
           install -m 0755 -d /etc/apt/keyrings
@@ -2345,6 +2361,109 @@ Resources:
 
   # --- Dashboard ---
 
+  # ---- V1FS Version Tracking (SSM + Lambda for dashboard widget) ----
+
+  V1FSChartVersionParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /eks-v1fs/${AWS::StackName}/v1fs-chart-version
+      Type: String
+      Value: pending
+      Description: Currently installed V1FS Helm chart version
+
+  V1FSAppVersionParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /eks-v1fs/${AWS::StackName}/v1fs-app-version
+      Type: String
+      Value: pending
+      Description: Currently installed V1FS scanner app version
+
+  VersionCheckRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub VersionCheckRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SSMReadVersion
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/eks-v1fs/${AWS::StackName}/*
+
+  VersionCheckLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub versionCheck-${AWS::StackName}
+      Runtime: python3.12
+      Timeout: 15
+      Handler: index.handler
+      Role: !GetAtt VersionCheckRole.Arn
+      Environment:
+        Variables:
+          STACK_NAME: !Ref AWS::StackName
+          HELM_INDEX_URL: https://trendmicro.github.io/visionone-file-security-helm/index.yaml
+      Code:
+        ZipFile: |
+          import json, os, boto3
+          from urllib.request import urlopen, Request
+
+          def handler(event, context):
+              ssm = boto3.client('ssm')
+              stack = os.environ['STACK_NAME']
+              try:
+                  chart_ver = ssm.get_parameter(Name=f'/eks-v1fs/{stack}/v1fs-chart-version')['Parameter']['Value']
+                  app_ver = ssm.get_parameter(Name=f'/eks-v1fs/{stack}/v1fs-app-version')['Parameter']['Value']
+              except Exception:
+                  chart_ver, app_ver = 'unknown', 'unknown'
+
+              latest_chart, latest_app = 'unknown', 'unknown'
+              try:
+                  req = Request(os.environ['HELM_INDEX_URL'], headers={'User-Agent': 'V1FS-VersionCheck/1.0'})
+                  body = urlopen(req, timeout=10).read().decode('utf-8')
+                  in_chart = False
+                  for line in body.splitlines():
+                      s = line.strip()
+                      if s == 'visionone-filesecurity:':
+                          in_chart = True
+                          continue
+                      if in_chart:
+                          if s.startswith('version:') and latest_chart == 'unknown':
+                              latest_chart = s.split(':', 1)[1].strip().strip('"')
+                          elif s.startswith('appVersion:') and latest_app == 'unknown':
+                              latest_app = s.split(':', 1)[1].strip().strip('"')
+                          if latest_chart != 'unknown' and latest_app != 'unknown':
+                              break
+              except Exception:
+                  pass
+
+              installed_short = chart_ver.replace('visionone-filesecurity-', '') if chart_ver.startswith('visionone') else chart_ver
+              up_to_date = (installed_short == latest_chart) if latest_chart != 'unknown' and installed_short != 'unknown' else None
+              icon = '\u2705' if up_to_date else '\u26a0\ufe0f' if up_to_date is False else '\u2753'
+              status = 'Up to date' if up_to_date else 'Update available' if up_to_date is False else 'Unknown'
+
+              md = f"| | Installed | Latest |\n|---|---|---|\n| **Chart** | `{installed_short}` | `{latest_chart}` |\n| **App** | `{app_ver}` | `{latest_app}` |\n\n{icon} **{status}**"
+              return {'markdown': md}
+
+  VersionCheckLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref VersionCheckLambda
+      Action: lambda:InvokeFunction
+      Principal: cloudwatch.amazonaws.com
+
   ScannerDashboard:
     Type: AWS::CloudWatch::Dashboard
     Properties:
@@ -2374,9 +2493,9 @@ Resources:
             {"type":"metric","x":18,"y":1,"width":3,"height":3,
               "properties":{"metrics":[["AWS/SQS","ApproximateNumberOfMessagesNotVisible","QueueName","${FileScanQueue.QueueName}",{"stat":"Maximum","color":"#9467bd","label":"In Flight"}]],
                 "view":"singleValue","region":"${AWS::Region}","title":"In Flight","period":60,"sparkline":true}},
-            {"type":"metric","x":21,"y":1,"width":3,"height":3,
-              "properties":{"metrics":[["AWS/SQS","ApproximateNumberOfMessagesVisible","QueueName","${FileScanDLQ.QueueName}",{"stat":"Maximum","color":"#d62728","label":"DLQ Messages"}]],
-                "view":"singleValue","region":"${AWS::Region}","title":"DLQ","period":60,"sparkline":true}},
+            {"type":"custom","x":21,"y":1,"width":3,"height":3,
+              "properties":{"endpoint":"${VersionCheckLambda.Arn}",
+                "title":"V1FS Version","updateOn":{"refresh":true,"resize":false,"timeRange":false}}},
             {"type":"text","x":0,"y":4,"width":24,"height":1,
               "properties":{"markdown":"## Queue Health"}},
             {"type":"metric","x":0,"y":5,"width":12,"height":6,

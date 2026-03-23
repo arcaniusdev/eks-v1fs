@@ -438,19 +438,62 @@ The Helm chart's default behavior conflicts with our architecture in several way
 | No EFS ephemeral volume | EFS-backed shared ephemeral storage | Scanner pods lose shared scratch space |
 | Default storage class | gp3 StorageClass for database PVC | Database PVC may fail to provision |
 
-### Safe upgrade procedure
+### Upgrade via the bastion host (recommended)
 
-Both V1FS Helm releases (`my-release` and `rv`) must be upgraded together. When TrendAI releases a new scanner image, upgrade via the bastion host using Session Manager:
+The upgrade script on the bastion handles everything: upgrades both Helm releases (`my-release` and `rv`) with all required custom values, verifies no HPA conflict was introduced, checks KEDA ScaledObjects, and runs a sanity scan.
+
+**1. Get the bastion instance ID** from the EC2 console or CLI:
+
+```bash
+aws ec2 describe-instances \
+  --filters "Name=tag:aws:cloudformation:stack-name,Values=<stack-name>" \
+             "Name=tag:aws:cloudformation:logical-id,Values=Bastion" \
+  --query "Reservations[].Instances[].InstanceId" --output text
+```
+
+**2. Connect via SSM Session Manager** (never SSH):
 
 ```bash
 aws ssm start-session --target <bastion-instance-id>
 ```
 
-Then run the upgrade with **all custom values explicitly specified**:
+**3. Set up the session** (required each time — SSM sessions start without shell profile):
 
 ```bash
+export KUBECONFIG=/root/.kube/config
+helm repo add visionone-filesecurity https://trendmicro.github.io/cloudone-filestorage-plugins
 helm repo update visionone-filesecurity
+```
 
+**4. Run the upgrade script:**
+
+```bash
+# Preview what will run (no changes made)
+python3 /opt/eks-v1fs/scripts/upgrade.py --dry-run
+
+# Upgrade to latest chart version
+python3 /opt/eks-v1fs/scripts/upgrade.py
+
+# Pin a specific chart version
+python3 /opt/eks-v1fs/scripts/upgrade.py --version 2.5.0
+
+# Skip the post-upgrade sanity scan
+python3 /opt/eks-v1fs/scripts/upgrade.py --skip-sanity
+```
+
+The script automatically:
+- Upgrades both `my-release` (main) and `rv` (review) with all custom `--set` values
+- Checks that no HPA was re-created (would conflict with KEDA)
+- Verifies KEDA ScaledObjects are active
+- Runs a sanity scan (1 clean + 1 EICAR) unless `--skip-sanity` is passed
+
+CLISH scan policy settings (decompression limits) **persist across `helm upgrade`** — they are stored in a management service ConfigMap separate from Helm-managed resources and do not need to be re-applied.
+
+### Manual helm upgrade (reference)
+
+If you need to run `helm upgrade` directly instead of using the script, you **must** specify all custom values. Do not use `--reuse-values` — if the new chart version renames or adds values, it can cause silent misconfiguration.
+
+```bash
 helm upgrade my-release visionone-filesecurity/visionone-filesecurity \
   -n visionone-filesecurity \
   --set scanner.autoscaling.enabled=false \
@@ -465,7 +508,6 @@ helm upgrade my-release visionone-filesecurity/visionone-filesecurity \
   --set scanner.ephemeralVolume.accessMode=ReadWriteMany \
   --set scanner.ephemeralVolume.size=100Gi
 
-# Upgrade the rv (same values, but do NOT apply CLISH scan policy after)
 helm upgrade rv visionone-filesecurity/visionone-filesecurity \
   -n visionone-review \
   --set scanner.autoscaling.enabled=false \
@@ -481,22 +523,7 @@ helm upgrade rv visionone-filesecurity/visionone-filesecurity \
   --set scanner.ephemeralVolume.size=100Gi
 ```
 
-**Do not apply CLISH scan policy to `rv`** — it must run with unlimited decompression to properly analyze files that exceeded the main scanner's limits.
-
-**Do not use `--reuse-values`** — if the new chart version renames or adds values, `--reuse-values` can cause silent misconfiguration.
-
-CLISH scan policy settings (decompression limits) are stored in a management service ConfigMap that is separate from Helm-managed resources. They **persist across `helm upgrade`** and do not need to be re-applied manually.
-
-### Automated upgrade
-
-To upgrade both releases automatically, use the upgrade script on the bastion host:
-
-```bash
-aws ssm start-session --target <bastion-instance-id>
-python3 /opt/eks-v1fs/scripts/upgrade.py
-```
-
-The script upgrades both `my-release` and `rv` with all required custom values, verifies no HPA conflict was introduced, checks all KEDA ScaledObjects, and runs a sanity scan. Use `--dry-run` to preview commands without executing, or `--version X.Y.Z` to target a specific chart version.
+Do not apply CLISH scan policy to `rv` — it must run with unlimited decompression to properly analyze files that exceeded the main scanner's limits.
 
 ### What does not need re-applying after upgrade
 
