@@ -2,4 +2,3 @@
 .claude/
 __pycache__/
 *.pyc
-stress-test-report-*.html
