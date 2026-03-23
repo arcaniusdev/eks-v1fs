@@ -4,17 +4,18 @@
 
 The scanner app Deployment MUST use `serviceAccountName: scanner-app`. The CloudFormation template creates a Pod Identity Association binding `ScannerAppRole` to this service account in `visionone-filesecurity`. Without this, all S3/SQS calls fail with access denied.
 
-Pod Identity does NOT use IRSA-style annotations. Do not add `eks.amazonaws.com/role-arn` to the ServiceAccount.
+EKS Pod Identity is a newer alternative to IRSA (IAM Roles for Service Accounts). With Pod Identity, the credential binding is managed entirely by CloudFormation (via `PodIdentityAssociation` resources) and a DaemonSet agent on each node that intercepts credential requests. Unlike IRSA, Pod Identity does NOT use ServiceAccount annotations. Do not add `eks.amazonaws.com/role-arn` to the ServiceAccount.
 
 ## Scanner Endpoint
 
-The V1FS scanner runs in the same namespace. In-cluster gRPC endpoint:
+The main V1FS scanner (`my-release`) runs in the `visionone-filesecurity` namespace alongside scanner-app. The review V1FS scanner (`rv`) runs in the `visionone-review` namespace alongside review-scanner-app. Each scanner-app connects to the V1FS scanner in its own namespace via in-cluster gRPC:
 
 ```
-my-release-visionone-filesecurity-scanner:50051
+Main:   my-release-visionone-filesecurity-scanner:50051  (visionone-filesecurity)
+Review: rv-visionone-filesecurity-scanner:50051           (visionone-review)
 ```
 
-Use `amaas.grpc.aio.init()` with this address (not `init_by_region()`). TLS disabled for in-cluster:
+Use `amaas.grpc.aio.init()` with the appropriate address (not `init_by_region()`). TLS disabled for in-cluster:
 
 ```python
 # init() is SYNCHRONOUS — do NOT await it
@@ -55,12 +56,28 @@ await amaas.grpc.aio.quit(handle)
 ```
 
 Key details:
-- `scanResult > 0` = malware; `scanResult == 0` = clean; `scanResult == 0` with `foundErrors` = review (decompression limits exceeded)
+- `scanResult > 0` = malware; `scanResult == 0` with no `foundErrors` = clean; `scanResult == 0` with `foundErrors` indicating decompression limit violations = review (when `REVIEW_ROUTING_ENABLED=true`) or clean (when `REVIEW_ROUTING_ENABLED=false`)
 - `foundErrors` array contains `{name, description}` entries: `ATSE_ZIP_RATIO_ERR`, `ATSE_MAXDECOM_ERR`, `ATSE_ZIP_FILE_COUNT_ERR`, `ATSE_EXTRACT_TOO_BIG_ERR`
 - `init()` is synchronous; `quit()` and `scan_buffer()` are async
 - `scan_buffer()` positional args: `(channel, bytes_buffer, uid, tags=None, pml=False, ...)`
 - SDK response keys: `scanResult`, `fileSHA256`, `fileSHA1`, `foundMalwares`, `foundErrors`, `scanId`, `scannerVersion`, `scanTimestamp`, `fileName`, `schemaVersion`
 - PML not currently supported on this account — use `pml=False`
+
+## File Lifecycle
+
+A file passes through at most two scan stages before reaching its final destination:
+
+1. **File arrives in the ingest bucket** (uploaded by user, application, or pipeline)
+2. **S3 event notification** triggers an SQS message on the main queue
+3. **Scanner-app** (main) picks up the message, downloads the file, scans via gRPC to the main V1FS scanner (`my-release`)
+4. **Routing decision** based on scan result:
+   - **Malicious** (`scanResult > 0`) — copied to quarantine bucket. Done.
+   - **Clean** (`scanResult == 0`, no decompression errors) — copied to clean bucket. Done.
+   - **Oversized** (exceeds `MAX_FILE_SIZE_MB`) — server-side copied to quarantine without scanning. Done.
+   - **Decompression limits exceeded** (`scanResult == 0` with `foundErrors`) — copied to review bucket for deep analysis. Continues to step 5.
+5. **Review bucket S3 event** triggers an SQS message on the review queue
+6. **Review-scanner-app** picks up the message, downloads the file, scans via gRPC to the review V1FS scanner (`rv` — no decompression limits)
+7. **Final routing** — clean or quarantine only (never back to review). `REVIEW_ROUTING_ENABLED=false` and IAM policy both enforce this
 
 ## Core Application Logic
 
@@ -133,7 +150,8 @@ Scanner-app pod resources:
 Automated by bastion UserData during stack creation:
 1. Clones repo from `https://github.com/arcaniusdev/eks-v1fs.git` to `/opt/eks-v1fs`
 2. `build-and-push.sh` — builds image, pushes to ECR with git SHA tag
-3. `deploy.sh` — applies ServiceAccount, ConfigMap, Deployment, KEDA ScaledObject
+3. `deploy.sh` — applies ServiceAccount, ConfigMap, NetworkPolicy, Deployment, PDB, KEDA ScaledObject
+4. `deploy.sh --review` — applies review-specific manifests (review-serviceaccount, review-configmap, review-networkpolicy, review-deployment, review-scaledobject) in the `visionone-review` namespace
 
 Manual re-deployment from bastion:
 ```bash
@@ -141,6 +159,7 @@ export CFN_STACK_NAME=<stack-name>
 export AWS_REGION=us-east-1
 /opt/eks-v1fs/scripts/build-and-push.sh
 /opt/eks-v1fs/scripts/deploy.sh
+/opt/eks-v1fs/scripts/deploy.sh --review  # if review pipeline changes were made
 ```
 
 ## Review Scanner Deployment

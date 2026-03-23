@@ -21,6 +21,7 @@
 - **All S3 buckets survive stack deletion** (`DeletionPolicy: Retain`). Delete manually after stack teardown (ingest, clean, review, quarantine). Versioned buckets (ingest, quarantine) require deleting all object versions and delete markers before the bucket can be removed.
 
 ### V1FS Helm and SDK
+- **Do not install both V1FS Helm releases in the same namespace.** Each V1FS Helm release creates a ServiceAccount named `visionone-filesecurity`. The main release (`my-release`) runs in `visionone-filesecurity` and the review release (`rv`) runs in `visionone-review`. Installing both in the same namespace causes a ServiceAccount ownership conflict that breaks Helm operations.
 - **Do not add `--wait` to V1FS Helm install.** Scanner pods need time to register with Vision One cloud on first startup.
 - **Do not enable Helm chart HPA when using KEDA.** Set `scanner.autoscaling.enabled=false` in the Helm install. Running both HPA and KEDA on the same deployment causes scaling conflicts.
 - **Do not `await` `amaas.grpc.aio.init()`.** It's synchronous despite being in the `aio` module. `quit()` and `scan_buffer()` ARE async.

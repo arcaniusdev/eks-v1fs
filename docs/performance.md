@@ -56,7 +56,7 @@
 
 ## Review Pipeline Scaling
 
-The review pipeline handles low-volume deep analysis of files that exceeded decompression limits.
+The review pipeline handles low-volume deep analysis of files that exceeded the main scanner's decompression limits. A decompression limit violation occurs when an archive (ZIP, RAR, nested archives) exceeds configured thresholds for nesting depth, file count, compression ratio, or total decompressed size. These limits protect the main scanner from archive-based attacks (zip bombs, deeply nested malware) but mean some legitimate complex archives cannot be fully analyzed on the first pass. The review pipeline re-scans these files using a separate V1FS scanner release (`rv`) with no decompression limits, allowing complete analysis.
 
 - **ScaledObject**: `review-scanner-app-sqs-scaler` — scales review-scanner-app pods based on review SQS queue depth
 - **ScaledObject**: `review-v1fs-scanner-sqs-scaler` — scales review V1FS scanner pods based on review SQS queue depth

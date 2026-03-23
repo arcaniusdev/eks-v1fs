@@ -123,13 +123,13 @@ Review pipeline scales to zero when idle (min replicas = 0).
 - **To modify settings on a live cluster**: `kubectl exec deploy/my-release-visionone-filesecurity-management-service -n visionone-filesecurity -- clish scanner scan-policy modify --max-decompression-layer=<N> ...`
 - **Changes take effect immediately** — no pod restart required. The scanner detects ConfigMap updates and reloads
 - **CLISH also has agent management commands** (`clish agent`) for ONTAP storage agent integration — not relevant to our SDK-based scanning architecture
-- **Decompression limit violations route to the review bucket** — when the V1FS scanner returns `scanResult=0` (clean) but includes `foundErrors` entries indicating decompression limits were exceeded, scanner-app routes the file to the review bucket instead of the clean bucket. This allows security teams to manually inspect files the scanner could not fully analyze
+- **Decompression limit violations route to the review bucket** — when the main V1FS scanner returns `scanResult=0` (clean) but includes `foundErrors` entries indicating decompression limits were exceeded, scanner-app routes the file to the review bucket instead of the clean bucket. The review pipeline then automatically re-scans the file with a second V1FS scanner release that has no decompression limits, routing it to clean or quarantine based on the full analysis
 - **V1FS SDK `foundErrors` names**: `ATSE_ZIP_RATIO_ERR` (compression ratio exceeded), `ATSE_MAXDECOM_ERR` (nesting depth exceeded), `ATSE_ZIP_FILE_COUNT_ERR` (file count exceeded), `ATSE_EXTRACT_TOO_BIG_ERR` (decompressed size exceeded). These are returned in `result.foundErrors[].name` of the SDK response
 - **MAX_FILE_SIZE_MB is configurable** — files exceeding this limit (default 500 MB) are moved directly to quarantine without scanning via server-side S3 copy. Set via the `MAX_FILE_SIZE_MB` environment variable in the configmap
 
 ### Review Pipeline (Deep Analysis)
-- **Second Helm release `rv`** — installed with no CLISH scan policy applied (unlimited decompression). This allows the review scanner to fully analyze archives that exceeded the main scanner's decompression limits
-- **Review scanner reads from the review bucket** — routes files ONLY to clean or quarantine (never back to review). `REVIEW_ROUTING_ENABLED=false` in the review scanner ConfigMap prevents infinite routing loops
+- **Second Helm release `rv` in `visionone-review` namespace** — installed with no CLISH scan policy applied (unlimited decompression). This allows the review scanner to fully analyze archives that exceeded the main scanner's decompression limits. A separate namespace is required because each V1FS Helm release creates a ServiceAccount named `visionone-filesecurity` — installing both releases in the same namespace causes a ServiceAccount conflict
+- **Review scanner reads from the review bucket** — routes files ONLY to clean or quarantine (never back to review). `REVIEW_ROUTING_ENABLED=false` in the review scanner ConfigMap prevents the application from attempting review routing, and the `ReviewScannerAppRole` IAM policy has no write permission to the review bucket as a defense-in-depth control
 - **Scale to zero when idle** — min 0, max 5 pods, cooldown 300s. The review pipeline handles low-volume deep analysis, not high-throughput scanning
 - **Shares the same `token-secret`** — no second V1FS registration token is needed. Both Helm releases use the same token
 - **Separate audit log group** — `review-audit-${StackName}` for review scan results, independent from the main `scan-audit-${StackName}`
@@ -157,6 +157,10 @@ Review pipeline scales to zero when idle (min replicas = 0).
 - **DLQ visibility timeout must be >= Lambda timeout** — the DLQ has `VisibilityTimeout: 120` (seconds) to satisfy the SQS event source mapping requirement (Lambda timeout is 60s). Without this, CloudFormation fails to create the `DLQEventSourceMapping`
 - **SNS alarm topic requires subscription** — the `AlarmSNSTopic` is created but has no subscribers by default. Subscribe with: `aws sns subscribe --topic-arn <arn> --protocol email --notification-endpoint you@example.com`
 - **CloudWatch Dashboard** — `scanner-${StackName}`, 32 widgets. CFN-managed, created/deleted with the stack. Dashboard URL is in stack outputs
+
+### V1FS Helm Upgrades
+- **Use `upgrade.py` for V1FS Helm upgrades** — `scripts/upgrade.py` safely upgrades both Helm releases (`my-release` and `rv`) while preserving all custom values. It captures the current CLISH scan policy, upgrades both releases, re-applies the scan policy to `my-release` only (not `rv`), checks for HPA conflicts, verifies KEDA ScaledObjects, and runs a sanity scan. Use `--dry-run` to preview commands, `--version X.Y.Z` to pin a chart version, or `--skip-sanity` to skip the test scan
+- **Do not run `helm upgrade` manually without all `--set` values** — a plain `helm upgrade` reverts to chart defaults, re-enabling HPA and resetting resources. The upgrade script ensures all custom values are specified
 
 ### Operational Gotchas
 - **Bastion has S3 ingest write permission** — the bastion role includes `s3:PutObject` and `s3:ListBucket` on the ingest bucket. Use `aws s3 sync` from bastion for fastest file delivery

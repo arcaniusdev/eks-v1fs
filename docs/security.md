@@ -14,7 +14,7 @@
 - ECR scan-on-push enabled for vulnerability scanning
 
 ## Network Security
-- **NetworkPolicy** restricts scanner-app egress to: DNS (53), V1FS gRPC (50051, same namespace), AWS HTTPS (443, external IPs only)
+- **NetworkPolicy** restricts scanner-app egress to: DNS (53), V1FS gRPC (50051, same namespace), AWS HTTPS (443, external IPs only). Separate NetworkPolicy for review-scanner-app with the same egress rules scoped to its own namespace (`visionone-review`)
 - Security groups use least-privilege port rules; node-to-node rule uses all protocols (`IpProtocol: "-1"`) for DNS UDP
 - EKS API endpoint is private-only
 
@@ -32,6 +32,7 @@
 - CloudFormation parameters use `NoEcho: true`
 - Bastion SSH key auto-generated, stored in SSM Parameter Store
 - Scanner app retrieves API key from Secrets Manager at startup via ARN
+- **Never store credentials in files** — API keys, tokens, and passwords must not be stored in source code, configuration files, documentation, or memory files. Always use AWS Secrets Manager for runtime credential retrieval
 
 ## Application Resilience
 - Configurable file size limit (`MAX_FILE_SIZE_MB`, default 500) prevents OOM — oversized files quarantined via server-side S3 copy
@@ -45,5 +46,5 @@
 - EKS audit logging enabled for all control plane components
 - VPC Flow Logs capture all traffic
 - IAM policies use scoped resource ARNs — no account-wide wildcards except where AWS requires them
-- Review scanner IAM role (`ReviewScannerAppRole`) prevents routing loops by excluding review bucket write permissions — the review scanner can only route files to clean or quarantine
+- Review scanner IAM role (`ReviewScannerAppRole`) deliberately has no write permission to the review bucket. This is a security control that enforces a one-way pipeline: files flow from review to clean or quarantine, never back to review. Even if `REVIEW_ROUTING_ENABLED` were misconfigured to `true`, the IAM policy would block the write and the file would fail to route, preventing infinite scanning loops
 - Review pipeline has its own DLQ with remediation Lambda for independent failure handling

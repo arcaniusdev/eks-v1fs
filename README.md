@@ -223,12 +223,12 @@ KEDA and Karpenter get their AWS permissions through Pod Identity — KEDA reads
 
 ### How Credentials Work
 
-The scanner app pod gets AWS permissions automatically through EKS Pod Identity. No access keys are configured anywhere.
+The scanner app pods get AWS permissions automatically through EKS Pod Identity. No access keys are configured anywhere.
 
-1. CloudFormation creates an IAM role (`ScannerAppRole`) with permissions scoped to the specific S3 buckets, SQS queue, and Secrets Manager secret
-2. A Pod Identity Association binds this role to the `scanner-app` Kubernetes service account
-3. The Pod Identity Agent (a DaemonSet on each node) intercepts credential requests from the pod and injects temporary credentials
-4. The app retrieves the V1FS API key from Secrets Manager at startup using these credentials
+1. CloudFormation creates IAM roles with permissions scoped to specific resources — `ScannerAppRole` for the main scanner (ingest/clean/review/quarantine buckets, main SQS queue) and `ReviewScannerAppRole` for the review scanner (review/clean/quarantine buckets, review SQS queue — deliberately no write access to the review bucket)
+2. Pod Identity Associations bind each role to its respective Kubernetes service account (`scanner-app` in `visionone-filesecurity`, `review-scanner-app` in `visionone-review`)
+3. The Pod Identity Agent (a DaemonSet on each node) intercepts credential requests from pods and injects temporary credentials
+4. Each scanner app retrieves the V1FS API key from Secrets Manager at startup using these credentials
 
 ## Prerequisites
 
@@ -418,9 +418,10 @@ export CFN_STACK_NAME=my-scanner
 export AWS_REGION=us-east-1
 /opt/eks-v1fs/scripts/build-and-push.sh
 /opt/eks-v1fs/scripts/deploy.sh
+/opt/eks-v1fs/scripts/deploy.sh --review
 ```
 
-This rebuilds the Docker image, pushes it to ECR, and re-applies the k8s manifests. It does **not** update the V1FS scanner — see [Updating the V1FS Scanner](#updating-the-v1fs-scanner) for that.
+This rebuilds the Docker image, pushes it to ECR, and re-applies the k8s manifests for both the main and review scanner apps. Both use the same Docker image — only the environment variables differ. This does **not** update the V1FS scanner — see [Updating the V1FS Scanner](#updating-the-v1fs-scanner) for that.
 
 ## Updating the V1FS Scanner
 

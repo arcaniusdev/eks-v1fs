@@ -18,3 +18,4 @@ data:
   TM_AM_SCAN_TIMEOUT_SECS: "600"
   PML_ENABLED: "false"
   AUDIT_LOG_GROUP: "<from ScanAuditLogGroupName output>"
+  REVIEW_ROUTING_ENABLED: "true"
