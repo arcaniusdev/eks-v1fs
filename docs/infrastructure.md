@@ -29,7 +29,7 @@ All resources are created by `eks-v1fs.yaml`. The scanner application should NOT
 - **Karpenter Helm release**: `karpenter` in `kube-system` — provisions scanner workload nodes directly via EC2 Fleet API. NodePool `scanner-pool` and EC2NodeClass `scanner-nodes` applied inline in bastion UserData. EC2NodeClass uses `instanceProfile` (not `role`) referencing the CloudFormation-managed `KarpenterNodeInstanceProfile` — this ensures clean deletion with the stack
 - **KEDA Helm release**: `keda` in `keda` namespace — scales scanner app replicas based on SQS queue depth
 - **Review scanner Helm release**: `rv` from `visionone-filesecurity/visionone-filesecurity` chart, same custom values as `my-release` (HPA disabled, 800m CPU / 2Gi memory, dbEnabled, EFS ephemeral volume). No CLISH scan policy applied — runs with unlimited decompression for deep analysis. Shares the same `token-secret` as the main release
-- **KEDA ScaledObjects**: Two SQS-driven scalers sharing the same TriggerAuthentication (`provider: aws`, `identityOwner: keda`):
+- **KEDA ScaledObjects**: Four SQS-driven scalers (two main, two review) sharing the same TriggerAuthentication pattern (`provider: aws`, `identityOwner: keda`):
   - `scanner-app-sqs-scaler` — 1 pod per 5 messages, min 1 / max 150, polling 10s, cooldown 90s
   - `v1fs-scanner-sqs-scaler` — 1 pod per 50 messages, min 1 / max 150, polling 10s, cooldown 90s
   - `review-scanner-app-sqs-scaler` — 1 pod per 50 messages, min 0 / max 5, cooldown 300s, scale to zero when idle
@@ -68,7 +68,7 @@ All four S3 buckets have `DeletionPolicy: Retain` — they survive stack deletio
 - **KarpenterControllerRole**: bound to `karpenter` in `kube-system` via Pod Identity. EC2 fleet/instance management, IAM instance profile read-only (`iam:GetInstanceProfile`), SSM parameter read, pricing read, EKS describe. Instance profile is CloudFormation-managed (`KarpenterNodeInstanceProfile` resource), not dynamically created by Karpenter.
 - **EBSCSIDriverRole**: bound to `ebs-csi-controller-sa` in `kube-system`. AWS managed policy.
 - **EFSCSIDriverRole**: bound to `efs-csi-controller-sa` in `kube-system`. EFS access point CRUD, describe, tag; EC2 describe AZs.
-- **ReviewScannerAppRole**: bound to `review-scanner-app` SA in `visionone-filesecurity` via Pod Identity. Permissions: SQS poll/delete/visibility on ReviewScanQueue; S3 get/delete on review bucket; S3 put/tag on clean and quarantine; Secrets Manager read on API key secret; CloudWatch Logs for review audit trail. Has NO write permission to the review bucket — this prevents routing loops back to the review pipeline.
+- **ReviewScannerAppRole**: bound to `review-scanner-app` SA in `visionone-review` via Pod Identity. Permissions: SQS poll/delete/visibility on ReviewScanQueue; S3 get/delete on review bucket; S3 put/tag on clean and quarantine; Secrets Manager read on API key secret; CloudWatch Logs for review audit trail. Has NO write permission to the review bucket — this prevents routing loops back to the review pipeline.
 
 ## Access
 - **Bastion host**: Ubuntu `t3.medium` in public subnet with AWS CLI v2, kubectl, helm, eksctl pre-installed. Kubeconfig and KUBECONFIG env var pre-configured. Access via AWS Systems Manager Session Manager (primary). SSH key stored in SSM Parameter Store (`BastionKeySSMParameter` output) for emergency use only.

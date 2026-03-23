@@ -398,9 +398,14 @@ k8s/
   networkpolicy.yaml       Egress restricted to DNS, V1FS scanner, and AWS HTTPS
   pdb.yaml                 PodDisruptionBudgets (Karpenter consolidation protection)
   scaledobject.yaml        KEDA ScaledObject + TriggerAuthentication for SQS-driven autoscaling
+  review-serviceaccount.yaml  Review scanner ServiceAccount (Pod Identity, no annotations)
+  review-deployment.yaml      Review scanner deployment (same image, different config)
+  review-networkpolicy.yaml   Egress restricted to DNS, rv V1FS scanner, AWS HTTPS
+  review-scaledobject.yaml    KEDA ScaledObjects for review pipeline (scale to zero, max 5)
 scripts/
   build-and-push.sh        Build Docker image and push to ECR (tagged with git SHA)
   deploy.sh                Template ConfigMap from stack outputs and apply k8s manifests
+  upgrade.py               Safely upgrade both V1FS Helm releases with custom values
 ```
 
 ## Redeploying the Scanner App
@@ -461,7 +466,7 @@ helm upgrade my-release visionone-filesecurity/visionone-filesecurity \
 
 # Upgrade the rv (same values, but do NOT apply CLISH scan policy after)
 helm upgrade rv visionone-filesecurity/visionone-filesecurity \
-  -n visionone-filesecurity \
+  -n visionone-review \
   --set scanner.autoscaling.enabled=false \
   --set scanner.resources.requests.cpu=800m \
   --set scanner.resources.requests.memory=2Gi \

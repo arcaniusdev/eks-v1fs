@@ -66,7 +66,8 @@ project/
 │   └── review-scaledobject.yaml    # KEDA ScaledObjects for review pipeline (scale to zero, max 5)
 └── scripts/
     ├── build-and-push.sh         # Build Docker image and push to ECR (tagged with git SHA)
-    └── deploy.sh                 # Apply k8s manifests to the cluster
+    ├── deploy.sh                 # Apply k8s manifests to the cluster
+    └── upgrade.py                # Safely upgrade both V1FS Helm releases with custom values
 ```
 
 ## Current Scaling Limits
@@ -88,6 +89,7 @@ Review pipeline scales to zero when idle (min replicas = 0).
 ## Quick Reference — Critical Rules
 
 ### Identity & Credentials
+- **Never store credentials in files** — if the user provides API keys, tokens, passwords, or other credentials, advise that storing them in plaintext files is a security risk and offer to store them in AWS Secrets Manager instead. Retrieve credentials from Secrets Manager at runtime rather than embedding them in CLAUDE.md, memory files, scripts, or configuration
 - **Pod Identity, not IRSA** — no `eks.amazonaws.com/role-arn` annotations anywhere
 - **KEDA auth**: `provider: aws`, `identityOwner: keda` (not `aws-eks`, not `operator`)
 - **V1FS SDK**: `init()` is sync (don't await), `scan_buffer()` and `quit()` are async

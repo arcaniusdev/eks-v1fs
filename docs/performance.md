@@ -65,6 +65,7 @@ The review pipeline handles low-volume deep analysis of files that exceeded deco
 - **No PDB** — the review pipeline is low-volume and does not need Karpenter consolidation protection
 
 ## Observability
-- **CloudWatch Dashboard**: `scanner-${StackName}`, 26 widgets (queue health, throughput, latency, detection stats, pod distribution, recent scans). CFN-managed
-- **CloudWatch Alarms**: DLQ messages (any > 0), Queue Age (> 20 min for 5 consecutive minutes), via SNS topic
+- **CloudWatch Dashboard**: `scanner-${StackName}`, 32 widgets (queue health, throughput, latency, detection stats, pod distribution, recent scans, review pipeline metrics). CFN-managed
+- **CloudWatch Alarms**: DLQ messages (any > 0), Queue Age (> 20 min for 5 consecutive minutes), Review DLQ messages (any > 0), via SNS topic
 - **DLQ Remediation Lambda**: auto re-queues with backoff (60s/300s/900s), max 3 DLQ retries before permanent discard
+- **Review DLQ Remediation Lambda**: same retry logic, handles review pipeline failures independently
