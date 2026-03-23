@@ -1,8 +1,18 @@
 apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: sqs-trigger-auth
+  namespace: visionone-review
+spec:
+  podIdentity:
+    provider: aws
+    identityOwner: keda
+---
+apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
   name: review-scanner-app-sqs-scaler
-  namespace: visionone-filesecurity
+  namespace: visionone-review
 spec:
   scaleTargetRef:
     name: review-scanner-app
@@ -25,7 +35,7 @@ apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
   name: review-v1fs-scanner-sqs-scaler
-  namespace: visionone-filesecurity
+  namespace: visionone-review
 spec:
   scaleTargetRef:
     name: review-release-visionone-filesecurity-scanner

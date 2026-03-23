@@ -40,7 +40,11 @@ SCAN_POLICY = {
 }
 
 NAMESPACE = "visionone-filesecurity"
-RELEASES = ["my-release", "review-release"]
+REVIEW_NAMESPACE = "visionone-review"
+RELEASES = [
+    ("my-release", NAMESPACE),
+    ("review-release", REVIEW_NAMESPACE),
+]
 MGMT_DEPLOY = "my-release-visionone-filesecurity-management-service"
 
 
@@ -58,10 +62,10 @@ def run(cmd, check=True, capture=True):
     return result
 
 
-def get_installed_version(release):
+def get_installed_version(release, namespace):
     """Get the currently installed chart version for a release."""
     result = run(
-        f"helm list -n {NAMESPACE} -f '^{release}$' -o json",
+        f"helm list -n {namespace} -f '^{release}$' -o json",
         check=False,
     )
     if result.returncode == 0 and result.stdout.strip():
@@ -71,9 +75,9 @@ def get_installed_version(release):
     return "unknown", "unknown"
 
 
-def build_upgrade_cmd(release, version=None):
+def build_upgrade_cmd(release, namespace, version=None):
     """Build the helm upgrade command with all custom values."""
-    cmd = f"helm upgrade {release} visionone-filesecurity/visionone-filesecurity -n {NAMESPACE}"
+    cmd = f"helm upgrade {release} visionone-filesecurity/visionone-filesecurity -n {namespace}"
     if version:
         cmd += f" --version {version}"
     for key, val in CUSTOM_VALUES.items():
@@ -94,9 +98,9 @@ def main():
 
     # Step 1: Check current versions
     print("\n[1/7] Checking current versions...")
-    for release in RELEASES:
-        chart, app = get_installed_version(release)
-        print(f"  {release}: chart={chart}, app_version={app}")
+    for release, ns in RELEASES:
+        chart, app = get_installed_version(release, ns)
+        print(f"  {release} ({ns}): chart={chart}, app_version={app}")
 
     # Step 2: Update repo and check available versions
     print("\n[2/7] Updating Helm repository...")
@@ -105,9 +109,9 @@ def main():
     run("helm search repo visionone-filesecurity/visionone-filesecurity --versions | head -5")
 
     # Step 3: Upgrade both releases
-    for release in RELEASES:
-        print(f"\n[3/7] Upgrading {release}...")
-        cmd = build_upgrade_cmd(release, args.version)
+    for release, ns in RELEASES:
+        print(f"\n[3/7] Upgrading {release} in {ns}...")
+        cmd = build_upgrade_cmd(release, ns, args.version)
         if args.dry_run:
             print(f"  DRY RUN: {cmd}")
         else:
@@ -188,9 +192,9 @@ def main():
     # Summary
     print("\n" + "=" * 70)
     print("Upgrade complete.")
-    for release in RELEASES:
-        chart, app = get_installed_version(release)
-        print(f"  {release}: chart={chart}, app_version={app}")
+    for release, ns in RELEASES:
+        chart, app = get_installed_version(release, ns)
+        print(f"  {release} ({ns}): chart={chart}, app_version={app}")
     print("=" * 70)
 
 

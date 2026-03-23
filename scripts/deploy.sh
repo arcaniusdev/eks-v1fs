@@ -129,6 +129,8 @@ if [ "$DEPLOY_REVIEW" = "true" ]; then
   echo ""
   echo "=== Deploying Review Scanner Pipeline ==="
 
+  kubectl create namespace visionone-review 2>/dev/null || true
+
   echo "Applying review-scanner ServiceAccount..."
   kubectl apply -f "$K8S_DIR/review-serviceaccount.yaml"
 
@@ -141,7 +143,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: review-scanner-app-config
-  namespace: visionone-filesecurity
+  namespace: visionone-review
 data:
   SQS_QUEUE_URL: "$REVIEW_SQS_QUEUE_URL"
   S3_INGEST_BUCKET: "$S3_REVIEW_BUCKET"
@@ -171,10 +173,10 @@ REOF
       "$K8S_DIR/review-scaledobject.yaml" | kubectl apply -f -
 
   echo "Waiting for review-scanner rollout..."
-  if kubectl rollout status deployment/review-scanner-app -n visionone-filesecurity --timeout=300s; then
+  if kubectl rollout status deployment/review-scanner-app -n visionone-review --timeout=300s; then
     echo "Review scanner deploy complete."
   else
     echo "WARNING: Review scanner rollout not yet complete after 300s."
   fi
-  kubectl get pods -n visionone-filesecurity -l app=review-scanner-app
+  kubectl get pods -n visionone-review -l app=review-scanner-app
 fi

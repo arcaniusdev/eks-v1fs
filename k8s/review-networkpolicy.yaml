@@ -2,7 +2,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: review-scanner-app
-  namespace: visionone-filesecurity
+  namespace: visionone-review
 spec:
   podSelector:
     matchLabels:

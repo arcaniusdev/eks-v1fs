@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: review-scanner-app
-  namespace: visionone-filesecurity
+  namespace: visionone-review
 spec:
   # replicas managed by KEDA ScaledObject (review-scanner-app-sqs-scaler)
   selector:

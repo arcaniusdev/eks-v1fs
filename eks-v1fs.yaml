@@ -1634,9 +1634,18 @@ Resources:
             clish scanner scan-policy show
 
           # ---- Install second V1FS release for review pipeline (no decompression limits) ----
+          # Uses a separate namespace because the Helm chart creates shared ServiceAccounts
+          # (e.g., backend-communicator) that conflict when two releases share a namespace.
+          kubectl create namespace visionone-review 2>/dev/null || true
+          kubectl create secret generic token-secret \
+            --from-literal=registration-token="$(kubectl get secret token-secret -n visionone-filesecurity -o jsonpath='{.data.registration-token}' | base64 -d)" \
+            -n visionone-review 2>/dev/null || true
+          kubectl create secret generic device-token-secret \
+            -n visionone-review 2>/dev/null || true
+
           echo "Installing review-release V1FS scanner (unlimited decompression)..."
           helm install review-release visionone-filesecurity/visionone-filesecurity \
-            -n visionone-filesecurity \
+            -n visionone-review \
             --set scanner.autoscaling.enabled=false \
             --set scanner.resources.requests.cpu=800m \
             --set scanner.resources.requests.memory=2Gi \
@@ -2228,7 +2237,7 @@ Resources:
     Type: AWS::EKS::PodIdentityAssociation
     Properties:
       ClusterName: !Sub EKSCluster-${AWS::StackName}
-      Namespace: visionone-filesecurity
+      Namespace: visionone-review
       ServiceAccount: review-scanner-app
       RoleArn: !GetAtt ReviewScannerAppRole.Arn
 
