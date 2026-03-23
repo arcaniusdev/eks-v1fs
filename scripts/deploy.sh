@@ -8,6 +8,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 K8S_DIR="$SCRIPT_DIR/../k8s"
 
+# Escape special characters for safe sed substitution (prevents injection via variable values)
+sed_escape() { printf '%s\n' "$1" | sed -e 's/[&/\]/\\&/g'; }
+
 # V1FS Helm release names — must match the names used in helm install
 V1FS_RELEASE_NAME="${V1FS_RELEASE_NAME:-my-release}"
 REVIEW_V1FS_RELEASE_NAME="${REVIEW_V1FS_RELEASE_NAME:-rv}"
@@ -108,16 +111,16 @@ data:
 EOF
 
 echo "Applying Deployment..."
-sed -e "s|<ECR_REPO_URL>|${ECR_REPO_URL}|g" \
-    -e "s|<IMAGE_TAG>|${IMAGE_TAG}|g" \
+sed -e "s|<ECR_REPO_URL>|$(sed_escape "$ECR_REPO_URL")|g" \
+    -e "s|<IMAGE_TAG>|$(sed_escape "$IMAGE_TAG")|g" \
     "$K8S_DIR/deployment.yaml" | kubectl apply -f -
 
 echo "Applying PodDisruptionBudgets..."
 kubectl apply -f "$K8S_DIR/pdb.yaml"
 
 echo "Applying KEDA ScaledObject..."
-sed -e "s|<SQS_QUEUE_URL>|${SQS_QUEUE_URL}|g" \
-    -e "s|<AWS_REGION>|${AWS_REGION}|g" \
+sed -e "s|<SQS_QUEUE_URL>|$(sed_escape "$SQS_QUEUE_URL")|g" \
+    -e "s|<AWS_REGION>|$(sed_escape "$AWS_REGION")|g" \
     "$K8S_DIR/scaledobject.yaml" | kubectl apply -f -
 
 echo "Waiting for rollout (Karpenter may need to provision a node first)..."
@@ -167,13 +170,13 @@ data:
 REOF
 
   echo "Applying review-scanner Deployment..."
-  sed -e "s|<ECR_REPO_URL>|${ECR_REPO_URL}|g" \
-      -e "s|<IMAGE_TAG>|${IMAGE_TAG}|g" \
+  sed -e "s|<ECR_REPO_URL>|$(sed_escape "$ECR_REPO_URL")|g" \
+      -e "s|<IMAGE_TAG>|$(sed_escape "$IMAGE_TAG")|g" \
       "$K8S_DIR/review-deployment.yaml" | kubectl apply -f -
 
   echo "Applying review-scanner KEDA ScaledObject..."
-  sed -e "s|<SQS_QUEUE_URL>|${REVIEW_SQS_QUEUE_URL}|g" \
-      -e "s|<AWS_REGION>|${AWS_REGION}|g" \
+  sed -e "s|<SQS_QUEUE_URL>|$(sed_escape "$REVIEW_SQS_QUEUE_URL")|g" \
+      -e "s|<AWS_REGION>|$(sed_escape "$AWS_REGION")|g" \
       "$K8S_DIR/review-scaledobject.yaml" | kubectl apply -f -
 
   echo "Waiting for review-scanner rollout..."

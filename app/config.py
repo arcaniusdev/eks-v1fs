@@ -2,6 +2,20 @@ import logging
 import os
 from dataclasses import dataclass
 
+VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+
+def _int_env(name: str, default: str, min_val: int = 0, max_val: int = 2**31) -> int:
+    """Parse an integer environment variable with bounds validation."""
+    raw = os.environ.get(name, default)
+    try:
+        val = int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be an integer, got: {raw!r}")
+    if not (min_val <= val <= max_val):
+        raise ValueError(f"{name} must be {min_val}-{max_val}, got: {val}")
+    return val
+
 
 @dataclass
 class Config:
@@ -44,8 +58,10 @@ def load_config() -> Config:
         raise ValueError("S3_REVIEW_BUCKET is required when REVIEW_ROUTING_ENABLED is true")
 
     log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    if log_level not in VALID_LOG_LEVELS:
+        raise ValueError(f"Invalid LOG_LEVEL: {log_level!r}. Must be one of {VALID_LOG_LEVELS}")
     logging.basicConfig(
-        level=getattr(logging, log_level, logging.INFO),
+        level=getattr(logging, log_level),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
@@ -62,12 +78,12 @@ def load_config() -> Config:
         v1fs_api_key_secret_arn=required["V1FS_API_KEY_SECRET_ARN"],
         aws_region=required["AWS_REGION"],
         log_level=log_level,
-        max_concurrent_scans=int(os.environ.get("MAX_CONCURRENT_SCANS", "50")),
+        max_concurrent_scans=_int_env("MAX_CONCURRENT_SCANS", "50", 1, 1000),
         pml_enabled=os.environ.get("PML_ENABLED", "false").lower() == "true",
         audit_log_group=os.environ.get("AUDIT_LOG_GROUP", ""),
-        health_port=int(os.environ.get("HEALTH_PORT", "8080")),
-        max_file_size_mb=int(os.environ.get("MAX_FILE_SIZE_MB", "500")),
+        health_port=_int_env("HEALTH_PORT", "8080", 1, 65535),
+        max_file_size_mb=_int_env("MAX_FILE_SIZE_MB", "500", 0, 4096),
         review_routing_enabled=review_routing_enabled,
-        sqs_visibility_timeout=int(os.environ.get("SQS_VISIBILITY_TIMEOUT", "300")),
-        audit_queue_max_size=int(os.environ.get("AUDIT_QUEUE_MAX_SIZE", "1000")),
+        sqs_visibility_timeout=_int_env("SQS_VISIBILITY_TIMEOUT", "300", 30, 43200),
+        audit_queue_max_size=_int_env("AUDIT_QUEUE_MAX_SIZE", "1000", 100, 100000),
     )

@@ -29,7 +29,7 @@ DECOMPRESSION_ERROR_NAMES = frozenset({
 
 
 class ScannerApp:
-    def __init__(self, config):
+    def __init__(self, config) -> None:
         self.config = config
         self.shutdown_event = asyncio.Event()
         self.semaphore = asyncio.Semaphore(config.max_concurrent_scans)
@@ -40,11 +40,11 @@ class ScannerApp:
         self._exit_stack = AsyncExitStack()
         self._consecutive_errors = 0
         self._ready = False
-        self._audit_queue = asyncio.Queue(maxsize=config.audit_queue_max_size)
+        self._audit_queue: asyncio.Queue = asyncio.Queue(maxsize=config.audit_queue_max_size)
         self._health_server = None
         self._audit_task = None
 
-    async def start(self):
+    async def start(self) -> None:
         self.s3_client = await self._exit_stack.enter_async_context(
             self.session.create_client("s3", region_name=self.config.aws_region)
         )
@@ -90,9 +90,11 @@ class ScannerApp:
         finally:
             await self._shutdown()
 
-    async def _poll_loop(self):
+    async def _poll_loop(self) -> None:
         while not self.shutdown_event.is_set():
-            # Backpressure: pause polling when too many tasks are in-flight
+            # Backpressure: pause polling when too many tasks are in-flight.
+            # 2x multiplier avoids pausing too aggressively while the semaphore
+            # controls actual concurrency — this just limits the pending queue.
             if len(self.in_flight) >= self.config.max_concurrent_scans * 2:
                 await asyncio.sleep(0.1)
                 continue
@@ -117,13 +119,18 @@ class ScannerApp:
                 self.in_flight.add(task)
                 task.add_done_callback(self.in_flight.discard)
 
-    async def _guarded_process(self, message):
+    async def _guarded_process(self, message: dict) -> None:
         async with self.semaphore:
             await self._process_message(message)
 
-    async def _process_message(self, message):
+    async def _process_message(self, message: dict) -> None:
         message_id = message.get("MessageId", "unknown")
-        receipt_handle = message["ReceiptHandle"]
+        try:
+            receipt_handle = message["ReceiptHandle"]
+        except KeyError:
+            logger.error("Missing ReceiptHandle in SQS message [msg=%s]", message_id)
+            return
+
         heartbeat_task = asyncio.create_task(
             self._extend_visibility(receipt_handle)
         )
@@ -169,10 +176,17 @@ class ScannerApp:
             except asyncio.CancelledError:
                 pass
 
-    async def _process_record(self, record, message_id):
-        bucket = record["s3"]["bucket"]["name"]
-        key = urllib.parse.unquote_plus(record["s3"]["object"]["key"])
-        size = record["s3"]["object"].get("size", 0)
+    async def _process_record(self, record: dict, message_id: str) -> None:
+        # S3 event records use URL-encoded keys (RFC 3986). Use unquote (not
+        # unquote_plus) because '+' is a valid character in S3 keys.
+        s3_data = record.get("s3", {})
+        bucket = s3_data.get("bucket", {}).get("name")
+        key_encoded = s3_data.get("object", {}).get("key")
+        if not bucket or not key_encoded:
+            logger.error("Malformed S3 record (missing bucket/key) [msg=%s]", message_id)
+            return
+        key = urllib.parse.unquote(key_encoded)
+        size = s3_data.get("object", {}).get("size", 0)
 
         logger.info(
             "Processing s3://%s/%s (%d bytes) [msg=%s]",
@@ -222,51 +236,54 @@ class ScannerApp:
             raise
 
         # Scan
-        scan_start = time.monotonic()
-        result_json = await amaas.grpc.aio.scan_buffer(
-            self.scan_handle,
-            file_bytes,
-            key,
-            pml=self.config.pml_enabled,
-            tags=["S3-Scan"],
-        )
-        scan_duration_ms = int((time.monotonic() - scan_start) * 1000)
-        result = json.loads(result_json)
-        is_malicious = result.get("scanResult", 0) > 0
-        decompression_errors = self._get_decompression_errors(result)
+        try:
+            scan_start = time.monotonic()
+            result_json = await amaas.grpc.aio.scan_buffer(
+                self.scan_handle,
+                file_bytes,
+                key,
+                pml=self.config.pml_enabled,
+                tags=["S3-Scan"],
+            )
+            scan_duration_ms = int((time.monotonic() - scan_start) * 1000)
+            result = json.loads(result_json)
+            is_malicious = result.get("scanResult", 0) > 0
+            decompression_errors = self._get_decompression_errors(result)
 
-        # Route: malicious → quarantine, decompression errors → review, clean → clean
-        if is_malicious:
-            dest_bucket = self.config.s3_quarantine_bucket
-            verdict = "malicious"
-            tag = "S3-Malware"
-            malware_names = [m.get("malwareName", "") for m in result.get("foundMalwares", [])]
-            logger.warning(
-                "MALICIOUS: s3://%s/%s → s3://%s/%s sha256=%s malware=%s",
-                bucket, key, dest_bucket, key,
-                result.get("fileSHA256", "unknown"),
-                malware_names,
-            )
-        elif decompression_errors and self.config.review_routing_enabled:
-            dest_bucket = self.config.s3_review_bucket
-            verdict = "review"
-            tag = "S3-Review"
-            logger.warning(
-                "REVIEW: s3://%s/%s → s3://%s/%s (decompression limit errors: %s)",
-                bucket, key, dest_bucket, key, decompression_errors,
-            )
-        else:
-            dest_bucket = self.config.s3_clean_bucket
-            verdict = "clean"
-            tag = "S3-Clean"
-            logger.info(
-                "CLEAN: s3://%s/%s → s3://%s/%s",
-                bucket, key, dest_bucket, key,
-            )
+            # Route: malicious → quarantine, decompression errors → review, clean → clean
+            if is_malicious:
+                dest_bucket = self.config.s3_quarantine_bucket
+                verdict = "malicious"
+                tag = "S3-Malware"
+                malware_names = [m.get("malwareName", "") for m in result.get("foundMalwares", [])]
+                logger.warning(
+                    "MALICIOUS: s3://%s/%s → s3://%s/%s sha256=%s malware=%s",
+                    bucket, key, dest_bucket, key,
+                    result.get("fileSHA256", "unknown"),
+                    malware_names,
+                )
+            elif decompression_errors and self.config.review_routing_enabled:
+                dest_bucket = self.config.s3_review_bucket
+                verdict = "review"
+                tag = "S3-Review"
+                logger.warning(
+                    "REVIEW: s3://%s/%s → s3://%s/%s (decompression limit errors: %s)",
+                    bucket, key, dest_bucket, key, decompression_errors,
+                )
+            else:
+                dest_bucket = self.config.s3_clean_bucket
+                verdict = "clean"
+                tag = "S3-Clean"
+                logger.info(
+                    "CLEAN: s3://%s/%s → s3://%s/%s",
+                    bucket, key, dest_bucket, key,
+                )
 
-        await self._upload(dest_bucket, key, file_bytes, tag)
-        await self._delete_object(bucket, key)
-        self._enqueue_audit(key, size, verdict, result, scan_duration_ms, message_id)
+            await self._upload(dest_bucket, key, file_bytes, tag)
+            await self._delete_object(bucket, key)
+            self._enqueue_audit(key, size, verdict, result, scan_duration_ms, message_id)
+        finally:
+            del file_bytes  # Explicit cleanup of large buffer
 
     @staticmethod
     def _get_decompression_errors(result: dict) -> list[str]:
@@ -278,7 +295,7 @@ class ScannerApp:
             if e.get("name", "") in DECOMPRESSION_ERROR_NAMES
         ]
 
-    async def _extend_visibility(self, receipt_handle, interval=None):
+    async def _extend_visibility(self, receipt_handle: str, interval: int | None = None) -> None:
         if interval is None:
             interval = max(self.config.sqs_visibility_timeout - 60, 30)
         while True:
@@ -292,21 +309,21 @@ class ScannerApp:
             except Exception:
                 logger.warning("Failed to extend visibility", exc_info=True)
 
-    async def _download(self, bucket, key):
+    async def _download(self, bucket: str, key: str) -> bytes:
         resp = await self.s3_client.get_object(Bucket=bucket, Key=key)
         async with resp["Body"] as stream:
             return await stream.read()
 
-    async def _upload(self, bucket, key, data, tag=None):
+    async def _upload(self, bucket: str, key: str, data: bytes, tag: str | None = None) -> None:
         kwargs = {"Bucket": bucket, "Key": key, "Body": data}
         if tag:
             kwargs["Tagging"] = f"ScanResult={tag}"
         await self.s3_client.put_object(**kwargs)
 
-    async def _delete_object(self, bucket, key):
+    async def _delete_object(self, bucket: str, key: str) -> None:
         await self.s3_client.delete_object(Bucket=bucket, Key=key)
 
-    async def _delete_message(self, receipt_handle):
+    async def _delete_message(self, receipt_handle: str) -> None:
         await self.sqs_client.delete_message(
             QueueUrl=self.config.sqs_queue_url,
             ReceiptHandle=receipt_handle,
@@ -314,13 +331,13 @@ class ScannerApp:
 
     # --- Health Server ---
 
-    async def _start_health_server(self):
+    async def _start_health_server(self) -> None:
         self._health_server = await asyncio.start_server(
             self._handle_health_request, "0.0.0.0", self.config.health_port
         )
         logger.info("Health server listening on port %d", self.config.health_port)
 
-    async def _handle_health_request(self, reader, writer):
+    async def _handle_health_request(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             data = await asyncio.wait_for(reader.read(1024), timeout=5)
             parts = data.decode("utf-8", errors="replace").split(" ")
@@ -337,8 +354,10 @@ class ScannerApp:
             resp = f"HTTP/1.1 {code} {reason}\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n{body}"
             writer.write(resp.encode())
             await writer.drain()
+        except asyncio.TimeoutError:
+            pass  # Expected: client timeout
         except Exception:
-            pass
+            logger.debug("Health request handler error", exc_info=True)
         finally:
             writer.close()
             try:
@@ -348,7 +367,7 @@ class ScannerApp:
 
     # --- Audit Trail ---
 
-    def _enqueue_audit(self, key, size, verdict, result, scan_duration_ms, message_id):
+    def _enqueue_audit(self, key: str, size: int, verdict: str, result: dict, scan_duration_ms: int, message_id: str) -> None:
         if not self.config.audit_log_group:
             return
         entry = {
@@ -370,9 +389,9 @@ class ScannerApp:
         try:
             self._audit_queue.put_nowait(entry)
         except asyncio.QueueFull:
-            logger.warning("Audit queue full, dropping entry for %s", key)
+            logger.error("Audit queue full (%d entries), dropping entry for %s", self.config.audit_queue_max_size, key)
 
-    async def _audit_flush_loop(self):
+    async def _audit_flush_loop(self) -> None:
         stream_name = socket.gethostname()
         try:
             await self.logs_client.create_log_stream(
@@ -385,7 +404,7 @@ class ScannerApp:
                 return
         logger.info("Audit trail: %s/%s", self.config.audit_log_group, stream_name)
         while not self.shutdown_event.is_set() or not self._audit_queue.empty():
-            batch = []
+            batch: list[dict] = []
             try:
                 entry = await asyncio.wait_for(self._audit_queue.get(), timeout=1.0)
                 batch.append(entry)
@@ -411,7 +430,7 @@ class ScannerApp:
 
     # --- Shutdown ---
 
-    async def _shutdown(self):
+    async def _shutdown(self) -> None:
         self._ready = False
         logger.info(
             "Shutting down — waiting for %d in-flight tasks", len(self.in_flight)
@@ -432,7 +451,7 @@ class ScannerApp:
         logger.info("Shutdown complete")
 
 
-def main():
+def main() -> None:
     config = load_config()
     app = ScannerApp(config)
 

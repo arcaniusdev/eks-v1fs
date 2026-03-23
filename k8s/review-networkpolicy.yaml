@@ -8,7 +8,13 @@ spec:
     matchLabels:
       app: review-scanner-app
   policyTypes:
+    - Ingress
     - Egress
+  ingress:
+    # Health probes from kubelet (any source — kubelet IP varies by node)
+    - ports:
+        - protocol: TCP
+          port: 8080
   egress:
     # DNS
     - to: []
