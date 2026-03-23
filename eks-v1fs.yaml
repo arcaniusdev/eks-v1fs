@@ -84,9 +84,9 @@ Parameters:
   MaxFileSizeMB:
     Type: Number
     Description: >
-      Maximum file size in MB that the scanner will download and scan. Files exceeding
-      this limit are moved directly to quarantine via server-side S3 copy without scanning.
-      This protects scanner pods from memory exhaustion on very large files.
+      Maximum file size in MB that the main scanner will download and scan. Files exceeding
+      this limit are routed to the review bucket via server-side S3 copy (no download into
+      pod memory), where the review scanner re-scans them with no size limit.
     Default: 500
     MinValue: 1
     MaxValue: 2048

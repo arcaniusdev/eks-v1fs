@@ -156,7 +156,7 @@ Review pipeline keeps 1 pod warm at all times (min replicas = 1) to avoid cold-s
 - **Review DLQ alarm** — separate CloudWatch alarm for the review pipeline DLQ, same SNS topic as the main DLQ alarm
 - **DLQ visibility timeout must be >= Lambda timeout** — the DLQ has `VisibilityTimeout: 120` (seconds) to satisfy the SQS event source mapping requirement (Lambda timeout is 60s). Without this, CloudFormation fails to create the `DLQEventSourceMapping`
 - **SNS alarm topic requires subscription** — the `AlarmSNSTopic` is created but has no subscribers by default. Subscribe with: `aws sns subscribe --topic-arn <arn> --protocol email --notification-endpoint you@example.com`
-- **CloudWatch Dashboard** — `scanner-${StackName}`, 32 widgets. CFN-managed, created/deleted with the stack. Dashboard URL is in stack outputs
+- **CloudWatch Dashboard** — `scanner-${StackName}`, 29 widgets. CFN-managed, created/deleted with the stack. Dashboard URL is in stack outputs
 
 ### V1FS Helm Upgrades
 - **Use `upgrade.py` for V1FS Helm upgrades** — `scripts/upgrade.py` safely upgrades both Helm releases (`my-release` and `rv`) while preserving all custom values. It captures the current CLISH scan policy, upgrades both releases, re-applies the scan policy to `my-release` only (not `rv`), checks for HPA conflicts, verifies KEDA ScaledObjects, and runs a sanity scan. Use `--dry-run` to preview commands, `--version X.Y.Z` to pin a chart version, or `--skip-sanity` to skip the test scan
@@ -229,5 +229,5 @@ Karpenter does not interfere with Helm chart upgrades. Rolling updates are handl
 - **Cleanup Lambda for graceful stack deletion** — `CleanupLambda` in `eks-v1fs.yaml` automatically terminates Karpenter EC2 instances, cleans up orphaned instance profiles, and deletes orphaned EBS volumes during stack deletion. Users can simply run `aws cloudformation delete-stack` without manual cleanup
 - **DLQ remediation Lambda** — `DLQRemediationLambda` in `eks-v1fs.yaml` auto-re-queues failed messages with exponential backoff (60s/300s/900s), max 3 DLQ retries before permanent discard. Scan failures that are transient (network blips, scanner restarts) recover automatically
 - **CloudWatch Alarms** — DLQ alarm (any messages > 0) and Queue Age alarm (oldest message > 20 min for 5 consecutive minutes) alert via SNS topic. Subscribe to the topic to receive notifications
-- **CloudWatch Dashboard** — `scanner-${StackName}`, 32 widgets covering queue health, scan throughput/latency (Logs Insights), malware detection stats, DLQ remediation, pod distribution, recent scan results, and review pipeline metrics. CFN-managed, created/deleted with the stack. Dashboard URL is in stack outputs
+- **CloudWatch Dashboard** — `scanner-${StackName}`, 29 widgets covering queue health, scan throughput/latency (Logs Insights), malware detection stats, DLQ remediation, pod distribution, recent scan results, and review pipeline metrics. CFN-managed, created/deleted with the stack. Dashboard URL is in stack outputs
 

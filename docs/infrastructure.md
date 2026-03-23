@@ -64,7 +64,7 @@ All four S3 buckets have `DeletionPolicy: Retain` — they survive stack deletio
 - **DLQRemediationLambda**: re-queues failed messages from `FileScanDLQ` with exponential backoff (60s/300s/900s), max 3 DLQ retries before permanent discard
 - **ReviewDLQRemediationLambda**: same retry logic as the main DLQ Lambda, handles review pipeline failures from `ReviewScanDLQ` independently
 - **CloudWatch Alarms**: DLQ messages (any > 0), Queue Age (> 20 min for 5 consecutive minutes), Review DLQ messages (any > 0), via SNS topic
-- **CloudWatch Dashboard**: `scanner-${StackName}`, 32 widgets covering queue health, scan throughput/latency, malware detection stats, DLQ remediation, pod distribution, recent scans, and review pipeline metrics
+- **CloudWatch Dashboard**: `scanner-${StackName}`, 29 widgets covering queue health, scan throughput/latency, malware detection stats, DLQ remediation, pod distribution, recent scans, and review pipeline metrics
 
 ## IAM
 - **ScannerAppRole**: least-privilege, bound to `scanner-app` SA in `visionone-filesecurity` via Pod Identity. Permissions: SQS poll/delete/visibility on FileScanQueue; S3 get/delete on ingest; S3 put/tag on clean, review, and quarantine; Secrets Manager read on API key secret; CloudWatch Logs create stream and put events for scan audit trail.

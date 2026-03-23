@@ -37,7 +37,8 @@
 ## Scanner-App Settings
 - `MAX_CONCURRENT_SCANS`: 50 per pod
 - At max scale: 150 pods × 50 concurrent = 7,500 scan slots
-- Pod resources: 500m/512Mi requests, 1000m/1024Mi limits
+- Main scanner-app resources: 500m/512Mi requests, 1000m/1024Mi limits
+- Review scanner-app resources: 500m/2Gi requests, 1000m/4Gi limits (higher memory for oversize files)
 - Health probes: liveness `/healthz`, readiness `/readyz` on port 8080
 - Scan audit trail: structured JSON to CloudWatch Logs (`scan-audit-${StackName}`), batched writes
 
@@ -65,7 +66,7 @@ The review pipeline handles low-volume deep analysis of files that exceeded the 
 - **No PDB** — the review pipeline is low-volume and does not need Karpenter consolidation protection
 
 ## Observability
-- **CloudWatch Dashboard**: `scanner-${StackName}`, 32 widgets (queue health, throughput, latency, detection stats, pod distribution, recent scans, review pipeline metrics). CFN-managed
+- **CloudWatch Dashboard**: `scanner-${StackName}`, 29 widgets (queue health, throughput, latency, detection stats, pod distribution, recent scans, review pipeline metrics). CFN-managed
 - **CloudWatch Alarms**: DLQ messages (any > 0), Queue Age (> 20 min for 5 consecutive minutes), Review DLQ messages (any > 0), via SNS topic
 - **DLQ Remediation Lambda**: auto re-queues with backoff (60s/300s/900s), max 3 DLQ retries before permanent discard
 - **Review DLQ Remediation Lambda**: same retry logic, handles review pipeline failures independently

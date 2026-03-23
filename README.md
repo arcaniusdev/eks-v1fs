@@ -52,7 +52,7 @@ The pipeline has two stages: a **main pipeline** that scans every file with deco
 | **Ingest** | A file lands in the S3 Ingest Bucket (uploaded by a user, application, or pipeline). S3 sends an `ObjectCreated` event to the SQS queue. |
 | **Scan** | A scanner-app pod long-polls the queue, downloads the file into memory, and scans it via the V1FS Python SDK over gRPC to the in-cluster scanner pods. |
 | **Route** | The file is copied to one of three destinations based on the scan result, then deleted from the Ingest Bucket. The SQS message is removed and the result is written to the CloudWatch audit trail. |
-| **Review** | Files routed to the Review Bucket are archives the main scanner could not fully analyze — the nesting depth, file count, compression ratio, or decompressed size exceeded the configured limits. The review pipeline re-scans these with a second V1FS scanner release (`rv`) that has no decompression limits, then routes to Clean or Quarantine. The review pipeline scales to zero when idle. |
+| **Review** | Files routed to the Review Bucket are archives the main scanner could not fully analyze — the nesting depth, file count, compression ratio, or decompressed size exceeded the configured limits. The review pipeline re-scans these with a second V1FS scanner release (`rv`) that has no decompression limits, then routes to Clean or Quarantine. The review pipeline keeps one pod always warm for immediate processing. |
 
 **Routing rules:**
 
@@ -87,7 +87,7 @@ The `eks-v1fs.yaml` template creates everything:
 | **CloudWatch Alarms** | DLQ messages (any > 0), queue age (> 20 min for 5 consecutive minutes), and review DLQ messages (any > 0) via SNS topic |
 | **Scan Audit Log** | CloudWatch log group with structured JSON per scan (file, verdict, malware names, SHA256, duration), 30-day retention |
 | **Review Audit Log** | Separate CloudWatch log group (`review-audit-${StackName}`) for review pipeline scan results, 30-day retention |
-| **CloudWatch Dashboard** | 32-widget dashboard with queue health, scan throughput/latency, malware detection stats, DLQ remediation, pod distribution, recent scan results, and review pipeline metrics |
+| **CloudWatch Dashboard** | 29-widget dashboard with queue health, scan throughput/latency, malware detection stats, DLQ remediation, pod distribution, recent scan results, and review pipeline metrics |
 | **IAM Roles** | Least-privilege roles for nodes, bastion, scanner app, KEDA operator, Karpenter, and DLQ remediation |
 | **Pod Identity** | Binds IAM roles to Kubernetes service accounts — no access keys needed |
 | **Secrets Manager** | Stores the V1FS registration token and API key |
@@ -176,8 +176,8 @@ A small managed node group (3-6 nodes) hosts system components (CoreDNS, KEDA, E
 |---|---|---|---|
 | Scanner-app pods (KEDA) | 1 | 150 | 50 concurrent scans each |
 | V1FS scanner pods (KEDA) | 1 | 150 | gRPC scan workers |
-| Review scanner-app pods (KEDA) | 0 | 5 | Scale to zero when idle |
-| Review V1FS scanner pods (KEDA) | 0 | 5 | Deep analysis, no limits |
+| Review scanner-app pods (KEDA) | 1 | 5 | Always-warm for low-latency gRPC |
+| Review V1FS scanner pods (KEDA) | 1 | 5 | Unlimited decompression, always-warm |
 | Nodes (Karpenter) | 3 | ~75 | 4 vCPU each (xlarge only) |
 | **Total concurrent scans** | **50** | **7,500** | **150x scale-out** |
 
@@ -246,7 +246,7 @@ Optional parameters:
 | **NodeInstanceType** | `r7i.large` | EC2 instance type for EKS worker nodes |
 | **DesiredCapacity** | `3` | Number of system nodes in managed node group (3–6) |
 | **PMLEnabled** | `false` | Enable Predictive Machine Learning scanning (requires account support) |
-| **MaxFileSizeMB** | `500` | Maximum file size in MB the scanner will download and scan (1–2048). Files exceeding this limit are moved directly to quarantine via server-side S3 copy without scanning, protecting scanner pods from memory exhaustion |
+| **MaxFileSizeMB** | `500` | Maximum file size in MB the main scanner will download and scan (1–2048). Files exceeding this limit are routed to the review bucket via server-side S3 copy (no download into pod memory), where the review scanner re-scans them with no size limit |
 
 #### Scan Policy Parameters
 
