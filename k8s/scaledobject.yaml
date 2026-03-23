@@ -20,7 +20,7 @@ spec:
   minReplicaCount: 1
   maxReplicaCount: 150
   pollingInterval: 5
-  cooldownPeriod: 90
+  cooldownPeriod: 300
   triggers:
     - type: aws-sqs-queue
       metadata:
@@ -43,7 +43,7 @@ spec:
   minReplicaCount: 1
   maxReplicaCount: 150
   pollingInterval: 5
-  cooldownPeriod: 90
+  cooldownPeriod: 300
   triggers:
     - type: aws-sqs-queue
       metadata:
