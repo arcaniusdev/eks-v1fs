@@ -479,6 +479,19 @@ helm upgrade review-release visionone-filesecurity/visionone-filesecurity \
 
 **Do not use `--reuse-values`** — if the new chart version renames or adds values, `--reuse-values` can cause silent misconfiguration.
 
+CLISH scan policy settings (decompression limits) are stored in a management service ConfigMap that is separate from Helm-managed resources. They **persist across `helm upgrade`** and do not need to be re-applied manually.
+
+### Automated upgrade
+
+To upgrade both releases automatically, use the upgrade script on the bastion host:
+
+```bash
+aws ssm start-session --target <bastion-instance-id>
+python3 /opt/eks-v1fs/scripts/upgrade.py
+```
+
+The script upgrades both `my-release` and `review-release` with all required custom values, verifies no HPA conflict was introduced, checks all KEDA ScaledObjects, and runs a sanity scan. Use `--dry-run` to preview commands without executing, or `--version X.Y.Z` to target a specific chart version.
+
 ### What does not need re-applying after upgrade
 
 These resources are managed separately from the Helm chart and are not affected by `helm upgrade`:
