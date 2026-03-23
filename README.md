@@ -134,9 +134,9 @@ Each xlarge node fits 4 V1FS scanner pods (800m CPU / 2Gi memory each) alongside
 
 Three independent scaling systems work in concert, each reacting to different signals but coordinating automatically through Kubernetes to deliver elastic throughput from a single idle pod to **7,500 concurrent scan slots** in under a minute.
 
-**Queue-driven pod scaling (KEDA)** — KEDA watches the SQS queue every 10 seconds and scales scanner-app pods proportionally to the backlog. When thousands of files land in the ingest bucket, the resulting SQS messages trigger rapid scale-out — 1 pod for every 5 queued messages, up to 150 pods. Each pod immediately begins pulling messages and scanning files at 50 concurrent scans. When the queue drains, KEDA scales back down after a 90-second cooldown, keeping costs aligned with demand.
+**Queue-driven pod scaling (KEDA)** — KEDA watches the SQS queue every 5 seconds and scales scanner-app pods proportionally to the backlog. When thousands of files land in the ingest bucket, the resulting SQS messages trigger rapid scale-out — 1 pod for every 5 queued messages, up to 150 pods. Each pod immediately begins pulling messages and scanning files at 50 concurrent scans. When the queue drains, KEDA scales back down after a 300-second cooldown, keeping pods alive through tail processing before releasing capacity.
 
-- Polls SQS queue depth every 10 seconds for fast reaction to bursts
+- Polls SQS queue depth every 5 seconds for fast reaction to bursts
 - Includes in-flight messages (being scanned but not yet deleted) in scaling decisions
 - Range: 1 to 150 pods (always at least 1 pod running, ready for immediate processing)
 
@@ -146,7 +146,7 @@ Three independent scaling systems work in concert, each reacting to different si
 - Range: 1 to 150 scanner pods
 - Each scanner pod requests 800m CPU and 2Gi memory
 
-**Review pipeline scaling (KEDA)** — The review pipeline uses the same KEDA SQS-driven pattern but with minimal scaling. Both review-scanner-app and review-v1fs-scanner scale from 0 to 5 pods based on review SQS queue depth (threshold 50), with a 300-second cooldown. The review pipeline scales to zero when idle, keeping costs near zero when no files need deep analysis.
+**Review pipeline scaling (KEDA)** — The review pipeline uses the same KEDA SQS-driven pattern but with minimal scaling. Both review-scanner-app and review-v1fs-scanner scale from 1 to 5 pods based on review SQS queue depth (threshold 50), with a 300-second cooldown. One pod of each is always warm to avoid cold-start gRPC failures when files arrive for deep analysis.
 
 **Infrastructure scaling (Karpenter)** — When KEDA creates pods that can't be scheduled due to insufficient cluster capacity, Karpenter provisions new nodes directly via the EC2 Fleet API in 30-60 seconds — roughly 2x faster than the traditional Cluster Autoscaler/ASG approach. Karpenter selects the optimal instance type from a flexible set (r7i.xlarge, r7a.xlarge, r6i.xlarge) based on pending pod requirements and availability, eliminating capacity failures from single-instance-type dependency. When load subsides, Karpenter consolidates underutilized nodes after 2 minutes, intelligently bin-packing remaining pods onto fewer nodes before removing excess capacity. Pod Disruption Budgets protect active scan workloads from premature eviction during consolidation.
 
@@ -392,7 +392,7 @@ k8s/
   review-serviceaccount.yaml  Review scanner ServiceAccount (Pod Identity, no annotations)
   review-deployment.yaml      Review scanner deployment (same image, different config)
   review-networkpolicy.yaml   Egress restricted to DNS, rv V1FS scanner, AWS HTTPS
-  review-scaledobject.yaml    KEDA ScaledObjects for review pipeline (scale to zero, max 5)
+  review-scaledobject.yaml    KEDA ScaledObjects for review pipeline (min 1, max 5)
 scripts/
   build-and-push.sh        Build Docker image and push to ECR (tagged with git SHA)
   deploy.sh                Template ConfigMap from stack outputs and apply k8s manifests

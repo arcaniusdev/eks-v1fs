@@ -7,8 +7,8 @@
 - Trigger: `aws-sqs-queue` on `ApproximateNumberOfMessages`
 - Queue length target: 5 messages per pod
 - Scale on in-flight: true
-- Polling interval: 10s
-- Cooldown: 90s
+- Polling interval: 5s
+- Cooldown: 300s
 - Range: 1-150 pods
 - Auth: `provider: aws`, `identityOwner: keda` (uses KEDA operator's Pod Identity)
 
@@ -17,8 +17,8 @@
 - Trigger: `aws-sqs-queue` on `ApproximateNumberOfMessages`
 - Queue length target: 50 messages per pod
 - Scale on in-flight: true
-- Polling interval: 10s
-- Cooldown: 90s
+- Polling interval: 5s
+- Cooldown: 300s
 - Range: 1-150 pods
 - Auth: same `sqs-trigger-auth` TriggerAuthentication
 - **Replaces the original CPU-based HPA** which only scaled to 4 pods under heavy load. Helm chart `scanner.autoscaling.enabled` must be `false` to prevent HPA/KEDA conflicts.
@@ -60,8 +60,8 @@ The review pipeline handles low-volume deep analysis of files that exceeded the 
 
 - **ScaledObject**: `review-scanner-app-sqs-scaler` — scales review-scanner-app pods based on review SQS queue depth
 - **ScaledObject**: `review-v1fs-scanner-sqs-scaler` — scales review V1FS scanner pods based on review SQS queue depth
-- Both: min 0, max 5, threshold 50 messages per pod, cooldown 300s
-- **Scale to zero when idle** — no pods running when the review queue is empty, keeping costs near zero
+- Both: min 1, max 5, threshold 50 messages per pod, polling 5s, cooldown 300s
+- **Always-warm** — one pod of each always running to avoid cold-start gRPC connection failures when files arrive for review
 - **No PDB** — the review pipeline is low-volume and does not need Karpenter consolidation protection
 
 ## Observability

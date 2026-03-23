@@ -30,10 +30,10 @@ All resources are created by `eks-v1fs.yaml`. The scanner application should NOT
 - **KEDA Helm release**: `keda` in `keda` namespace — scales scanner app replicas based on SQS queue depth
 - **Review scanner Helm release**: `rv` from `visionone-filesecurity/visionone-filesecurity` chart in `visionone-review` namespace (separate from `my-release` in `visionone-filesecurity`), same custom values as `my-release` (HPA disabled, 800m CPU / 2Gi memory, dbEnabled, EFS ephemeral volume). No CLISH scan policy applied — runs with unlimited decompression for deep analysis. Shares the same `token-secret` as the main release. A separate namespace is required because the Helm chart creates a ServiceAccount named `visionone-filesecurity` that would conflict with the main release's ServiceAccount if both were in the same namespace
 - **KEDA ScaledObjects**: Four SQS-driven scalers (two main, two review) sharing the same TriggerAuthentication pattern (`provider: aws`, `identityOwner: keda`):
-  - `scanner-app-sqs-scaler` — 1 pod per 5 messages, min 1 / max 150, polling 10s, cooldown 90s
-  - `v1fs-scanner-sqs-scaler` — 1 pod per 50 messages, min 1 / max 150, polling 10s, cooldown 90s
-  - `review-scanner-app-sqs-scaler` — 1 pod per 50 messages, min 0 / max 5, cooldown 300s, scale to zero when idle
-  - `review-v1fs-scanner-sqs-scaler` — 1 pod per 50 messages, min 0 / max 5, cooldown 300s, scale to zero when idle
+  - `scanner-app-sqs-scaler` — 1 pod per 5 messages, min 1 / max 150, polling 5s, cooldown 300s
+  - `v1fs-scanner-sqs-scaler` — 1 pod per 50 messages, min 1 / max 150, polling 5s, cooldown 300s
+  - `review-scanner-app-sqs-scaler` — 1 pod per 50 messages, min 1 / max 5, polling 5s, cooldown 300s
+  - `review-v1fs-scanner-sqs-scaler` — 1 pod per 50 messages, min 1 / max 5, polling 5s, cooldown 300s
 
 ## ECR Repository
 - Named `scanner-app-{StackName}`; scan-on-push enabled; AES256 encryption; **image tag immutability enabled** — each push requires a unique tag (git SHA). Deleted with the stack. Check `ECRRepoUrl` output.
