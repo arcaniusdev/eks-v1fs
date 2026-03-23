@@ -63,7 +63,7 @@ project/
 │   ├── review-serviceaccount.yaml  # ServiceAccount: review-scanner-app (Pod Identity, NO annotations)
 │   ├── review-deployment.yaml      # Review scanner deployment (same image, different config)
 │   ├── review-networkpolicy.yaml   # Egress restricted to DNS, rv V1FS scanner, AWS HTTPS
-│   └── review-scaledobject.yaml    # KEDA ScaledObjects for review pipeline (scale to zero, max 5)
+│   └── review-scaledobject.yaml    # KEDA ScaledObjects for review pipeline (min 1, max 5)
 └── scripts/
     ├── build-and-push.sh         # Build Docker image and push to ECR (tagged with git SHA)
     ├── deploy.sh                 # Apply k8s manifests to the cluster
@@ -84,7 +84,7 @@ project/
 | Review scanner-app pods (KEDA) | 5 | `k8s/review-scaledobject.yaml` |
 | Review V1FS scanner pods (KEDA) | 5 | `k8s/review-scaledobject.yaml` |
 
-Review pipeline scales to zero when idle (min replicas = 0).
+Review pipeline keeps 1 pod warm at all times (min replicas = 1) to avoid cold-start gRPC failures.
 
 ## Quick Reference — Critical Rules
 
@@ -130,7 +130,7 @@ Review pipeline scales to zero when idle (min replicas = 0).
 ### Review Pipeline (Deep Analysis)
 - **Second Helm release `rv` in `visionone-review` namespace** — installed with no CLISH scan policy applied (unlimited decompression). This allows the review scanner to fully analyze archives that exceeded the main scanner's decompression limits. A separate namespace is required because each V1FS Helm release creates a ServiceAccount named `visionone-filesecurity` — installing both releases in the same namespace causes a ServiceAccount conflict
 - **Review scanner reads from the review bucket** — routes files ONLY to clean or quarantine (never back to review). `REVIEW_ROUTING_ENABLED=false` in the review scanner ConfigMap prevents the application from attempting review routing, and the `ReviewScannerAppRole` IAM policy has no write permission to the review bucket as a defense-in-depth control
-- **Scale to zero when idle** — min 0, max 5 pods, cooldown 300s. The review pipeline handles low-volume deep analysis, not high-throughput scanning
+- **Always-warm review pipeline** — min 1, max 5 pods, cooldown 300s. Keeps one review scanner-app and one V1FS scanner pod running at all times to avoid cold-start gRPC connection failures when files arrive
 - **Shares the same `token-secret`** — no second V1FS registration token is needed. Both Helm releases use the same token
 - **Separate audit log group** — `review-audit-${StackName}` for review scan results, independent from the main `scan-audit-${StackName}`
 - **Separate DLQ with remediation Lambda** — the review pipeline has its own SQS DLQ and Lambda for retry/discard handling

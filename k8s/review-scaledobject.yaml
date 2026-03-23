@@ -17,7 +17,7 @@ spec:
   scaleTargetRef:
     name: review-scanner-app
     kind: Deployment
-  minReplicaCount: 0
+  minReplicaCount: 1
   maxReplicaCount: 5
   pollingInterval: 5
   cooldownPeriod: 300
@@ -40,7 +40,7 @@ spec:
   scaleTargetRef:
     name: rv-visionone-filesecurity-scanner
     kind: Deployment
-  minReplicaCount: 0
+  minReplicaCount: 1
   maxReplicaCount: 5
   pollingInterval: 5
   cooldownPeriod: 300
