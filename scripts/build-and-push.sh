@@ -22,11 +22,13 @@ if [ -z "${ECR_REPO_URL:-}" ]; then
   fi
 fi
 
-# Determine image tag: git SHA if available, otherwise "latest"
+# Determine image tag: git SHA (immutable, never :latest)
 if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse HEAD >/dev/null 2>&1; then
   IMAGE_TAG=$(git -C "$SCRIPT_DIR" rev-parse --short=12 HEAD)
 else
-  IMAGE_TAG="latest"
+  echo "ERROR: git not available or not a git repo — cannot determine image tag" >&2
+  echo "Image tags must be immutable git SHAs, not :latest" >&2
+  exit 1
 fi
 
 echo "ECR repo: $ECR_REPO_URL"
@@ -34,8 +36,11 @@ echo "Image tag: $IMAGE_TAG"
 
 echo "Authenticating to ECR..."
 ACCOUNT_ID="$(echo "$ECR_REPO_URL" | cut -d. -f1)"
-aws ecr get-login-password --region "$AWS_REGION" \
-  | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+if ! aws ecr get-login-password --region "$AWS_REGION" \
+  | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" 2>/dev/null; then
+  echo "ERROR: ECR authentication failed. Check AWS credentials and region." >&2
+  exit 1
+fi
 
 echo "Building image..."
 docker build -t scanner-app "$APP_DIR"
