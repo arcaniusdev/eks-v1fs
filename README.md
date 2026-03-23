@@ -18,18 +18,33 @@ For more information, see the [Vision One File Security Helm chart repository](h
 
 The pipeline has two stages: a **main pipeline** that scans every file with decompression limits enforced, and a **review pipeline** that re-scans files whose archives exceeded those limits with no restrictions.
 
-### Main Pipeline
-
 ```
-S3 Ingest ──▶ SQS Queue ──▶ Scanner App (EKS) ──▶ V1FS Scanner (gRPC)
-                  │                                       │
-                  ▼                                 ┌─────┼─────┐
-               DLQ (3 failures)                  CLEAN  REVIEW  MALICIOUS
-                  │                                │      │      │
-           Lambda auto-retry                       ▼      ▼      ▼
-          (backoff → discard)               Clean Bucket  │  Quarantine
-                                                          ▼
-                                                   Review Bucket
+┌─────────────────────────────────────────────────────────────────────────┐
+│ MAIN PIPELINE (decompression limits enforced)                          │
+│                                                                        │
+│  S3 Ingest ──▶ SQS Queue ──▶ Scanner App ──▶ V1FS Scanner (gRPC)      │
+│                    │                               │                   │
+│                    ▼                         ┌─────┼──────┐            │
+│              DLQ (3 fails)                CLEAN  REVIEW  MALICIOUS     │
+│                    │                        │      │       │           │
+│             Lambda auto-retry               ▼      │       ▼          │
+│            (backoff → discard)        Clean Bucket  │  Quarantine      │
+│                                                    ▼                   │
+├─────────────────────────────────────── Review Bucket ──────────────────┤
+│                                            │                           │
+│ REVIEW PIPELINE (no decompression limits)  │                           │
+│                                            ▼                           │
+│                               Review SQS Queue                        │
+│                                    │                                   │
+│                                    ▼                                   │
+│                            Review Scanner ──▶ V1FS rv (no limits)      │
+│                                                    │                   │
+│                              Review DLQ      ┌─────┴─────┐            │
+│                                │           CLEAN      MALICIOUS        │
+│                         Lambda auto-retry    │           │             │
+│                                              ▼           ▼             │
+│                                        Clean Bucket  Quarantine        │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Step | What happens |
@@ -37,30 +52,15 @@ S3 Ingest ──▶ SQS Queue ──▶ Scanner App (EKS) ──▶ V1FS Scanner
 | **Ingest** | A file lands in the S3 Ingest Bucket (uploaded by a user, application, or pipeline). S3 sends an `ObjectCreated` event to the SQS queue. |
 | **Scan** | A scanner-app pod long-polls the queue, downloads the file into memory, and scans it via the V1FS Python SDK over gRPC to the in-cluster scanner pods. |
 | **Route** | The file is copied to one of three destinations based on the scan result, then deleted from the Ingest Bucket. The SQS message is removed and the result is written to the CloudWatch audit trail. |
+| **Review** | Files routed to the Review Bucket are archives the main scanner could not fully analyze — the nesting depth, file count, compression ratio, or decompressed size exceeded the configured limits. The review pipeline re-scans these with a second V1FS scanner release (`rv`) that has no decompression limits, then routes to Clean or Quarantine. The review pipeline scales to zero when idle. |
 
 **Routing rules:**
 
 | Verdict | Condition | Destination |
 |---|---|---|
 | **Clean** | `scanResult == 0`, no decompression errors | Clean Bucket |
-| **Review** | `scanResult == 0`, decompression limit exceeded | Review Bucket (re-scanned by the review pipeline) |
+| **Review** | `scanResult == 0`, decompression limit exceeded | Review Bucket → re-scanned by review pipeline |
 | **Malicious** | `scanResult > 0` | Quarantine Bucket |
-
-### Review Pipeline
-
-Files routed to the Review Bucket are archives the main scanner could not fully analyze — the nesting depth, file count, compression ratio, or decompressed size exceeded the configured limits. The review pipeline re-scans these with a second V1FS scanner release (`rv`) that has **no decompression limits**, then routes to Clean or Quarantine.
-
-```
-Review Bucket ──▶ Review SQS ──▶ Review Scanner (EKS) ──▶ V1FS rv (no limits)
-                      │                                          │
-                      ▼                                    ┌─────┴─────┐
-                Review DLQ (3 failures)                 CLEAN      MALICIOUS
-                      │                                    │           │
-               Lambda auto-retry                           ▼           ▼
-                                                    Clean Bucket  Quarantine
-```
-
-The review pipeline scales to zero when idle and uses the same Docker image as the main scanner — behavior is controlled entirely by environment variables.
 
 ### Failure Handling
 
