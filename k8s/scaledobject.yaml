@@ -19,7 +19,7 @@ spec:
     kind: Deployment
   minReplicaCount: 1
   maxReplicaCount: 150
-  pollingInterval: 10
+  pollingInterval: 5
   cooldownPeriod: 90
   triggers:
     - type: aws-sqs-queue
@@ -42,7 +42,7 @@ spec:
     kind: Deployment
   minReplicaCount: 1
   maxReplicaCount: 150
-  pollingInterval: 10
+  pollingInterval: 5
   cooldownPeriod: 90
   triggers:
     - type: aws-sqs-queue
