@@ -35,7 +35,7 @@
 - **Never store credentials in files** — API keys, tokens, and passwords must not be stored in source code, configuration files, documentation, or memory files. Always use AWS Secrets Manager for runtime credential retrieval
 
 ## Application Resilience
-- Configurable file size limit (`MAX_FILE_SIZE_MB`, default 500) prevents OOM — oversized files quarantined via server-side S3 copy
+- Configurable file size limit (`MAX_FILE_SIZE_MB`, default 500) prevents OOM — oversized files routed to review bucket via server-side S3 copy, scanned by review pipeline (no size limit)
 - S3 records within a message processed independently — one failure doesn't block siblings
 - SQS polling: jittered exponential backoff (2^n, max 60s)
 - SQS visibility heartbeat extends timeout every 240s for long-running scans

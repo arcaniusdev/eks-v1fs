@@ -73,7 +73,7 @@ A file passes through at most two scan stages before reaching its final destinat
 4. **Routing decision** based on scan result:
    - **Malicious** (`scanResult > 0`) — copied to quarantine bucket. Done.
    - **Clean** (`scanResult == 0`, no decompression errors) — copied to clean bucket. Done.
-   - **Oversized** (exceeds `MAX_FILE_SIZE_MB`) — server-side copied to quarantine without scanning. Done.
+   - **Oversized** (exceeds `MAX_FILE_SIZE_MB`) — server-side copied to review bucket without scanning (no download into pod memory). Continues to step 5.
    - **Decompression limits exceeded** (`scanResult == 0` with `foundErrors`) — copied to review bucket for deep analysis. Continues to step 5.
 5. **Review bucket S3 event** triggers an SQS message on the review queue
 6. **Review-scanner-app** picks up the message, downloads the file, scans via gRPC to the review V1FS scanner (`rv` — no decompression limits)
@@ -85,7 +85,7 @@ A file passes through at most two scan stages before reaching its final destinat
 2. **Poll Loop**: Long-poll SQS (`WaitTimeSeconds=20`). Jittered exponential backoff on errors (2^n, max 60s).
 3. **Per message** (records processed independently):
    - Parse S3 event JSON, extract bucket/key/size (`unquote_plus()` the key)
-   - Files exceeding `MAX_FILE_SIZE_MB` (default 500): server-side copy to quarantine with tag `ScanResult=S3-Oversize`
+   - Files exceeding `MAX_FILE_SIZE_MB` (default 500): server-side copy to review bucket with tag `ScanResult=S3-Review-Oversize` (or quarantine if `REVIEW_ROUTING_ENABLED=false`)
    - Download to memory, scan with `scan_buffer()`
    - Malicious (`scanResult > 0`): upload to quarantine (`ScanResult=S3-Malware`), delete from ingest
    - Review (`scanResult == 0` with `foundErrors` indicating decompression limits exceeded, only when `REVIEW_ROUTING_ENABLED=true`): upload to review bucket (`ScanResult=S3-Review`), delete from ingest. When `REVIEW_ROUTING_ENABLED=false` (review scanner), these files are routed to clean instead
@@ -131,7 +131,7 @@ Notes: `aiobotocore==3.3.0` requires `botocore>=1.42.62,<1.42.71` — keep `boto
 | `V1FS_API_KEY_SECRET_ARN` | Secrets Manager ARN | `ApiKeySecretArn` |
 | `AWS_REGION` | AWS region | `us-east-1` |
 | `MAX_CONCURRENT_SCANS` | Concurrent scans per pod | `50` |
-| `MAX_FILE_SIZE_MB` | Max file size before quarantine without scanning | `500` |
+| `MAX_FILE_SIZE_MB` | Max file size before routing to review bucket (0 = unlimited) | `500` (main), `0` (review) |
 | `PML_ENABLED` | Predictive ML scanning | `false` |
 | `LOG_LEVEL` | Logging verbosity | `INFO` |
 | `AUDIT_LOG_GROUP` | CloudWatch log group for scan audit trail | `ScanAuditLogGroupName` |

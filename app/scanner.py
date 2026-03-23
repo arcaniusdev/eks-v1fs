@@ -179,22 +179,34 @@ class ScannerApp:
             bucket, key, size, message_id,
         )
 
-        if size > self.max_file_size:
-            logger.error(
-                "File s3://%s/%s exceeds size limit (%d > %d bytes), "
-                "moving to quarantine via server-side copy",
-                bucket, key, size, self.max_file_size,
-            )
-            # Server-side copy — no download into pod memory
+        if self.max_file_size and size > self.max_file_size:
+            if self.config.review_routing_enabled:
+                dest_bucket = self.config.s3_review_bucket
+                tag = "S3-Review-Oversize"
+                verdict = "review"
+                logger.warning(
+                    "OVERSIZE REVIEW: s3://%s/%s (%d > %d bytes), "
+                    "routing to review bucket via server-side copy",
+                    bucket, key, size, self.max_file_size,
+                )
+            else:
+                dest_bucket = self.config.s3_quarantine_bucket
+                tag = "S3-Oversize"
+                verdict = "oversize"
+                logger.error(
+                    "OVERSIZE: s3://%s/%s (%d > %d bytes), "
+                    "moving to quarantine via server-side copy",
+                    bucket, key, size, self.max_file_size,
+                )
             await self.s3_client.copy_object(
-                Bucket=self.config.s3_quarantine_bucket,
+                Bucket=dest_bucket,
                 Key=key,
                 CopySource={"Bucket": bucket, "Key": key},
-                Tagging="ScanResult=S3-Oversize",
+                Tagging=f"ScanResult={tag}",
                 TaggingDirective="REPLACE",
             )
             await self._delete_object(bucket, key)
-            self._enqueue_audit(key, size, "oversize", {}, 0, message_id)
+            self._enqueue_audit(key, size, verdict, {}, 0, message_id)
             return
 
         # Download into memory

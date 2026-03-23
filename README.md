@@ -60,6 +60,7 @@ The pipeline has two stages: a **main pipeline** that scans every file with deco
 |---|---|---|
 | **Clean** | `scanResult == 0`, no decompression errors | Clean Bucket |
 | **Review** | `scanResult == 0`, decompression limit exceeded | Review Bucket → re-scanned by review pipeline |
+| **Review (oversize)** | File exceeds `MAX_FILE_SIZE_MB` (default 500) | Review Bucket → server-side copy (no download), re-scanned by review pipeline |
 | **Malicious** | `scanResult > 0` | Quarantine Bucket |
 
 ### Failure Handling
