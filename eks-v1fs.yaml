@@ -1985,6 +1985,11 @@ Resources:
                   - s3:GetObject
                   - s3:DeleteObject
                 Resource: !Sub ${IngestBucket.Arn}/*
+              - Sid: S3IngestList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt IngestBucket.Arn
               - Sid: S3CleanWrite
                 Effect: Allow
                 Action:
@@ -2222,6 +2227,11 @@ Resources:
                   - s3:GetObject
                   - s3:DeleteObject
                 Resource: !Sub ${ReviewBucket.Arn}/*
+              - Sid: S3ReviewList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt ReviewBucket.Arn
               - Sid: S3CleanWrite
                 Effect: Allow
                 Action:
