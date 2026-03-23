@@ -31,12 +31,12 @@ CUSTOM_VALUES = {
     "scanner.ephemeralVolume.size": "100Gi",
 }
 
-# CLISH scan policy for my-release only (NOT review-release).
-SCAN_POLICY = {
-    "max-decompression-layer": "10",
-    "max-decompression-file-count": "1000",
-    "max-decompression-ratio": "150",
-    "max-decompression-size": "512",
+# CLISH scan policy field names mapped to their modify flag names.
+CLISH_FIELD_MAP = {
+    "Max Decompress Layer Limit": "max-decompression-layer",
+    "Max Decompress Ratio Limit": "max-decompression-ratio",
+    "Max Decompression File Count": "max-decompression-file-count",
+    "Max Decompression Size": "max-decompression-size",
 }
 
 NAMESPACE = "visionone-filesecurity"
@@ -60,6 +60,28 @@ def run(cmd, check=True, capture=True):
         print(f"ERROR: Command failed with exit code {result.returncode}")
         sys.exit(1)
     return result
+
+
+def get_current_scan_policy():
+    """Query the current CLISH scan policy values from the running management service."""
+    result = run(
+        f"kubectl exec deploy/{MGMT_DEPLOY} -n {NAMESPACE} -- "
+        f"clish scanner scan-policy show",
+        check=False,
+    )
+    policy = {}
+    if result.returncode != 0:
+        print("  WARNING: Could not query current scan policy. Using no policy values.")
+        return policy
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        for field_label, flag_name in CLISH_FIELD_MAP.items():
+            if line.startswith(field_label):
+                # Parse value from "Max Decompress Layer Limit : 10" or "Max Decompression Size : 512 MB"
+                val = line.split(":")[-1].strip().replace(" MB", "")
+                if val:
+                    policy[flag_name] = val
+    return policy
 
 
 def get_installed_version(release, namespace):
@@ -102,15 +124,24 @@ def main():
         chart, app = get_installed_version(release, ns)
         print(f"  {release} ({ns}): chart={chart}, app_version={app}")
 
-    # Step 2: Update repo and check available versions
-    print("\n[2/7] Updating Helm repository...")
+    # Step 2: Capture current scan policy before upgrade
+    print("\n[2/7] Capturing current CLISH scan policy...")
+    current_policy = get_current_scan_policy()
+    if current_policy:
+        for k, v in current_policy.items():
+            print(f"  {k} = {v}")
+    else:
+        print("  No scan policy values found (will skip re-application).")
+
+    # Step 3: Update repo and check available versions
+    print("\n[3/7] Updating Helm repository...")
     run("helm repo update visionone-filesecurity")
     print("\nAvailable versions:")
     run("helm search repo visionone-filesecurity/visionone-filesecurity --versions | head -5")
 
-    # Step 3: Upgrade both releases
+    # Step 4: Upgrade both releases
     for release, ns in RELEASES:
-        print(f"\n[3/7] Upgrading {release} in {ns}...")
+        print(f"\n[4/7] Upgrading {release} in {ns}...")
         cmd = build_upgrade_cmd(release, ns, args.version)
         if args.dry_run:
             print(f"  DRY RUN: {cmd}")
@@ -118,29 +149,31 @@ def main():
             run(cmd)
             print(f"  {release} upgraded successfully.")
 
-    # Step 4: Re-apply CLISH scan policy to my-release only
-    print("\n[4/7] Re-applying CLISH scan policy to my-release...")
-    policy_args = " ".join(f"--{k}={v}" for k, v in SCAN_POLICY.items())
-    clish_cmd = (
-        f"kubectl exec deploy/{MGMT_DEPLOY} -n {NAMESPACE} -- "
-        f"clish scanner scan-policy modify {policy_args}"
-    )
-    if args.dry_run:
-        print(f"  DRY RUN: {clish_cmd}")
+    # Step 5: Re-apply captured CLISH scan policy to my-release only
+    print("\n[5/7] Re-applying CLISH scan policy to my-release...")
+    if not current_policy:
+        print("  SKIPPED — no scan policy was set before upgrade.")
     else:
-        # Wait for management service to be ready after upgrade
-        print("  Waiting for management service rollout...")
-        run(f"kubectl rollout status deploy/{MGMT_DEPLOY} -n {NAMESPACE} --timeout=180s")
-        run(clish_cmd)
-        print("\n  Verifying scan policy:")
-        run(
+        policy_args = " ".join(f"--{k}={v}" for k, v in current_policy.items())
+        clish_cmd = (
             f"kubectl exec deploy/{MGMT_DEPLOY} -n {NAMESPACE} -- "
-            f"clish scanner scan-policy show"
+            f"clish scanner scan-policy modify {policy_args}"
         )
+        if args.dry_run:
+            print(f"  DRY RUN: {clish_cmd}")
+        else:
+            print("  Waiting for management service rollout...")
+            run(f"kubectl rollout status deploy/{MGMT_DEPLOY} -n {NAMESPACE} --timeout=180s")
+            run(clish_cmd)
+            print("\n  Verifying scan policy:")
+            run(
+                f"kubectl exec deploy/{MGMT_DEPLOY} -n {NAMESPACE} -- "
+                f"clish scanner scan-policy show"
+            )
     print("  NOTE: review-release intentionally has NO scan policy (unlimited decompression).")
 
-    # Step 5: Verify no HPA conflict
-    print("\n[5/7] Checking for HPA conflicts...")
+    # Step 6: Verify no HPA conflict
+    print("\n[6/7] Checking for HPA conflicts...")
     result = run(f"kubectl get hpa -n {NAMESPACE} --no-headers 2>&1", check=False)
     if result.stdout.strip() and "No resources found" not in result.stdout:
         print("  WARNING: HPA detected! This conflicts with KEDA. Deleting...")
@@ -149,8 +182,8 @@ def main():
     else:
         print("  OK — no HPA found.")
 
-    # Step 6: Verify ScaledObjects and pods
-    print("\n[6/7] Verifying infrastructure...")
+    # Step 7: Verify ScaledObjects and pods
+    print("\n[7/8] Verifying infrastructure...")
     run(f"kubectl get scaledobject -n {NAMESPACE}")
     run(f"kubectl get pods -n {NAMESPACE}")
     print("\n  Scanner pod resources:")
@@ -159,11 +192,11 @@ def main():
         f"| grep -A 3 'Requests:' | head -20"
     )
 
-    # Step 7: Sanity scan
+    # Step 8: Sanity scan
     if args.skip_sanity:
-        print("\n[7/7] Skipping sanity scan (--skip-sanity)")
+        print("\n[8/8] Skipping sanity scan (--skip-sanity)")
     else:
-        print("\n[7/7] Sanity scan...")
+        print("\n[8/8] Sanity scan...")
         if args.dry_run:
             print("  DRY RUN: Would upload clean + EICAR test files")
         else:
