@@ -71,7 +71,7 @@ Key details:
    - Files exceeding `MAX_FILE_SIZE_MB` (default 500): server-side copy to quarantine with tag `ScanResult=S3-Oversize`
    - Download to memory, scan with `scan_buffer()`
    - Malicious (`scanResult > 0`): upload to quarantine (`ScanResult=S3-Malware`), delete from ingest
-   - Review (`scanResult == 0` with `foundErrors` indicating decompression limits exceeded): upload to review bucket (`ScanResult=S3-Review`), delete from ingest
+   - Review (`scanResult == 0` with `foundErrors` indicating decompression limits exceeded, only when `REVIEW_ROUTING_ENABLED=true`): upload to review bucket (`ScanResult=S3-Review`), delete from ingest. When `REVIEW_ROUTING_ENABLED=false` (review scanner), these files are routed to clean instead
    - Clean (`scanResult == 0`, no errors): upload to clean (`ScanResult=S3-Clean`), delete from ingest
    - All records succeed: delete SQS message. Any failure: leave for retry.
 4. **Error handling**: Failed scans stay in queue; after 3 failures → DLQ. Heartbeat extends visibility every 240s.
@@ -118,6 +118,7 @@ Notes: `aiobotocore==3.3.0` requires `botocore>=1.42.62,<1.42.71` — keep `boto
 | `PML_ENABLED` | Predictive ML scanning | `false` |
 | `LOG_LEVEL` | Logging verbosity | `INFO` |
 | `AUDIT_LOG_GROUP` | CloudWatch log group for scan audit trail | `ScanAuditLogGroupName` |
+| `REVIEW_ROUTING_ENABLED` | Enable routing to review bucket for decompression limit errors | `true` (set to `false` for review scanner) |
 
 ## Deployment Specs
 
@@ -141,3 +142,15 @@ export AWS_REGION=us-east-1
 /opt/eks-v1fs/scripts/build-and-push.sh
 /opt/eks-v1fs/scripts/deploy.sh
 ```
+
+## Review Scanner Deployment
+
+The review scanner uses the **same Docker image** as the main scanner — behavior is controlled entirely by environment variables. Key differences in the review scanner configuration:
+
+- **`SQS_QUEUE_URL`**: points to the review SQS queue (`ReviewScanQueueUrl`)
+- **`S3_INGEST_BUCKET`**: points to the review bucket (reads files from review, not ingest)
+- **`V1FS_SERVER_ADDR`**: points to `review-release-visionone-filesecurity-scanner:50051` (the review V1FS scanner release with no decompression limits)
+- **`REVIEW_ROUTING_ENABLED=false`**: prevents routing files back to the review bucket, which would create an infinite loop. Files are routed only to clean or quarantine
+- **`AUDIT_LOG_GROUP`**: points to `review-audit-${StackName}` for separate audit trail
+
+The review scanner is deployed alongside the main scanner using `deploy.sh --review`, which applies the review-specific k8s manifests (`review-serviceaccount.yaml`, `review-deployment.yaml`, `review-networkpolicy.yaml`, `review-scaledobject.yaml`). It uses a separate service account (`review-scanner-app`) bound to `ReviewScannerAppRole` via Pod Identity.

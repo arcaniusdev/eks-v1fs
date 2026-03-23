@@ -41,6 +41,27 @@ For more information, see the [Vision One File Security Helm chart repository](h
               Delete from Ingest Bucket
                   |         |         |
          Delete SQS message + write audit log
+
+           Review Bucket
+                |
+         s3:ObjectCreated
+                |
+                v
+         Review SQS Queue ---------> Review DLQ
+                |                     (after 3 failures)
+                v
+       Review Scanner Pod (EKS)      Review DLQ Lambda
+          |            |
+     Download file   Scan via gRPC
+     from Review     (review-release
+     Bucket          V1FS — no limits)
+          |
+     +----+----+
+     |         |
+   CLEAN    MALICIOUS
+     |         |
+     v         v
+Clean Bucket  Quarantine
 ```
 
 1. A file lands in the **Ingest Bucket** (uploaded by a user, application, or pipeline)
@@ -49,7 +70,7 @@ For more information, see the [Vision One File Security Helm chart repository](h
 4. The file is scanned using the **Vision One File Security Python SDK** over gRPC to the in-cluster scanner pods
 5. Based on the result:
    - **Clean** (`scanResult == 0`, no errors) — file is copied to the Clean Bucket
-   - **Review** (`scanResult == 0`, decompression limit errors) — file is copied to the Review Bucket for manual inspection. The scanner could not fully analyze the archive due to nesting depth, file count, compression ratio, or decompressed size limits
+   - **Review** (`scanResult == 0`, decompression limit errors) — file is copied to the Review Bucket. The scanner could not fully analyze the archive due to nesting depth, file count, compression ratio, or decompressed size limits. The review pipeline automatically re-scans these files with a second V1FS scanner release that has no decompression limits
    - **Malicious** (`scanResult > 0`) — file is copied to the Quarantine Bucket
 6. The original file is deleted from the Ingest Bucket and the SQS message is removed
 
@@ -69,17 +90,20 @@ The `eks-v1fs.yaml` template creates everything:
 | **Node Group** | `r7i.large` system nodes (2 vCPU, 16 GiB) in private subnets, min 3 / max 6 — hosts system components only |
 | **ECR Repository** | Hosts the scanner app container image, scan-on-push enabled |
 | **S3 Buckets** | Ingest (with event notifications), Clean, Review, Quarantine — all have `DeletionPolicy: Retain` to preserve files when the stack is deleted |
-| **SQS Queues** | Main queue (600s visibility timeout, 20s long polling) + Dead Letter Queue (120s visibility timeout) |
+| **SQS Queues** | Main queue (600s visibility timeout, 20s long polling) + Dead Letter Queue (120s visibility timeout); Review SQS queue + Review DLQ for the review pipeline |
 | **DLQ Remediation Lambda** | Re-queues failed messages with exponential backoff (60s/300s/900s), max 3 DLQ retries before permanent discard |
-| **CloudWatch Alarms** | DLQ messages (any > 0) and queue age (> 20 min for 5 consecutive minutes) via SNS topic |
+| **Review DLQ Remediation Lambda** | Same retry logic as the main DLQ Lambda, handles review pipeline failures independently |
+| **CloudWatch Alarms** | DLQ messages (any > 0), queue age (> 20 min for 5 consecutive minutes), and review DLQ messages (any > 0) via SNS topic |
 | **Scan Audit Log** | CloudWatch log group with structured JSON per scan (file, verdict, malware names, SHA256, duration), 30-day retention |
-| **CloudWatch Dashboard** | 26-widget dashboard with queue health, scan throughput/latency, malware detection stats, DLQ remediation, pod distribution, and recent scan results |
+| **Review Audit Log** | Separate CloudWatch log group (`review-audit-${StackName}`) for review pipeline scan results, 30-day retention |
+| **CloudWatch Dashboard** | 32-widget dashboard with queue health, scan throughput/latency, malware detection stats, DLQ remediation, pod distribution, recent scan results, and review pipeline metrics |
 | **IAM Roles** | Least-privilege roles for nodes, bastion, scanner app, KEDA operator, Karpenter, and DLQ remediation |
 | **Pod Identity** | Binds IAM roles to Kubernetes service accounts — no access keys needed |
 | **Secrets Manager** | Stores the V1FS registration token and API key |
 | **Metrics Server** | Provides CPU/memory metrics for cluster monitoring |
-| **KEDA** | Scales both scanner-app and V1FS scanner pods based on SQS queue depth |
+| **KEDA** | Scales both scanner-app and V1FS scanner pods based on SQS queue depth; also scales review pipeline pods |
 | **Karpenter NodePool** | Provisions xlarge scanner nodes (r7i/r7a/r6i) directly via EC2 Fleet API; consolidates underutilized nodes automatically |
+| **V1FS Review Release** | Second Helm release (`review-release`) with no CLISH scan policy — unlimited decompression for deep analysis of review bucket files |
 | **EFS Filesystem** | Encrypted shared storage (ReadWriteMany) for V1FS scanner ephemeral volume across multiple pods |
 | **Pre-delete Cleanup Lambda** | Runs automatically during stack deletion — terminates Karpenter EC2 instances, cleans up orphaned instance profiles, and deletes orphaned EBS volumes before CloudFormation deletes the roles and cluster |
 | **Bastion Host** | Provisions the cluster, installs Helm charts, builds and deploys the scanner app |
@@ -131,6 +155,8 @@ Three independent scaling systems work in concert, each reacting to different si
 - Range: 1 to 150 scanner pods
 - Each scanner pod requests 800m CPU and 2Gi memory
 
+**Review pipeline scaling (KEDA)** — The review pipeline uses the same KEDA SQS-driven pattern but with minimal scaling. Both review-scanner-app and review-v1fs-scanner scale from 0 to 5 pods based on review SQS queue depth (threshold 50), with a 300-second cooldown. The review pipeline scales to zero when idle, keeping costs near zero when no files need deep analysis.
+
 **Infrastructure scaling (Karpenter)** — When KEDA creates pods that can't be scheduled due to insufficient cluster capacity, Karpenter provisions new nodes directly via the EC2 Fleet API in 30-60 seconds — roughly 2x faster than the traditional Cluster Autoscaler/ASG approach. Karpenter selects the optimal instance type from a flexible set (r7i.xlarge, r7a.xlarge, r6i.xlarge) based on pending pod requirements and availability, eliminating capacity failures from single-instance-type dependency. When load subsides, Karpenter consolidates underutilized nodes after 2 minutes, intelligently bin-packing remaining pods onto fewer nodes before removing excess capacity. Pod Disruption Budgets protect active scan workloads from premature eviction during consolidation.
 
 A small managed node group (3-6 nodes) hosts system components (CoreDNS, KEDA, EBS/EFS CSI drivers, LB controller, metrics server, Karpenter itself). Scanner workloads are directed to Karpenter-provisioned nodes via nodeAffinity, keeping the system plane isolated from workload scaling turbulence.
@@ -159,6 +185,8 @@ A small managed node group (3-6 nodes) hosts system components (CoreDNS, KEDA, E
 |---|---|---|---|
 | Scanner-app pods (KEDA) | 1 | 150 | 50 concurrent scans each |
 | V1FS scanner pods (KEDA) | 1 | 150 | gRPC scan workers |
+| Review scanner-app pods (KEDA) | 0 | 5 | Scale to zero when idle |
+| Review V1FS scanner pods (KEDA) | 0 | 5 | Deep analysis, no limits |
 | Nodes (Karpenter) | 3 | ~75 | 4 vCPU each (xlarge only) |
 | **Total concurrent scans** | **50** | **7,500** | **150x scale-out** |
 
@@ -263,8 +291,9 @@ You don't need to clone the repo to deploy. The bastion host UserData automatica
 3. Installs Karpenter and KEDA via Helm
 4. Deploys the Vision One File Security scanner pods via Helm (GPG-verified)
 5. Configures the scan policy decompression limits via CLISH
-6. Clones this repo, builds the scanner app Docker image, pushes it to ECR
-7. Deploys the scanner app (ServiceAccount, ConfigMap, Deployment, KEDA ScaledObject) to the cluster
+6. Installs second V1FS scanner release (`review-release`) with unlimited decompression (no CLISH scan policy)
+7. Clones this repo, builds the scanner app Docker image, pushes it to ECR
+8. Deploys the scanner app and review scanner app (`deploy.sh --review`) to the cluster
 
 If you want to further develop the application using [Claude Code](https://claude.ai/claude-code), clone the repo — it includes `CLAUDE.md` and supporting files in the `docs/` directory that provide Claude with comprehensive project context, architectural constraints, and operational guardrails.
 
@@ -289,6 +318,9 @@ After creation, the stack exports key resource identifiers:
 | `FileScanDLQUrl` | SQS dead letter queue URL |
 | `AlarmSNSTopicArn` | SNS topic for scan alarms (subscribe for notifications) |
 | `ScanAuditLogGroupName` | CloudWatch log group for scan audit trail |
+| `ReviewScanQueueUrl` | SQS queue URL for review pipeline file events |
+| `ReviewScanDLQUrl` | SQS dead letter queue URL for review pipeline |
+| `ReviewAuditLogGroupName` | CloudWatch log group for review scan audit trail |
 | `ECRRepoUrl` | ECR repository for the scanner app image |
 | `ClusterName` | EKS cluster name |
 | `BastionPublicIP` | Bastion host IP (connect via SSM, not SSH) |
@@ -402,7 +434,7 @@ The Helm chart's default behavior conflicts with our architecture in several way
 
 ### Safe upgrade procedure
 
-When TrendAI releases a new scanner image, upgrade via the bastion host using Session Manager:
+Both V1FS Helm releases (`my-release` and `review-release`) must be upgraded together. When TrendAI releases a new scanner image, upgrade via the bastion host using Session Manager:
 
 ```bash
 aws ssm start-session --target <bastion-instance-id>
@@ -426,7 +458,24 @@ helm upgrade my-release visionone-filesecurity/visionone-filesecurity \
   --set scanner.ephemeralVolume.storageClass=efs-sc \
   --set scanner.ephemeralVolume.accessMode=ReadWriteMany \
   --set scanner.ephemeralVolume.size=100Gi
+
+# Upgrade the review-release (same values, but do NOT apply CLISH scan policy after)
+helm upgrade review-release visionone-filesecurity/visionone-filesecurity \
+  -n visionone-filesecurity \
+  --set scanner.autoscaling.enabled=false \
+  --set scanner.resources.requests.cpu=800m \
+  --set scanner.resources.requests.memory=2Gi \
+  --set visiononeFilesecurity.management.dbEnabled=true \
+  --set databaseContainer.storageClass.create=false \
+  --set databaseContainer.persistence.storageClassName=gp3 \
+  --set databaseContainer.persistence.size=100Gi \
+  --set scanner.ephemeralVolume.enabled=true \
+  --set scanner.ephemeralVolume.storageClass=efs-sc \
+  --set scanner.ephemeralVolume.accessMode=ReadWriteMany \
+  --set scanner.ephemeralVolume.size=100Gi
 ```
+
+**Do not apply CLISH scan policy to `review-release`** — it must run with unlimited decompression to properly analyze files that exceeded the main scanner's limits.
 
 **Do not use `--reuse-values`** — if the new chart version renames or adds values, `--reuse-values` can cause silent misconfiguration.
 
@@ -467,6 +516,7 @@ kubectl describe pod -n visionone-filesecurity -l app.kubernetes.io/component=sc
 - VPC Flow Logs capture all network traffic
 - EKS audit logging is enabled for all control plane components
 - IAM policies use least-privilege, resource-scoped permissions
+- Review scanner IAM role has no write access to the review bucket, preventing routing loops back to the review pipeline
 - Credentials are stored in Secrets Manager, never in plaintext
 - The V1FS Helm chart is GPG-verified before installation
 
@@ -476,7 +526,7 @@ kubectl describe pod -n visionone-filesecurity -l app.kubernetes.io/component=sc
 aws cloudformation delete-stack --stack-name my-scanner
 ```
 
-A pre-delete cleanup Lambda runs automatically during stack deletion — it terminates Karpenter-managed EC2 instances, cleans up orphaned instance profiles, and deletes orphaned EBS volumes before CloudFormation removes the roles and cluster. No manual cleanup is needed for these resources.
+A pre-delete cleanup Lambda runs automatically during stack deletion — it terminates Karpenter-managed EC2 instances, cleans up orphaned instance profiles, and deletes orphaned EBS volumes before CloudFormation removes the roles and cluster. No manual cleanup is needed for these resources. Review pipeline SQS queues, the review DLQ remediation Lambda, and the review audit log group are also deleted with the stack.
 
 Note: All S3 buckets (ingest, clean, review, quarantine) have `DeletionPolicy: Retain` and are **not deleted** with the stack. This prevents accidental data loss — scanned files, review items, and quarantined malware are preserved for forensic investigation or audit. The ECR repository and its images **are** deleted with the stack. To clean up retained buckets after stack deletion:
 

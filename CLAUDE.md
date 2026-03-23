@@ -25,6 +25,8 @@ Containerized Python application on EKS that polls an SQS queue for S3 object-cr
 ```
 S3 (Ingest) → SQS Queue → EKS Pod (scan via gRPC) → Clean, Review, or Quarantine Bucket
                   └→ DLQ (after 3 failures)
+S3 (Review) → Review SQS → Review Scanner Pod (no limits) → Clean or Quarantine Bucket
+                  └→ Review DLQ (after 3 failures)
 ```
 
 ## Detailed Documentation
@@ -57,7 +59,11 @@ project/
 │   ├── configmap.yaml            # SQS URL, S3 bucket names, scanner endpoint, API key ARN, audit log group
 │   ├── networkpolicy.yaml        # Egress restricted to DNS, V1FS scanner, AWS HTTPS
 │   ├── pdb.yaml                  # PodDisruptionBudgets for scanner-app and V1FS scanner (Karpenter consolidation protection)
-│   └── scaledobject.yaml         # KEDA ScaledObjects + TriggerAuthentication for SQS-driven autoscaling (both scanner-app and V1FS scanner)
+│   ├── scaledobject.yaml         # KEDA ScaledObjects + TriggerAuthentication for SQS-driven autoscaling (both scanner-app and V1FS scanner)
+│   ├── review-serviceaccount.yaml  # ServiceAccount: review-scanner-app (Pod Identity, NO annotations)
+│   ├── review-deployment.yaml      # Review scanner deployment (same image, different config)
+│   ├── review-networkpolicy.yaml   # Egress restricted to DNS, review-release V1FS scanner, AWS HTTPS
+│   └── review-scaledobject.yaml    # KEDA ScaledObjects for review pipeline (scale to zero, max 5)
 └── scripts/
     ├── build-and-push.sh         # Build Docker image and push to ECR (tagged with git SHA)
     └── deploy.sh                 # Apply k8s manifests to the cluster
@@ -74,6 +80,10 @@ project/
 | MAX_CONCURRENT_SCANS | 50 | `k8s/configmap.yaml` |
 | Full-scale concurrent scans | 7,500 | 150 pods × 50 concurrent |
 | vCPU required at full scale | ~200 | Default quota is 64 — request increase to at least 300 |
+| Review scanner-app pods (KEDA) | 5 | `k8s/review-scaledobject.yaml` |
+| Review V1FS scanner pods (KEDA) | 5 | `k8s/review-scaledobject.yaml` |
+
+Review pipeline scales to zero when idle (min replicas = 0).
 
 ## Quick Reference — Critical Rules
 
@@ -115,6 +125,16 @@ project/
 - **V1FS SDK `foundErrors` names**: `ATSE_ZIP_RATIO_ERR` (compression ratio exceeded), `ATSE_MAXDECOM_ERR` (nesting depth exceeded), `ATSE_ZIP_FILE_COUNT_ERR` (file count exceeded), `ATSE_EXTRACT_TOO_BIG_ERR` (decompressed size exceeded). These are returned in `result.foundErrors[].name` of the SDK response
 - **MAX_FILE_SIZE_MB is configurable** — files exceeding this limit (default 500 MB) are moved directly to quarantine without scanning via server-side S3 copy. Set via the `MAX_FILE_SIZE_MB` environment variable in the configmap
 
+### Review Pipeline (Deep Analysis)
+- **Second Helm release `review-release`** — installed with no CLISH scan policy applied (unlimited decompression). This allows the review scanner to fully analyze archives that exceeded the main scanner's decompression limits
+- **Review scanner reads from the review bucket** — routes files ONLY to clean or quarantine (never back to review). `REVIEW_ROUTING_ENABLED=false` in the review scanner ConfigMap prevents infinite routing loops
+- **Scale to zero when idle** — min 0, max 5 pods, cooldown 300s. The review pipeline handles low-volume deep analysis, not high-throughput scanning
+- **Shares the same `token-secret`** — no second V1FS registration token is needed. Both Helm releases use the same token
+- **Separate audit log group** — `review-audit-${StackName}` for review scan results, independent from the main `scan-audit-${StackName}`
+- **Separate DLQ with remediation Lambda** — the review pipeline has its own SQS DLQ and Lambda for retry/discard handling
+- **Deploy with `deploy.sh --review`** — the deploy script applies review-specific k8s manifests (review-serviceaccount, review-deployment, review-networkpolicy, review-scaledobject)
+- **Same Docker image as the main scanner** — behavior is controlled entirely by environment variables (different SQS queue, different scanner endpoint, `REVIEW_ROUTING_ENABLED=false`)
+
 ### Karpenter & Scaling
 - **Karpenter replaces Cluster Autoscaler** — provisions nodes directly via EC2 Fleet API (30-60s vs 1-2min). NodePool and EC2NodeClass CRDs are applied in bastion UserData. Managed node group (max 6) is for system components only; scanner workloads run on Karpenter nodes via nodeAffinity
 - **Karpenter instance flexibility** — NodePool allows r7i.xlarge, r7a.xlarge, r6i.xlarge only. On-demand only (no spot). CPU limit of 300 matches vCPU quota
@@ -129,10 +149,12 @@ project/
 ### Observability
 - **Health probes on port 8080** — scanner-app serves `/healthz` (liveness) and `/readyz` (readiness) via a lightweight async TCP server. Readiness returns 503 until the gRPC scan handle is initialized and during shutdown. The network policy only restricts Egress, so kubelet probe ingress is unrestricted
 - **Scan audit trail** — each scan result is written to CloudWatch Logs (`scan-audit-${StackName}`) as structured JSON. The `ScannerAppPolicy` includes `logs:CreateLogStream` and `logs:PutLogEvents` permissions. Audit entries are batched (up to 25 per write) and flushed on shutdown. If the log group doesn't exist, audit logging degrades gracefully
+- **Review audit trail** — review scan results are written to a separate CloudWatch Logs group (`review-audit-${StackName}`). Same structured JSON format as the main audit trail
 - **DLQ remediation Lambda** — triggered by SQS event source mapping on the DLQ. Re-queues messages with exponential backoff (60s → 300s → 900s) using a `DLQRetryCount` message attribute. After 3 DLQ retries (9 total scan attempts), logs `PERMANENT_FAILURE` and discards. Do NOT manually process the DLQ — the Lambda handles it automatically
+- **Review DLQ alarm** — separate CloudWatch alarm for the review pipeline DLQ, same SNS topic as the main DLQ alarm
 - **DLQ visibility timeout must be >= Lambda timeout** — the DLQ has `VisibilityTimeout: 120` (seconds) to satisfy the SQS event source mapping requirement (Lambda timeout is 60s). Without this, CloudFormation fails to create the `DLQEventSourceMapping`
 - **SNS alarm topic requires subscription** — the `AlarmSNSTopic` is created but has no subscribers by default. Subscribe with: `aws sns subscribe --topic-arn <arn> --protocol email --notification-endpoint you@example.com`
-- **CloudWatch Dashboard** — `scanner-${StackName}`, 28 widgets. CFN-managed, created/deleted with the stack. Dashboard URL is in stack outputs
+- **CloudWatch Dashboard** — `scanner-${StackName}`, 32 widgets. CFN-managed, created/deleted with the stack. Dashboard URL is in stack outputs
 
 ### Operational Gotchas
 - **Bastion has S3 ingest write permission** — the bastion role includes `s3:PutObject` and `s3:ListBucket` on the ingest bucket. Use `aws s3 sync` from bastion for fastest file delivery
@@ -142,6 +164,7 @@ project/
 
 ### Cleanup & Lifecycle
 - **Pre-delete cleanup Lambda** — `CleanupLambda` runs automatically during stack deletion. It terminates Karpenter EC2 instances, cleans up orphaned instance profiles, and deletes orphaned EBS volumes BEFORE CloudFormation deletes the roles and cluster
+- **Review pipeline resources are cleaned up with the stack** — review SQS queues, review DLQ remediation Lambda, and review audit log group are all CloudFormation-managed and deleted automatically during stack deletion
 - **Orphaned EBS volumes after stack deletion** — V1FS PVCs (100 GB gp3 each) persist after stack deletion. Always check: `aws ec2 describe-volumes --filters Name=status,Values=available`
 - **Orphaned EC2 instances after stack deletion** — Karpenter-managed nodes can survive stack deletion. Check: `aws ec2 describe-instances --filters Name=instance-state-name,Values=running`
 
@@ -200,5 +223,5 @@ Karpenter does not interfere with Helm chart upgrades. Rolling updates are handl
 - **Cleanup Lambda for graceful stack deletion** — `CleanupLambda` in `eks-v1fs.yaml` automatically terminates Karpenter EC2 instances, cleans up orphaned instance profiles, and deletes orphaned EBS volumes during stack deletion. Users can simply run `aws cloudformation delete-stack` without manual cleanup
 - **DLQ remediation Lambda** — `DLQRemediationLambda` in `eks-v1fs.yaml` auto-re-queues failed messages with exponential backoff (60s/300s/900s), max 3 DLQ retries before permanent discard. Scan failures that are transient (network blips, scanner restarts) recover automatically
 - **CloudWatch Alarms** — DLQ alarm (any messages > 0) and Queue Age alarm (oldest message > 20 min for 5 consecutive minutes) alert via SNS topic. Subscribe to the topic to receive notifications
-- **CloudWatch Dashboard** — `scanner-${StackName}`, 28 widgets covering queue health, scan throughput/latency (Logs Insights), malware detection stats, DLQ remediation, pod distribution, and recent scan results. CFN-managed, created/deleted with the stack. Dashboard URL is in stack outputs
+- **CloudWatch Dashboard** — `scanner-${StackName}`, 32 widgets covering queue health, scan throughput/latency (Logs Insights), malware detection stats, DLQ remediation, pod distribution, recent scan results, and review pipeline metrics. CFN-managed, created/deleted with the stack. Dashboard URL is in stack outputs
 

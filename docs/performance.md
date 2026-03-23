@@ -54,6 +54,16 @@
 - **KEDA scaling speed**: 1 → 150 pods in 105 seconds (doubles every ~15s)
 - **Karpenter provisioning**: 39 r6i.xlarge nodes in ~2 minutes via EC2 Fleet API
 
+## Review Pipeline Scaling
+
+The review pipeline handles low-volume deep analysis of files that exceeded decompression limits.
+
+- **ScaledObject**: `review-scanner-app-sqs-scaler` — scales review-scanner-app pods based on review SQS queue depth
+- **ScaledObject**: `review-v1fs-scanner-sqs-scaler` — scales review V1FS scanner pods based on review SQS queue depth
+- Both: min 0, max 5, threshold 50 messages per pod, cooldown 300s
+- **Scale to zero when idle** — no pods running when the review queue is empty, keeping costs near zero
+- **No PDB** — the review pipeline is low-volume and does not need Karpenter consolidation protection
+
 ## Observability
 - **CloudWatch Dashboard**: `scanner-${StackName}`, 26 widgets (queue health, throughput, latency, detection stats, pod distribution, recent scans). CFN-managed
 - **CloudWatch Alarms**: DLQ messages (any > 0), Queue Age (> 20 min for 5 consecutive minutes), via SNS topic

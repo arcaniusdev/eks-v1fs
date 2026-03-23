@@ -45,3 +45,5 @@
 - EKS audit logging enabled for all control plane components
 - VPC Flow Logs capture all traffic
 - IAM policies use scoped resource ARNs — no account-wide wildcards except where AWS requires them
+- Review scanner IAM role (`ReviewScannerAppRole`) prevents routing loops by excluding review bucket write permissions — the review scanner can only route files to clean or quarantine
+- Review pipeline has its own DLQ with remediation Lambda for independent failure handling
