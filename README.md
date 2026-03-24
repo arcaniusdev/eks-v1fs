@@ -52,7 +52,7 @@ The pipeline has two stages: a **main pipeline** that scans every file with deco
 | **Ingest** | A file lands in the S3 Ingest Bucket (uploaded by a user, application, or pipeline). S3 sends an `ObjectCreated` event to the SQS queue. |
 | **Scan** | A scanner-app pod long-polls the queue, downloads the file into memory, and scans it via the V1FS Python SDK over gRPC to the in-cluster scanner pods. |
 | **Route** | The file is copied to one of three destinations based on the scan result, then deleted from the Ingest Bucket. The SQS message is removed and the result is written to the CloudWatch audit trail. |
-| **Review** | Files routed to the Review Bucket are archives the main scanner could not fully analyze — the nesting depth, file count, compression ratio, or decompressed size exceeded the configured limits. The review pipeline re-scans these with a second V1FS scanner release (`rv`) that has no decompression limits, then routes to Clean or Quarantine. The review pipeline keeps one pod always warm for immediate processing. |
+| **Review** | Files routed to the Review Bucket are archives the main scanner could not fully analyze — the file size, nesting depth, file count, compression ratio, or decompressed size exceeded the configured limits. The review pipeline re-scans these with a second V1FS scanner release (`rv`) that has no decompression limits, then routes to Clean or Quarantine. The review pipeline keeps one pod always warm for immediate processing. |
 
 **Routing rules:**
 
@@ -69,7 +69,7 @@ If a scan fails, the SQS message stays in the queue and is retried. After 3 cons
 
 ### Orphaned File Reconciliation
 
-The review scanner includes a reconciliation loop that monitors the Ingest Bucket for orphaned files — objects that were uploaded but never processed due to transient failures such as IAM propagation delays, scanner pod restarts, or SQS message expiration. Every 5 minutes, the review scanner lists the Ingest Bucket and sends a synthetic SQS message for any file older than 30 minutes, re-entering it into the main scan pipeline. This ensures no file is silently dropped, even if every retry mechanism in the normal flow has been exhausted. Both the interval and age threshold are configurable via `RECONCILIATION_INTERVAL` and `RECONCILIATION_AGE_THRESHOLD` environment variables.
+The review scanner includes a reconciliation loop that monitors the Ingest Bucket for orphaned files — objects that were uploaded but never processed due to transient failures such as scanner pod restarts, or SQS message expiration. Every 5 minutes, the review scanner lists the Ingest Bucket and sends a synthetic SQS message for any file older than 30 minutes, re-entering it into the main scan pipeline. This ensures no file is silently dropped, even if every retry mechanism in the normal flow has been exhausted. Both the interval and age threshold are configurable via `RECONCILIATION_INTERVAL` and `RECONCILIATION_AGE_THRESHOLD` environment variables.
 
 ## Architecture
 
