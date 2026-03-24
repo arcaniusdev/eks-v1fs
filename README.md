@@ -74,6 +74,7 @@ A Python asyncio application built for speed. Scan requests use **gRPC** — a b
 - **Visibility heartbeat** — automatically extends SQS message visibility during long-running scans to prevent duplicate processing. On failure, immediately shortens visibility to 30 seconds for fast retry by another pod
 - **Health probes** — liveness (`/healthz`) and readiness (`/readyz`) endpoints on port 8080. Liveness catches deadlocked event loops (pod is restarted); readiness gates traffic until the gRPC scan handle is initialized
 - **Scan audit trail** — every scan result is written to CloudWatch Logs as structured JSON (file key, size, verdict, malware names, SHA256, scan duration, pod name), batched for efficiency
+- **Pull-based load distribution** — no load balancer needed. All scanner-app pods long-poll the same SQS queue, and SQS delivers each message to exactly one consumer. Pods that are free pull more messages; pods that are busy naturally slow their polling via backpressure (semaphore + 2x in-flight cap). gRPC connections to V1FS scanner pods are distributed by the Kubernetes Service at connection setup time
 - **Graceful shutdown** — handles SIGTERM to drain in-flight scans and flush audit entries before exiting (5-minute grace period)
 - **Predictive Machine Learning** — PML can be enabled for advanced threat detection (requires account-level PML support)
 
