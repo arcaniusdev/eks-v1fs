@@ -452,7 +452,7 @@ The script handles everything automatically:
 7. Verifies KEDA ScaledObjects are active and scanner pods are running
 8. Runs a sanity scan (1 clean file + 1 EICAR test file) to confirm scanning works
 
-Options: `--dry-run` to preview without executing, `--version X.Y.Z` to pin a specific chart version, `--skip-sanity` to skip the test scan.
+The script checks whether a newer version is available and exits early if already up to date. To force a specific version (e.g., rollback or skip a release), use `--version X.Y.Z`. Other options: `--dry-run` to preview without executing, `--skip-sanity` to skip the test scan.
 
 **Do not run `helm upgrade` manually** — a plain `helm upgrade` without all `--set` values reverts to chart defaults, re-enabling HPA (conflicts with KEDA) and resetting resources. The script ensures all custom values are specified. Do not use `--reuse-values` — if the new chart version renames or adds values, it can cause silent misconfiguration.
 
