@@ -2232,6 +2232,16 @@ Resources:
                 Action:
                   - s3:ListBucket
                 Resource: !GetAtt ReviewBucket.Arn
+              - Sid: S3IngestListForReconciliation
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt IngestBucket.Arn
+              - Sid: SQSMainQueueSendForReconciliation
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt FileScanQueue.Arn
               - Sid: S3CleanWrite
                 Effect: Allow
                 Action:

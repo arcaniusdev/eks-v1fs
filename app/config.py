@@ -36,6 +36,11 @@ class Config:
     review_routing_enabled: bool
     sqs_visibility_timeout: int
     audit_queue_max_size: int
+    reconciliation_enabled: bool
+    reconciliation_bucket: str
+    reconciliation_queue_url: str
+    reconciliation_interval: int
+    reconciliation_age_threshold: int
 
 
 def load_config() -> Config:
@@ -86,4 +91,9 @@ def load_config() -> Config:
         review_routing_enabled=review_routing_enabled,
         sqs_visibility_timeout=_int_env("SQS_VISIBILITY_TIMEOUT", "300", 30, 43200),
         audit_queue_max_size=_int_env("AUDIT_QUEUE_MAX_SIZE", "1000", 100, 100000),
+        reconciliation_enabled=os.environ.get("RECONCILIATION_ENABLED", "false").lower() == "true",
+        reconciliation_bucket=os.environ.get("RECONCILIATION_BUCKET", ""),
+        reconciliation_queue_url=os.environ.get("RECONCILIATION_QUEUE_URL", ""),
+        reconciliation_interval=_int_env("RECONCILIATION_INTERVAL", "300", 60, 3600),
+        reconciliation_age_threshold=_int_env("RECONCILIATION_AGE_THRESHOLD", "1800", 300, 86400),
     )

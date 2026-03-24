@@ -43,6 +43,7 @@ class ScannerApp:
         self._audit_queue: asyncio.Queue = asyncio.Queue(maxsize=config.audit_queue_max_size)
         self._health_server = None
         self._audit_task = None
+        self._reconciliation_task = None
 
     async def start(self) -> None:
         self.s3_client = await self._exit_stack.enter_async_context(
@@ -85,6 +86,15 @@ class ScannerApp:
             self.config.max_concurrent_scans,
             self.config.pml_enabled,
         )
+        if self.config.reconciliation_enabled:
+            self._reconciliation_task = asyncio.create_task(self._reconciliation_loop())
+            logger.info(
+                "Reconciliation enabled — monitoring s3://%s every %ds for objects older than %ds",
+                self.config.reconciliation_bucket,
+                self.config.reconciliation_interval,
+                self.config.reconciliation_age_threshold,
+            )
+
         try:
             await self._poll_loop()
         finally:
@@ -428,6 +438,61 @@ class ScannerApp:
                 except Exception:
                     logger.warning("Failed to write %d audit entries", len(batch), exc_info=True)
 
+    # --- Reconciliation (orphaned file detection) ---
+
+    async def _reconciliation_loop(self) -> None:
+        """Periodically scan the ingest bucket for orphaned files and re-queue them."""
+        recon_sqs = await self._exit_stack.enter_async_context(
+            self.session.create_client("sqs", region_name=self.config.aws_region)
+        )
+        recon_s3 = await self._exit_stack.enter_async_context(
+            self.session.create_client("s3", region_name=self.config.aws_region)
+        )
+        bucket = self.config.reconciliation_bucket
+        queue_url = self.config.reconciliation_queue_url
+        threshold = self.config.reconciliation_age_threshold
+
+        while not self.shutdown_event.is_set():
+            await asyncio.sleep(self.config.reconciliation_interval)
+            if self.shutdown_event.is_set():
+                break
+            try:
+                now = time.time()
+                requeued = 0
+                paginator = recon_s3.get_paginator("list_objects_v2")
+                async for page in paginator.paginate(Bucket=bucket):
+                    for obj in page.get("Contents", []):
+                        age = now - obj["LastModified"].timestamp()
+                        if age < threshold:
+                            continue
+                        key = obj["Key"]
+                        size = obj.get("Size", 0)
+                        # Send synthetic S3 event notification to the main scan queue
+                        message_body = json.dumps({
+                            "Records": [{
+                                "eventSource": "aws:s3",
+                                "eventName": "ObjectCreated:Reconciliation",
+                                "s3": {
+                                    "bucket": {"name": bucket},
+                                    "object": {"key": urllib.parse.quote(key, safe=""), "size": size},
+                                }
+                            }]
+                        })
+                        await recon_sqs.send_message(
+                            QueueUrl=queue_url,
+                            MessageBody=message_body,
+                        )
+                        requeued += 1
+                if requeued > 0:
+                    logger.warning(
+                        "Reconciliation: re-queued %d orphaned files from s3://%s (age > %ds)",
+                        requeued, bucket, threshold,
+                    )
+                else:
+                    logger.debug("Reconciliation: no orphaned files in s3://%s", bucket)
+            except Exception:
+                logger.warning("Reconciliation check failed", exc_info=True)
+
     # --- Shutdown ---
 
     async def _shutdown(self) -> None:
@@ -437,6 +502,12 @@ class ScannerApp:
         )
         if self.in_flight:
             await asyncio.gather(*self.in_flight, return_exceptions=True)
+        if self._reconciliation_task:
+            self._reconciliation_task.cancel()
+            try:
+                await self._reconciliation_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self._audit_task:
             try:
                 await asyncio.wait_for(self._audit_task, timeout=10)
