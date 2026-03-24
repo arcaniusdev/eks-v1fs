@@ -67,6 +67,10 @@ The pipeline has two stages: a **main pipeline** that scans every file with deco
 
 If a scan fails, the SQS message stays in the queue and is retried. After 3 consecutive failures, it moves to a Dead Letter Queue. A Lambda function automatically re-queues DLQ messages with exponential backoff (60s → 300s → 900s). After 3 DLQ retries (9 total scan attempts), the message is logged as a permanent failure and discarded. Both pipelines have independent DLQs and remediation Lambdas.
 
+### Orphaned File Reconciliation
+
+The review scanner includes a reconciliation loop that monitors the Ingest Bucket for orphaned files — objects that were uploaded but never processed due to transient failures such as IAM propagation delays, scanner pod restarts, or SQS message expiration. Every 5 minutes, the review scanner lists the Ingest Bucket and sends a synthetic SQS message for any file older than 30 minutes, re-entering it into the main scan pipeline. This ensures no file is silently dropped, even if every retry mechanism in the normal flow has been exhausted. Both the interval and age threshold are configurable via `RECONCILIATION_INTERVAL` and `RECONCILIATION_AGE_THRESHOLD` environment variables.
+
 ## Architecture
 
 ### Infrastructure (CloudFormation)

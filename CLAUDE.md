@@ -136,6 +136,7 @@ Review pipeline keeps 1 pod warm at all times (min replicas = 1) to avoid cold-s
 - **Separate DLQ with remediation Lambda** — the review pipeline has its own SQS DLQ and Lambda for retry/discard handling
 - **Deploy with `deploy.sh --review`** — the deploy script applies review-specific k8s manifests (review-serviceaccount, review-deployment, review-networkpolicy, review-scaledobject)
 - **Same Docker image as the main scanner** — behavior is controlled entirely by environment variables (different SQS queue, different scanner endpoint, `REVIEW_ROUTING_ENABLED=false`)
+- **Orphaned file reconciliation** — the review scanner runs a background loop that lists the ingest bucket every `RECONCILIATION_INTERVAL` seconds (default 300) and sends synthetic SQS messages to the main scan queue for any objects older than `RECONCILIATION_AGE_THRESHOLD` seconds (default 1800). This catches files that were uploaded but never processed due to transient failures (IAM propagation, pod restarts, SQS message expiration). The `ReviewScannerAppRole` has `s3:ListBucket` on the ingest bucket and `sqs:SendMessage` on the main scan queue for this purpose. Enabled via `RECONCILIATION_ENABLED=true` in the review scanner ConfigMap
 
 ### Karpenter & Scaling
 - **Karpenter replaces Cluster Autoscaler** — provisions nodes directly via EC2 Fleet API (30-60s vs 1-2min). NodePool and EC2NodeClass CRDs are applied in bastion UserData. Managed node group (max 6) is for system components only; scanner workloads run on Karpenter nodes via nodeAffinity
