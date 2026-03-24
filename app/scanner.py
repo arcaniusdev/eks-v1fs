@@ -170,15 +170,17 @@ class ScannerApp:
                 await self._delete_message(receipt_handle)
             else:
                 logger.warning(
-                    "One or more records failed in message %s — leaving for retry",
+                    "One or more records failed in message %s — shortening visibility for fast retry",
                     message_id,
                 )
+                await self._shorten_visibility(receipt_handle)
 
         except json.JSONDecodeError:
             logger.exception("Malformed message body [msg=%s], deleting", message_id)
             await self._delete_message(receipt_handle)
         except Exception:
-            logger.exception("Failed processing message %s — leaving for retry", message_id)
+            logger.exception("Failed processing message %s — shortening visibility for fast retry", message_id)
+            await self._shorten_visibility(receipt_handle)
         finally:
             heartbeat_task.cancel()
             try:
@@ -304,6 +306,17 @@ class ScannerApp:
             for e in found_errors
             if e.get("name", "") in DECOMPRESSION_ERROR_NAMES
         ]
+
+    async def _shorten_visibility(self, receipt_handle: str, timeout: int = 30) -> None:
+        """Shorten message visibility timeout for fast retry on transient failures."""
+        try:
+            await self.sqs_client.change_message_visibility(
+                QueueUrl=self.config.sqs_queue_url,
+                ReceiptHandle=receipt_handle,
+                VisibilityTimeout=timeout,
+            )
+        except Exception:
+            logger.debug("Failed to shorten visibility timeout", exc_info=True)
 
     async def _extend_visibility(self, receipt_handle: str, interval: int | None = None) -> None:
         if interval is None:
