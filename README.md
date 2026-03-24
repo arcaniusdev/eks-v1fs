@@ -63,56 +63,6 @@ The pipeline has two stages: a **main pipeline** that scans every file with deco
 | **Review (oversize)** | File exceeds `MAX_FILE_SIZE_MB` (default 500) | Review Bucket → server-side copy (no download), re-scanned by review pipeline |
 | **Malicious** | `scanResult > 0` | Quarantine Bucket |
 
-### Failure Handling
-
-If a scan fails (gRPC error, download failure, or any transient exception), the scanner immediately shortens the SQS message visibility timeout to 30 seconds, making it available for another pod to pick up almost immediately. Without this, failed messages would stay invisible for the full visibility timeout (600 seconds) before being retried — a 10-minute delay for what might be a momentary network blip. The fast retry ensures transient failures recover in seconds, not minutes.
-
-After 3 consecutive failures, the message moves to a Dead Letter Queue. A Lambda function automatically re-queues DLQ messages with exponential backoff (60s → 300s → 900s). After 3 DLQ retries (9 total scan attempts), the message is logged as a permanent failure and discarded. Both pipelines have independent DLQs and remediation Lambdas.
-
-```
-Scan fails → visibility shortened to 30s → fast retry by another pod
-  ↓ (3 failures)
-DLQ → Lambda re-queues with backoff (60s → 300s → 900s)
-  ↓ (3 DLQ retries = 9 total attempts)
-Permanent failure logged and discarded
-```
-
-### Orphaned File Reconciliation
-
-The review scanner includes a reconciliation loop that monitors the Ingest Bucket for orphaned files — objects that were uploaded but never processed due to transient failures such as scanner pod restarts, or SQS message expiration. Every 5 minutes, the review scanner lists the Ingest Bucket and sends a synthetic SQS message for any file older than 30 minutes, re-entering it into the main scan pipeline. This ensures no file is silently dropped, even if every retry mechanism in the normal flow has been exhausted. Both the interval and age threshold are configurable via `RECONCILIATION_INTERVAL` and `RECONCILIATION_AGE_THRESHOLD` environment variables.
-
-## Architecture
-
-### Infrastructure (CloudFormation)
-
-The `eks-v1fs.yaml` template creates everything:
-
-| Resource | Purpose |
-|---|---|
-| **VPC** | `10.2.0.0/16` with public and private subnets across 2 AZs |
-| **NAT Gateways** | One per AZ — pods in private subnets reach the internet for threat intelligence updates |
-| **EKS Cluster** | Private API endpoint, full audit logging, managed addons (vpc-cni, CoreDNS, kube-proxy, Pod Identity Agent, EBS CSI Driver, EFS CSI Driver) |
-| **Node Group** | `r7i.large` system nodes (2 vCPU, 16 GiB) in private subnets, min 3 / max 6 — hosts system components only |
-| **ECR Repository** | Hosts the scanner app container image, scan-on-push enabled |
-| **S3 Buckets** | Ingest (with event notifications), Clean, Review, Quarantine — all have `DeletionPolicy: Retain` to preserve files when the stack is deleted |
-| **SQS Queues** | Main queue (600s visibility timeout, 20s long polling) + Dead Letter Queue (120s visibility timeout); Review SQS queue + Review DLQ for the review pipeline |
-| **DLQ Remediation Lambda** | Re-queues failed messages with exponential backoff (60s/300s/900s), max 3 DLQ retries before permanent discard |
-| **Review DLQ Remediation Lambda** | Same retry logic as the main DLQ Lambda, handles review pipeline failures independently |
-| **CloudWatch Alarms** | DLQ messages (any > 0), queue age (> 20 min for 5 consecutive minutes), and review DLQ messages (any > 0) via SNS topic |
-| **Scan Audit Log** | CloudWatch log group with structured JSON per scan (file, verdict, malware names, SHA256, duration), 30-day retention |
-| **Review Audit Log** | Separate CloudWatch log group (`review-audit-${StackName}`) for review pipeline scan results, 30-day retention |
-| **CloudWatch Dashboard** | 29-widget dashboard with queue health, scan throughput/latency, malware detection stats, DLQ remediation, pod distribution, recent scan results, and review pipeline metrics |
-| **IAM Roles** | Least-privilege roles for nodes, bastion, scanner app, KEDA operator, Karpenter, and DLQ remediation |
-| **Pod Identity** | Binds IAM roles to Kubernetes service accounts — no access keys needed |
-| **Secrets Manager** | Stores the V1FS registration token and API key |
-| **Metrics Server** | Provides CPU/memory metrics for cluster monitoring |
-| **KEDA** | Scales both scanner-app and V1FS scanner pods based on SQS queue depth; also scales review pipeline pods |
-| **Karpenter NodePool** | Provisions xlarge scanner nodes (r7i/r7a/r6i) directly via EC2 Fleet API; consolidates underutilized nodes automatically |
-| **V1FS Review Release** | Second Helm release (`rv`) with no CLISH scan policy — unlimited decompression for deep analysis of review bucket files |
-| **EFS Filesystem** | Encrypted shared storage (ReadWriteMany) for V1FS scanner ephemeral volume across multiple pods |
-| **Pre-delete Cleanup Lambda** | Runs automatically during stack deletion — terminates Karpenter EC2 instances, cleans up orphaned instance profiles, and deletes orphaned EBS volumes before CloudFormation deletes the roles and cluster |
-| **Bastion Host** | Provisions the cluster, installs Helm charts, builds and deploys the scanner app |
-
 ### Scanner Application
 
 A Python asyncio application built for speed. Scan requests use **gRPC** — a binary protocol that is dramatically faster than traditional REST/RPC, with lower latency, smaller payloads, and native streaming support. Files are scanned entirely in memory via `scan_buffer()`, eliminating disk I/O from the critical path. The result is scan latency measured in milliseconds, not seconds.
@@ -225,6 +175,56 @@ Queue empty → KEDA scales pods back down → Karpenter consolidates idle nodes
 ```
 
 KEDA and Karpenter get their AWS permissions through Pod Identity — KEDA reads SQS queue metrics, Karpenter manages EC2 instances directly. No access keys are involved.
+
+### Failure Handling
+
+If a scan fails (gRPC error, download failure, or any transient exception), the scanner immediately shortens the SQS message visibility timeout to 30 seconds, making it available for another pod to pick up almost immediately. Without this, failed messages would stay invisible for the full visibility timeout (600 seconds) before being retried — a 10-minute delay for what might be a momentary network blip. The fast retry ensures transient failures recover in seconds, not minutes.
+
+After 3 consecutive failures, the message moves to a Dead Letter Queue. A Lambda function automatically re-queues DLQ messages with exponential backoff (60s → 300s → 900s). After 3 DLQ retries (9 total scan attempts), the message is logged as a permanent failure and discarded. Both pipelines have independent DLQs and remediation Lambdas.
+
+```
+Scan fails → visibility shortened to 30s → fast retry by another pod
+  ↓ (3 failures)
+DLQ → Lambda re-queues with backoff (60s → 300s → 900s)
+  ↓ (3 DLQ retries = 9 total attempts)
+Permanent failure logged and discarded
+```
+
+### Orphaned File Reconciliation
+
+The review scanner includes a reconciliation loop that monitors the Ingest Bucket for orphaned files — objects that were uploaded but never processed due to transient failures such as scanner pod restarts, or SQS message expiration. Every 5 minutes, the review scanner lists the Ingest Bucket and sends a synthetic SQS message for any file older than 30 minutes, re-entering it into the main scan pipeline. This ensures no file is silently dropped, even if every retry mechanism in the normal flow has been exhausted. Both the interval and age threshold are configurable via `RECONCILIATION_INTERVAL` and `RECONCILIATION_AGE_THRESHOLD` environment variables.
+
+## Architecture
+
+### Infrastructure (CloudFormation)
+
+The `eks-v1fs.yaml` template creates everything:
+
+| Resource | Purpose |
+|---|---|
+| **VPC** | `10.2.0.0/16` with public and private subnets across 2 AZs |
+| **NAT Gateways** | One per AZ — pods in private subnets reach the internet for threat intelligence updates |
+| **EKS Cluster** | Private API endpoint, full audit logging, managed addons (vpc-cni, CoreDNS, kube-proxy, Pod Identity Agent, EBS CSI Driver, EFS CSI Driver) |
+| **Node Group** | `r7i.large` system nodes (2 vCPU, 16 GiB) in private subnets, min 3 / max 6 — hosts system components only |
+| **ECR Repository** | Hosts the scanner app container image, scan-on-push enabled |
+| **S3 Buckets** | Ingest (with event notifications), Clean, Review, Quarantine — all have `DeletionPolicy: Retain` to preserve files when the stack is deleted |
+| **SQS Queues** | Main queue (600s visibility timeout, 20s long polling) + Dead Letter Queue (120s visibility timeout); Review SQS queue + Review DLQ for the review pipeline |
+| **DLQ Remediation Lambda** | Re-queues failed messages with exponential backoff (60s/300s/900s), max 3 DLQ retries before permanent discard |
+| **Review DLQ Remediation Lambda** | Same retry logic as the main DLQ Lambda, handles review pipeline failures independently |
+| **CloudWatch Alarms** | DLQ messages (any > 0), queue age (> 20 min for 5 consecutive minutes), and review DLQ messages (any > 0) via SNS topic |
+| **Scan Audit Log** | CloudWatch log group with structured JSON per scan (file, verdict, malware names, SHA256, duration), 30-day retention |
+| **Review Audit Log** | Separate CloudWatch log group (`review-audit-${StackName}`) for review pipeline scan results, 30-day retention |
+| **CloudWatch Dashboard** | 29-widget dashboard with queue health, scan throughput/latency, malware detection stats, DLQ remediation, pod distribution, recent scan results, and review pipeline metrics |
+| **IAM Roles** | Least-privilege roles for nodes, bastion, scanner app, KEDA operator, Karpenter, and DLQ remediation |
+| **Pod Identity** | Binds IAM roles to Kubernetes service accounts — no access keys needed |
+| **Secrets Manager** | Stores the V1FS registration token and API key |
+| **Metrics Server** | Provides CPU/memory metrics for cluster monitoring |
+| **KEDA** | Scales both scanner-app and V1FS scanner pods based on SQS queue depth; also scales review pipeline pods |
+| **Karpenter NodePool** | Provisions xlarge scanner nodes (r7i/r7a/r6i) directly via EC2 Fleet API; consolidates underutilized nodes automatically |
+| **V1FS Review Release** | Second Helm release (`rv`) with no CLISH scan policy — unlimited decompression for deep analysis of review bucket files |
+| **EFS Filesystem** | Encrypted shared storage (ReadWriteMany) for V1FS scanner ephemeral volume across multiple pods |
+| **Pre-delete Cleanup Lambda** | Runs automatically during stack deletion — terminates Karpenter EC2 instances, cleans up orphaned instance profiles, and deletes orphaned EBS volumes before CloudFormation deletes the roles and cluster |
+| **Bastion Host** | Provisions the cluster, installs Helm charts, builds and deploys the scanner app |
 
 ### How Credentials Work
 
