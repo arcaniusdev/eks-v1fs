@@ -146,11 +146,28 @@ def main():
     else:
         print("  No scan policy values found (will skip re-application).")
 
-    # Step 3: Update repo and check available versions
+    # Step 3: Update repo and check for new version
     print("\n[3/8] Updating Helm repository...")
     run("helm repo update visionone-filesecurity")
     print("\nAvailable versions:")
     run("helm search repo visionone-filesecurity/visionone-filesecurity --versions | head -5")
+
+    # Check if upgrade is needed
+    if not args.version:
+        latest_result = run(
+            "helm search repo visionone-filesecurity/visionone-filesecurity -o json",
+            check=False,
+        )
+        if latest_result.returncode == 0 and latest_result.stdout.strip():
+            latest_data = json.loads(latest_result.stdout)
+            if latest_data:
+                latest_chart = latest_data[0].get("version", "")
+                installed_chart, _ = get_installed_version("my-release", NAMESPACE)
+                installed_ver = installed_chart.replace("visionone-filesecurity-", "")
+                if installed_ver == latest_chart:
+                    print(f"\n  Already running the latest version ({latest_chart}). Nothing to upgrade.")
+                    print("  Use --version X.Y.Z to force a specific version.")
+                    return
 
     # Step 4: Upgrade both releases
     for release, ns in RELEASES:
