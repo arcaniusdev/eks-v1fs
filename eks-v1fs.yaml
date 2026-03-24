@@ -2154,9 +2154,7 @@ Resources:
                   body = record['body']
                   attrs = record.get('messageAttributes', {})
 
-                  retry = 0
-                  if 'DLQRetryCount' in attrs:
-                      retry = int(attrs['DLQRetryCount']['stringValue'])
+                  retry = int(attrs.get('DLQRetryCount', {}).get('stringValue', '0'))
 
                   if retry >= MAX_RETRIES:
                       print(f"PERMANENT_FAILURE: message {msg_id} exceeded {MAX_RETRIES} DLQ retries, discarding")
@@ -2173,17 +2171,20 @@ Resources:
                   delay = min(60 * (5 ** (retry - 1)), 900)
                   print(f"RE-QUEUE: message {msg_id} DLQ retry {retry}/{MAX_RETRIES} delay={delay}s")
 
-                  sqs.send_message(
-                      QueueUrl=QUEUE_URL,
-                      MessageBody=body,
-                      DelaySeconds=delay,
-                      MessageAttributes={
-                          'DLQRetryCount': {
-                              'DataType': 'Number',
-                              'StringValue': str(retry),
-                          }
-                      },
-                  )
+                  try:
+                      sqs.send_message(
+                          QueueUrl=QUEUE_URL,
+                          MessageBody=body,
+                          DelaySeconds=delay,
+                          MessageAttributes={
+                              'DLQRetryCount': {
+                                  'DataType': 'Number',
+                                  'StringValue': str(retry),
+                              }
+                          },
+                      )
+                  except Exception as e:
+                      print(f"ERROR: Failed to re-queue message {msg_id}: {e}")
 
   DLQEventSourceMapping:
     Type: AWS::Lambda::EventSourceMapping
@@ -2369,8 +2370,11 @@ Resources:
                   retry += 1
                   delay = min(60 * (5 ** (retry - 1)), 900)
                   print(f"RE-QUEUE: message {msg_id} DLQ retry {retry}/{MAX_RETRIES} delay={delay}s")
-                  sqs.send_message(QueueUrl=QUEUE_URL, MessageBody=body, DelaySeconds=delay,
-                      MessageAttributes={'DLQRetryCount': {'DataType': 'Number', 'StringValue': str(retry)}})
+                  try:
+                      sqs.send_message(QueueUrl=QUEUE_URL, MessageBody=body, DelaySeconds=delay,
+                          MessageAttributes={'DLQRetryCount': {'DataType': 'Number', 'StringValue': str(retry)}})
+                  except Exception as e:
+                      print(f"ERROR: Failed to re-queue message {msg_id}: {e}")
 
   ReviewDLQEventSourceMapping:
     Type: AWS::Lambda::EventSourceMapping

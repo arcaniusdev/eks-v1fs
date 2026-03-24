@@ -1,3 +1,6 @@
+# Reference template only — do NOT apply directly with kubectl.
+# The deploy script (scripts/deploy.sh) generates the real ConfigMap
+# with actual values substituted from CloudFormation stack outputs.
 apiVersion: v1
 kind: ConfigMap
 metadata:
