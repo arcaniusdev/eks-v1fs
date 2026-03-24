@@ -46,5 +46,5 @@
 - EKS audit logging enabled for all control plane components
 - VPC Flow Logs capture all traffic
 - IAM policies use scoped resource ARNs — no account-wide wildcards except where AWS requires them
-- Review scanner IAM role (`ReviewScannerAppRole`) deliberately has no write permission to the review bucket. This is a security control that enforces a one-way pipeline: files flow from review to clean or quarantine, never back to review. Even if `REVIEW_ROUTING_ENABLED` were misconfigured to `true`, the IAM policy would block the write and the file would fail to route, preventing infinite scanning loops
+- Review scanner IAM role (`ReviewScannerAppRole`) includes `s3:ListBucket` on the ingest bucket and `sqs:SendMessage` on the main FileScanQueue to support the reconciliation feature (detecting and re-queuing orphaned ingest files). It deliberately has no write permission to the review bucket — this enforces a one-way pipeline: files flow from review to clean or quarantine, never back to review. Even if `REVIEW_ROUTING_ENABLED` were misconfigured to `true`, the IAM policy would block the write and the file would fail to route, preventing infinite scanning loops
 - Review pipeline has its own DLQ with remediation Lambda for independent failure handling

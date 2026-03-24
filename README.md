@@ -394,7 +394,7 @@ k8s/
   pdb.yaml                 PodDisruptionBudgets (Karpenter consolidation protection)
   scaledobject.yaml        KEDA ScaledObject + TriggerAuthentication for SQS-driven autoscaling
   review-serviceaccount.yaml  Review scanner ServiceAccount (Pod Identity, no annotations)
-  review-deployment.yaml      Review scanner deployment (same image, different config)
+  review-deployment.yaml      Review scanner deployment (same image, reconciliation enabled)
   review-networkpolicy.yaml   Egress restricted to DNS, rv V1FS scanner, AWS HTTPS
   review-scaledobject.yaml    KEDA ScaledObjects for review pipeline (min 1, max 5)
 scripts/

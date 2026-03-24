@@ -136,6 +136,11 @@ Notes: `aiobotocore==3.3.0` requires `botocore>=1.42.62,<1.42.71` — keep `boto
 | `LOG_LEVEL` | Logging verbosity | `INFO` |
 | `AUDIT_LOG_GROUP` | CloudWatch log group for scan audit trail | `ScanAuditLogGroupName` |
 | `REVIEW_ROUTING_ENABLED` | Enable routing to review bucket for decompression limit errors | `true` (set to `false` for review scanner) |
+| `RECONCILIATION_ENABLED` | Enable background loop to detect and re-queue orphaned ingest files | `false` (set to `true` for review scanner) |
+| `RECONCILIATION_BUCKET` | Bucket to scan for orphaned files (the ingest bucket) | (required if enabled) |
+| `RECONCILIATION_QUEUE_URL` | SQS queue to re-queue orphaned files to (the main scan queue) | (required if enabled) |
+| `RECONCILIATION_INTERVAL` | Seconds between reconciliation scans (range 60-3600) | `300` |
+| `RECONCILIATION_AGE_THRESHOLD` | Only re-queue files older than this many seconds (range 300-86400) | `1800` |
 
 ## Deployment Specs
 
@@ -173,3 +178,14 @@ The review scanner uses the **same Docker image** as the main scanner — behavi
 - **`AUDIT_LOG_GROUP`**: points to `review-audit-${StackName}` for separate audit trail
 
 The review scanner is deployed alongside the main scanner using `deploy.sh --review`, which applies the review-specific k8s manifests (`review-serviceaccount.yaml`, `review-deployment.yaml`, `review-networkpolicy.yaml`, `review-scaledobject.yaml`). It uses a separate service account (`review-scanner-app`) bound to `ReviewScannerAppRole` via Pod Identity.
+
+## Reconciliation (Orphaned File Detection)
+
+The review scanner runs an optional background reconciliation loop that detects files in the ingest bucket that were never processed — typically due to transient failures such as IAM propagation delays, scanner pod restarts, or SQS message expiration.
+
+How it works:
+1. Every `RECONCILIATION_INTERVAL` seconds (default 300), lists all objects in `RECONCILIATION_BUCKET`
+2. For each object with `LastModified` older than `RECONCILIATION_AGE_THRESHOLD` seconds (default 1800), sends a synthetic S3 event notification to `RECONCILIATION_QUEUE_URL`
+3. The main scanner picks up the synthetic message and processes the file normally
+
+The reconciliation loop is enabled only on the review scanner (`RECONCILIATION_ENABLED=true` in the review ConfigMap). The `ReviewScannerAppRole` includes `s3:ListBucket` on the ingest bucket and `sqs:SendMessage` on the main FileScanQueue for this purpose.
