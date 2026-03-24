@@ -65,7 +65,17 @@ The pipeline has two stages: a **main pipeline** that scans every file with deco
 
 ### Failure Handling
 
-If a scan fails, the SQS message stays in the queue and is retried. After 3 consecutive failures, it moves to a Dead Letter Queue. A Lambda function automatically re-queues DLQ messages with exponential backoff (60s → 300s → 900s). After 3 DLQ retries (9 total scan attempts), the message is logged as a permanent failure and discarded. Both pipelines have independent DLQs and remediation Lambdas.
+If a scan fails (gRPC error, download failure, or any transient exception), the scanner immediately shortens the SQS message visibility timeout to 30 seconds, making it available for another pod to pick up almost immediately. Without this, failed messages would stay invisible for the full visibility timeout (600 seconds) before being retried — a 10-minute delay for what might be a momentary network blip. The fast retry ensures transient failures recover in seconds, not minutes.
+
+After 3 consecutive failures, the message moves to a Dead Letter Queue. A Lambda function automatically re-queues DLQ messages with exponential backoff (60s → 300s → 900s). After 3 DLQ retries (9 total scan attempts), the message is logged as a permanent failure and discarded. Both pipelines have independent DLQs and remediation Lambdas.
+
+```
+Scan fails → visibility shortened to 30s → fast retry by another pod
+  ↓ (3 failures)
+DLQ → Lambda re-queues with backoff (60s → 300s → 900s)
+  ↓ (3 DLQ retries = 9 total attempts)
+Permanent failure logged and discarded
+```
 
 ### Orphaned File Reconciliation
 
@@ -111,7 +121,7 @@ A Python asyncio application built for speed. Scan requests use **gRPC** — a b
 - **Fully async pipeline** — `aiobotocore` for S3/SQS operations and `amaas.grpc.aio` for scan requests, all running concurrently on a single event loop with zero thread-blocking
 - **In-memory scanning** — files are downloaded as byte buffers and passed directly to the scanner over gRPC, never written to disk
 - **50 concurrent scans per pod** — each pod maintains 50 in-flight scan requests simultaneously (configurable via `MAX_CONCURRENT_SCANS`), fully saturating the scanner backend
-- **Visibility heartbeat** — automatically extends SQS message visibility during long-running scans to prevent duplicate processing
+- **Visibility heartbeat** — automatically extends SQS message visibility during long-running scans to prevent duplicate processing. On failure, immediately shortens visibility to 30 seconds for fast retry by another pod
 - **Health probes** — liveness (`/healthz`) and readiness (`/readyz`) endpoints on port 8080. Liveness catches deadlocked event loops (pod is restarted); readiness gates traffic until the gRPC scan handle is initialized
 - **Scan audit trail** — every scan result is written to CloudWatch Logs as structured JSON (file key, size, verdict, malware names, SHA256, scan duration, pod name), batched for efficiency
 - **Graceful shutdown** — handles SIGTERM to drain in-flight scans and flush audit entries before exiting (5-minute grace period)
