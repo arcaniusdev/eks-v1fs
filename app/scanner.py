@@ -187,15 +187,15 @@ class ScannerApp:
                 pass
 
     async def _process_record(self, record: dict, message_id: str) -> None:
-        # S3 event records use URL-encoded keys (RFC 3986). Use unquote (not
-        # unquote_plus) because '+' is a valid character in S3 keys.
+        # S3 event notifications encode spaces as '+' (form-encoded).
+        # Use unquote_plus to correctly decode spaces in S3 keys.
         s3_data = record.get("s3", {})
         bucket = s3_data.get("bucket", {}).get("name")
         key_encoded = s3_data.get("object", {}).get("key")
         if not bucket or not key_encoded:
             logger.error("Malformed S3 record (missing bucket/key) [msg=%s]", message_id)
             return
-        key = urllib.parse.unquote(key_encoded)
+        key = urllib.parse.unquote_plus(key_encoded)
         size = s3_data.get("object", {}).get("size", 0)
 
         logger.info(
