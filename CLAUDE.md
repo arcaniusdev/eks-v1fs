@@ -168,6 +168,9 @@ Review pipeline keeps 1 pod warm at all times (min replicas = 1) to avoid cold-s
 - **aws s3 sync with `--quiet` silently swallows errors** — always test S3 access separately before relying on sync output. A "fast" sync that completes in seconds for thousands of files likely means it failed silently
 - **SSM command output truncation** — long SSM outputs get truncated, causing subsequent commands in the same invocation to silently not execute. Use `--quiet` for s3 operations when they're not the last command, or split into separate SSM invocations
 - **SSM TimeoutSeconds minimum is 30** — values below 30 cause parameter validation errors
+- **S3 event notifications encode spaces as `+`** — scanner must use `urllib.parse.unquote_plus()`, NOT `unquote()`. Using `unquote` silently fails on files with spaces in their names (the scanner tries to download a key with literal `+` characters that doesn't exist)
+- **IAM roles need `s3:ListBucket` on source buckets** — without it, S3 returns `AccessDenied` instead of `NoSuchKey` when a file doesn't exist, causing infinite retry loops on duplicate SQS messages. Both `ScannerAppRole` and `ReviewScannerAppRole` include this permission
+- **S3 `copy_object` onto itself does NOT trigger event notifications** — even with `s3:ObjectCreated:*` configured. Cannot "touch" files to re-trigger processing; must re-upload from an external source or use the reconciliation feature
 
 ### Cleanup & Lifecycle
 - **Pre-delete cleanup Lambda** — `CleanupLambda` runs automatically during stack deletion. It terminates Karpenter EC2 instances, cleans up orphaned instance profiles, and deletes orphaned EBS volumes BEFORE CloudFormation deletes the roles and cluster
