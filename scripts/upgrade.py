@@ -118,6 +118,19 @@ def main():
     print("V1FS Scanner Upgrade — Safe Upgrade with Custom Values")
     print("=" * 70)
 
+    # Step 0: Ensure environment is set up
+    print("\n[0/8] Setting up environment...")
+    import os
+    if not os.environ.get("KUBECONFIG"):
+        os.environ["KUBECONFIG"] = "/root/.kube/config"
+        print("  Set KUBECONFIG=/root/.kube/config")
+    # Ensure helm repo is added (idempotent)
+    run(
+        "helm repo add visionone-filesecurity "
+        "https://trendmicro.github.io/visionone-file-security-helm/ 2>/dev/null || true",
+        check=False,
+    )
+
     # Step 1: Check current versions
     print("\n[1/8] Checking current versions...")
     for release, ns in RELEASES:

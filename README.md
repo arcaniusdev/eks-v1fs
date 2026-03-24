@@ -433,117 +433,30 @@ The Helm chart's default behavior conflicts with our architecture in several way
 | No EFS ephemeral volume | EFS-backed shared ephemeral storage | Scanner pods lose shared scratch space |
 | Default storage class | gp3 StorageClass for database PVC | Database PVC may fail to provision |
 
-### Upgrade via the bastion host (recommended)
+### Upgrade procedure
 
-The upgrade script on the bastion handles everything: upgrades both Helm releases (`my-release` and `rv`) with all required custom values, verifies no HPA conflict was introduced, checks KEDA ScaledObjects, and runs a sanity scan.
-
-**1. Get the bastion instance ID** from the EC2 console or CLI:
+Connect to the bastion host via AWS Systems Manager Session Manager and run the upgrade script:
 
 ```bash
-aws ec2 describe-instances \
-  --filters "Name=tag:aws:cloudformation:stack-name,Values=<stack-name>" \
-             "Name=tag:aws:cloudformation:logical-id,Values=Bastion" \
-  --query "Reservations[].Instances[].InstanceId" --output text
-```
-
-**2. Connect via SSM Session Manager** (never SSH):
-
-```bash
-aws ssm start-session --target <bastion-instance-id>
-```
-
-**3. Set up the session** (required each time — SSM sessions start without shell profile):
-
-```bash
-export KUBECONFIG=/root/.kube/config
-helm repo add visionone-filesecurity https://trendmicro.github.io/cloudone-filestorage-plugins
-helm repo update visionone-filesecurity
-```
-
-**4. Run the upgrade script:**
-
-```bash
-# Preview what will run (no changes made)
-python3 /opt/eks-v1fs/scripts/upgrade.py --dry-run
-
-# Upgrade to latest chart version
 python3 /opt/eks-v1fs/scripts/upgrade.py
-
-# Pin a specific chart version
-python3 /opt/eks-v1fs/scripts/upgrade.py --version 2.5.0
-
-# Skip the post-upgrade sanity scan
-python3 /opt/eks-v1fs/scripts/upgrade.py --skip-sanity
 ```
 
-The script automatically:
-- Upgrades both `my-release` (main) and `rv` (review) with all custom `--set` values
-- Checks that no HPA was re-created (would conflict with KEDA)
-- Verifies KEDA ScaledObjects are active
-- Runs a sanity scan (1 clean + 1 EICAR) unless `--skip-sanity` is passed
+The script handles everything automatically:
 
-CLISH scan policy settings (decompression limits) **persist across `helm upgrade`** — they are stored in a management service ConfigMap separate from Helm-managed resources and do not need to be re-applied.
+1. Sets up the environment (KUBECONFIG, Helm repository)
+2. Captures the current CLISH scan policy before upgrading
+3. Updates the Helm repository and shows available versions
+4. Upgrades both Helm releases (`my-release` and `rv`) with all required custom `--set` values
+5. Re-applies the captured CLISH scan policy to `my-release` (not `rv` — it runs with unlimited decompression)
+6. Verifies no HPA was re-created (would conflict with KEDA)
+7. Verifies KEDA ScaledObjects are active and scanner pods are running
+8. Runs a sanity scan (1 clean file + 1 EICAR test file) to confirm scanning works
 
-### Manual helm upgrade (reference)
+Options: `--dry-run` to preview without executing, `--version X.Y.Z` to pin a specific chart version, `--skip-sanity` to skip the test scan.
 
-If you need to run `helm upgrade` directly instead of using the script, you **must** specify all custom values. Do not use `--reuse-values` — if the new chart version renames or adds values, it can cause silent misconfiguration.
+**Do not run `helm upgrade` manually** — a plain `helm upgrade` without all `--set` values reverts to chart defaults, re-enabling HPA (conflicts with KEDA) and resetting resources. The script ensures all custom values are specified. Do not use `--reuse-values` — if the new chart version renames or adds values, it can cause silent misconfiguration.
 
-```bash
-helm upgrade my-release visionone-filesecurity/visionone-filesecurity \
-  -n visionone-filesecurity \
-  --set scanner.autoscaling.enabled=false \
-  --set scanner.resources.requests.cpu=800m \
-  --set scanner.resources.requests.memory=2Gi \
-  --set visiononeFilesecurity.management.dbEnabled=true \
-  --set databaseContainer.storageClass.create=false \
-  --set databaseContainer.persistence.storageClassName=gp3 \
-  --set databaseContainer.persistence.size=100Gi \
-  --set scanner.ephemeralVolume.enabled=true \
-  --set scanner.ephemeralVolume.storageClass=efs-sc \
-  --set scanner.ephemeralVolume.accessMode=ReadWriteMany \
-  --set scanner.ephemeralVolume.size=100Gi
-
-helm upgrade rv visionone-filesecurity/visionone-filesecurity \
-  -n visionone-review \
-  --set scanner.autoscaling.enabled=false \
-  --set scanner.resources.requests.cpu=800m \
-  --set scanner.resources.requests.memory=2Gi \
-  --set visiononeFilesecurity.management.dbEnabled=true \
-  --set databaseContainer.storageClass.create=false \
-  --set databaseContainer.persistence.storageClassName=gp3 \
-  --set databaseContainer.persistence.size=100Gi \
-  --set scanner.ephemeralVolume.enabled=true \
-  --set scanner.ephemeralVolume.storageClass=efs-sc \
-  --set scanner.ephemeralVolume.accessMode=ReadWriteMany \
-  --set scanner.ephemeralVolume.size=100Gi
-```
-
-Do not apply CLISH scan policy to `rv` — it must run with unlimited decompression to properly analyze files that exceeded the main scanner's limits.
-
-### What does not need re-applying after upgrade
-
-These resources are managed separately from the Helm chart and are not affected by `helm upgrade`:
-
-- **KEDA ScaledObjects** — applied via `kubectl`, not Helm
-- **PodDisruptionBudgets** — applied via `kubectl`
-- **Pod Identity associations** — managed by CloudFormation
-- **Scanner-app deployment** — separate deployment, not part of the V1FS chart
-- **Scan policy (CLISH settings)** — stored in the management service ConfigMap, not in Helm values. Decompression limits persist across `helm upgrade`
-
-### Verify after upgrade
-
-```bash
-# Confirm no HPA was created (should return empty)
-kubectl get hpa -n visionone-filesecurity
-
-# Confirm KEDA ScaledObjects are still active
-kubectl get scaledobject -n visionone-filesecurity
-
-# Confirm scanner pods are running with correct resources
-kubectl describe pod -n visionone-filesecurity -l app.kubernetes.io/component=scanner | grep -A 2 "Requests:"
-
-# Run a sanity scan (1 clean + 1 EICAR) to verify scanning works
-```
+These resources are **not affected** by `helm upgrade` and do not need re-applying: KEDA ScaledObjects, PodDisruptionBudgets, Pod Identity associations, scanner-app deployment, and CLISH scan policy settings.
 
 ## Security
 
