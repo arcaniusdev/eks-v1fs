@@ -739,7 +739,10 @@ Resources:
                 Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
-                Resource: !Ref V1FSRegistrationSecret
+                Resource:
+                  - !Ref V1FSRegistrationSecret
+                  # ApiKey needed for bastion-side SDK sanity scans (upgrade.py endpoint fallback)
+                  - !Ref V1FSApiKeySecret
               # Publishes the scanner endpoint address for external POC apps
               - Sid: PublishScannerEndpoint
                 Effect: Allow
@@ -866,6 +869,7 @@ Resources:
                   - elasticloadbalancing:DescribeLoadBalancers
                   - elasticloadbalancing:DescribeLoadBalancerAttributes
                   - elasticloadbalancing:DescribeListeners
+                  - elasticloadbalancing:DescribeListenerAttributes
                   - elasticloadbalancing:DescribeListenerCertificates
                   - elasticloadbalancing:DescribeSSLPolicies
                   - elasticloadbalancing:DescribeRules
@@ -874,6 +878,7 @@ Resources:
                   - elasticloadbalancing:DescribeTargetHealth
                   - elasticloadbalancing:DescribeTags
                   - elasticloadbalancing:DescribeTrustStores
+                  - elasticloadbalancing:DescribeCapacityReservation
                 Resource: "*"
               - Effect: Allow
                 Action:
@@ -994,6 +999,8 @@ Resources:
                   - elasticloadbalancing:ModifyTargetGroup
                   - elasticloadbalancing:ModifyTargetGroupAttributes
                   - elasticloadbalancing:DeleteTargetGroup
+                  - elasticloadbalancing:ModifyListenerAttributes
+                  - elasticloadbalancing:ModifyCapacityReservation
                 Resource: "*"
                 Condition:
                   "Null":
