@@ -4,13 +4,44 @@ Description: >
 
 Parameters:
   PrimaryAZ:
-    Description: Availability Zone 1
+    Description: Availability Zone 1 (ignored when deploying into an existing VPC)
     Type: AWS::EC2::AvailabilityZone::Name
     Default: us-east-1a
   SecondaryAZ:
-    Description: Availability Zone 2
+    Description: Availability Zone 2 (ignored when deploying into an existing VPC)
     Type: AWS::EC2::AvailabilityZone::Name
     Default: us-east-1b
+  ExistingVpcId:
+    Description: >
+      Deploy into an EXISTING VPC instead of creating one (leave empty to create).
+      Requirements: DNS support and DNS hostnames enabled; two private subnets in
+      different AZs with outbound internet (NAT or proxy — the scanner must reach
+      Vision One for registration and updates) and the kubernetes.io/role/internal-elb=1
+      tag; one subnet for the bastion host (private is fine — access is SSM-only).
+      When set, ExistingVpcCidr and all three subnet parameters are required.
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^vpc-[a-f0-9]{8,17}$"
+  ExistingVpcCidr:
+    Description: CIDR block of the existing VPC (e.g. 10.0.0.0/16) — used for scanner endpoint security group rules
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+  ExistingPrivateSubnet1Id:
+    Description: First private subnet in the existing VPC (EKS nodes, EFS)
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^subnet-[a-f0-9]{8,17}$"
+  ExistingPrivateSubnet2Id:
+    Description: Second private subnet in the existing VPC, in a different AZ
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^subnet-[a-f0-9]{8,17}$"
+  ExistingBastionSubnetId:
+    Description: Subnet for the bastion host in the existing VPC (private is fine — bastion is SSM-only and needs only outbound internet)
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^subnet-[a-f0-9]{8,17}$"
   RegistrationToken:
     Description: >
       Vision One File Security registration token. LEAVE EMPTY to auto-fetch
@@ -202,9 +233,21 @@ Rules:
         AssertDescription: ScannerEndpointMode=alb requires ACMCertificateArn
       - Assert: !Not [!Equals [!Ref ScannerDomain, ""]]
         AssertDescription: ScannerEndpointMode=alb requires ScannerDomain
+  ExistingVpcRequiresAllParts:
+    RuleCondition: !Not [!Equals [!Ref ExistingVpcId, ""]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ExistingVpcCidr, ""]]
+        AssertDescription: ExistingVpcId requires ExistingVpcCidr
+      - Assert: !Not [!Equals [!Ref ExistingPrivateSubnet1Id, ""]]
+        AssertDescription: ExistingVpcId requires ExistingPrivateSubnet1Id
+      - Assert: !Not [!Equals [!Ref ExistingPrivateSubnet2Id, ""]]
+        AssertDescription: ExistingVpcId requires ExistingPrivateSubnet2Id
+      - Assert: !Not [!Equals [!Ref ExistingBastionSubnetId, ""]]
+        AssertDescription: ExistingVpcId requires ExistingBastionSubnetId
 
 Conditions:
   HaveRegToken: !Not [!Equals [!Ref RegistrationToken, ""]]
+  CreateNetwork: !Equals [!Ref ExistingVpcId, ""]
   ScannerAppEnabled: !Equals [!Ref DeployScannerApp, "true"]
   ReviewEnabled: !And
     - !Condition ScannerAppEnabled
@@ -233,6 +276,7 @@ Mappings:
 Resources:
 
   BaseVPC:
+    Condition: CreateNetwork
     Type: AWS::EC2::VPC
     Properties:
       CidrBlock: 10.2.0.0/16
@@ -244,6 +288,7 @@ Resources:
           Value: !Sub BaseVPC-${AWS::StackName}
 
   VPCFlowLogRole:
+    Condition: CreateNetwork
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -270,12 +315,14 @@ Resources:
                   - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vpc/flowlogs/${AWS::StackName}:*
 
   VPCFlowLogGroup:
+    Condition: CreateNetwork
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub /vpc/flowlogs/${AWS::StackName}
       RetentionInDays: 90
 
   VPCFlowLog:
+    Condition: CreateNetwork
     Type: AWS::EC2::FlowLog
     Properties:
       ResourceId: !Ref BaseVPC
@@ -286,6 +333,7 @@ Resources:
       DeliverLogsPermissionArn: !GetAtt VPCFlowLogRole.Arn
 
   IG:
+    Condition: CreateNetwork
     Type: AWS::EC2::InternetGateway
     Properties:
       Tags:
@@ -293,12 +341,14 @@ Resources:
           Value: !Sub IG-${AWS::StackName}
 
   VPCIG:
+    Condition: CreateNetwork
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
       InternetGatewayId: !Ref IG
       VpcId: !Ref BaseVPC
 
   PublicSubnet1:
+    Condition: CreateNetwork
     Type: AWS::EC2::Subnet
     Properties:
       CidrBlock: 10.2.0.0/22
@@ -312,6 +362,7 @@ Resources:
           Value: !Sub PublicSubnet1-${AWS::StackName}
 
   PublicSubnet2:
+    Condition: CreateNetwork
     Type: AWS::EC2::Subnet
     Properties:
       CidrBlock: 10.2.4.0/22
@@ -325,6 +376,7 @@ Resources:
           Value: !Sub PublicSubnet2-${AWS::StackName}
 
   PrivateSubnet1:
+    Condition: CreateNetwork
     Type: AWS::EC2::Subnet
     Properties:
       CidrBlock: 10.2.32.0/20
@@ -338,6 +390,7 @@ Resources:
           Value: !Sub PrivateSubnet1-${AWS::StackName}
 
   PrivateSubnet2:
+    Condition: CreateNetwork
     Type: AWS::EC2::Subnet
     Properties:
       CidrBlock: 10.2.48.0/20
@@ -351,6 +404,7 @@ Resources:
           Value: !Sub PrivateSubnet2-${AWS::StackName}
 
   NGWEIP1:
+    Condition: CreateNetwork
     Type: AWS::EC2::EIP
     DependsOn: VPCIG
     Properties:
@@ -360,6 +414,7 @@ Resources:
           Value: !Sub NGWEIP1-${AWS::StackName}
 
   NGW1:
+    Condition: CreateNetwork
     Type: AWS::EC2::NatGateway
     Properties:
       AllocationId: !GetAtt NGWEIP1.AllocationId
@@ -370,6 +425,7 @@ Resources:
           Value: !Sub NGW1-${AWS::StackName}
 
   NGWEIP2:
+    Condition: CreateNetwork
     Type: AWS::EC2::EIP
     DependsOn: VPCIG
     Properties:
@@ -379,6 +435,7 @@ Resources:
           Value: !Sub NGWEIP2-${AWS::StackName}
 
   NGW2:
+    Condition: CreateNetwork
     Type: AWS::EC2::NatGateway
     Properties:
       AllocationId: !GetAtt NGWEIP2.AllocationId
@@ -389,6 +446,7 @@ Resources:
           Value: !Sub NGW2-${AWS::StackName}
 
   PublicRT1:
+    Condition: CreateNetwork
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref BaseVPC
@@ -397,6 +455,7 @@ Resources:
           Value: !Sub PublicRT1-${AWS::StackName}
 
   PublicRT2:
+    Condition: CreateNetwork
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref BaseVPC
@@ -405,6 +464,7 @@ Resources:
           Value: !Sub PublicRT2-${AWS::StackName}
 
   PrivateRT1:
+    Condition: CreateNetwork
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref BaseVPC
@@ -413,6 +473,7 @@ Resources:
           Value: !Sub PrivateRT1-${AWS::StackName}
 
   PrivateRT2:
+    Condition: CreateNetwork
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref BaseVPC
@@ -421,6 +482,7 @@ Resources:
           Value: !Sub PrivateRT2-${AWS::StackName}
 
   PublicRoute1:
+    Condition: CreateNetwork
     DependsOn: VPCIG
     Type: AWS::EC2::Route
     Properties:
@@ -429,6 +491,7 @@ Resources:
       GatewayId: !Ref IG
 
   PublicRoute2:
+    Condition: CreateNetwork
     DependsOn: VPCIG
     Type: AWS::EC2::Route
     Properties:
@@ -437,6 +500,7 @@ Resources:
       GatewayId: !Ref IG
 
   PrivateRoute1:
+    Condition: CreateNetwork
     Type: AWS::EC2::Route
     Properties:
       RouteTableId: !Ref PrivateRT1
@@ -444,6 +508,7 @@ Resources:
       NatGatewayId: !Ref NGW1
 
   PrivateRoute2:
+    Condition: CreateNetwork
     Type: AWS::EC2::Route
     Properties:
       RouteTableId: !Ref PrivateRT2
@@ -451,24 +516,28 @@ Resources:
       NatGatewayId: !Ref NGW2
 
   PublicSubnetRT1:
+    Condition: CreateNetwork
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       RouteTableId: !Ref PublicRT1
       SubnetId: !Ref PublicSubnet1
 
   PublicSubnetRT2:
+    Condition: CreateNetwork
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       RouteTableId: !Ref PublicRT2
       SubnetId: !Ref PublicSubnet2
 
   PrivateSubnetRT1:
+    Condition: CreateNetwork
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       RouteTableId: !Ref PrivateRT1
       SubnetId: !Ref PrivateSubnet1
 
   PrivateSubnetRT2:
+    Condition: CreateNetwork
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       RouteTableId: !Ref PrivateRT2
@@ -477,8 +546,10 @@ Resources:
   BastionSecGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Ref BaseVPC
-      GroupDescription: SSH access to bastion host from a single trusted CIDR
+      VpcId: !If [CreateNetwork, !Ref BaseVPC, !Ref ExistingVpcId]
+      # No ingress rules on purpose: the bastion is reachable ONLY via SSM
+      # Session Manager (no inbound ports required). Egress-only group.
+      GroupDescription: Bastion host - no inbound access (SSM Session Manager only)
       Tags:
         - Key: Name
           Value: !Sub BastionSecGroup-${AWS::StackName}
@@ -486,7 +557,7 @@ Resources:
   EKSSecGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Ref BaseVPC
+      VpcId: !If [CreateNetwork, !Ref BaseVPC, !Ref ExistingVpcId]
       GroupDescription: EKS control plane - restricted ports only
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -536,7 +607,7 @@ Resources:
   NodeSecGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Ref BaseVPC
+      VpcId: !If [CreateNetwork, !Ref BaseVPC, !Ref ExistingVpcId]
       GroupDescription: EKS worker nodes - restricted ports only
       Tags:
         - Key: Name
@@ -592,7 +663,7 @@ Resources:
       IpProtocol: tcp
       FromPort: 50051
       ToPort: 50051
-      CidrIp: 10.2.0.0/16
+      CidrIp: !If [CreateNetwork, 10.2.0.0/16, !Ref ExistingVpcCidr]
       Description: VPC-internal gRPC to scanner pods (LB ip-targets)
 
   NodeSecGroupScannerIcap:
@@ -603,7 +674,7 @@ Resources:
       IpProtocol: tcp
       FromPort: 1344
       ToPort: 1344
-      CidrIp: 10.2.0.0/16
+      CidrIp: !If [CreateNetwork, 10.2.0.0/16, !Ref ExistingVpcCidr]
       Description: VPC-internal ICAP to scanner pods (LB ip-targets)
 
   EKSSecGroupFromNodes:
@@ -619,7 +690,7 @@ Resources:
   EFSSecGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Ref BaseVPC
+      VpcId: !If [CreateNetwork, !Ref BaseVPC, !Ref ExistingVpcId]
       GroupDescription: EFS mount targets - NFS access from EKS nodes
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -1037,10 +1108,6 @@ Resources:
     DependsOn:
       - EKSClusterRole
       - EKSSecGroup
-      - NGW1
-      - NGW2
-      - PrivateRoute1
-      - PrivateRoute2
     Type: AWS::EKS::Cluster
     Properties:
       Name: !Sub EKSCluster-${AWS::StackName}
@@ -1051,8 +1118,8 @@ Resources:
         SecurityGroupIds:
           - !Ref EKSSecGroup
         SubnetIds:
-          - !Ref PrivateSubnet1
-          - !Ref PrivateSubnet2
+          - !If [CreateNetwork, !Ref PrivateSubnet1, !Ref ExistingPrivateSubnet1Id]
+          - !If [CreateNetwork, !Ref PrivateSubnet2, !Ref ExistingPrivateSubnet2Id]
         EndpointPrivateAccess: true
         EndpointPublicAccess: false
       Logging:
@@ -1066,6 +1133,11 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub EKSCluster-${AWS::StackName}
+        # Conditional implicit dependency: when this stack creates the network,
+        # referencing the NAT gateways and private routes here makes the cluster
+        # wait for them (DependsOn cannot be conditional). Inert in existing-VPC mode.
+        - Key: network-ready
+          Value: !If [CreateNetwork, !Sub "${NGW1}-${NGW2}-${PrivateRoute1}-${PrivateRoute2}", "existing-vpc"]
 
   BastionAccessEntry:
     DependsOn: EKSCluster
@@ -1109,8 +1181,8 @@ Resources:
         Version: !GetAtt EKSLaunchTemplate.LatestVersionNumber
       NodeRole: !GetAtt NodeInstanceRole.Arn
       Subnets:
-        - !Ref PrivateSubnet1
-        - !Ref PrivateSubnet2
+        - !If [CreateNetwork, !Ref PrivateSubnet1, !Ref ExistingPrivateSubnet1Id]
+        - !If [CreateNetwork, !Ref PrivateSubnet2, !Ref ExistingPrivateSubnet2Id]
       ScalingConfig:
         DesiredSize: !Ref NodeGroupDesiredSize
         MinSize: !Ref NodeGroupMinSize
@@ -1514,10 +1586,12 @@ Resources:
       InstanceType: t3.medium
       NetworkInterfaces:
         - DeviceIndex: 0
-          SubnetId: !Ref PublicSubnet1
+          SubnetId: !If [CreateNetwork, !Ref PublicSubnet1, !Ref ExistingBastionSubnetId]
           GroupSet:
             - !Ref BastionSecGroup
-          AssociatePublicIpAddress: true
+          # Public IP only in the created network; in an existing VPC the
+          # bastion may sit in a private subnet (SSM-only, egress via your NAT)
+          AssociatePublicIpAddress: !If [CreateNetwork, true, false]
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -1525,7 +1599,7 @@ Resources:
             VolumeType: gp3
             Encrypted: true
       KeyName: !Ref BastionKeyPair
-      AvailabilityZone: !Ref PrimaryAZ
+      AvailabilityZone: !If [CreateNetwork, !Ref PrimaryAZ, !Ref AWS::NoValue]
       UserData: !Base64
         Fn::Sub:
           - |
@@ -1557,7 +1631,7 @@ Resources:
             export CFN_STACK_NAME="${AWS::StackName}"
             export AWS_REGION="${AWS::Region}"
             export CLUSTER_NAME="EKSCluster-${AWS::StackName}"
-            export VPC_ID="${BaseVPC}"
+            export VPC_ID="${VpcIdValue}"
             export EFS_ID="${EFSFileSystem}"
             export V1FS_REGISTRATION_SECRET="${RegistrationSecretValue}"
             export V1FS_API_KEY_SECRET_ARN="${V1FSApiKeySecret}"
@@ -1609,6 +1683,7 @@ Resources:
             SIGNAL_STATUS="SUCCESS"
             echo "Bastion provisioning complete."
           - RegistrationSecretValue: !If [HaveRegToken, !Ref V1FSRegistrationSecret, ""]
+            VpcIdValue: !If [CreateNetwork, !Ref BaseVPC, !Ref ExistingVpcId]
             EcrRepoUrlValue: !If [ScannerAppEnabled, !GetAtt ScannerAppECRRepo.RepositoryUri, ""]
             FileScanQueueValue: !If [ScannerAppEnabled, !Ref FileScanQueue, ""]
             IngestBucketValue: !If
@@ -1639,7 +1714,7 @@ Resources:
     Type: AWS::EFS::MountTarget
     Properties:
       FileSystemId: !Ref EFSFileSystem
-      SubnetId: !Ref PrivateSubnet1
+      SubnetId: !If [CreateNetwork, !Ref PrivateSubnet1, !Ref ExistingPrivateSubnet1Id]
       SecurityGroups:
         - !Ref EFSSecGroup
 
@@ -1647,7 +1722,7 @@ Resources:
     Type: AWS::EFS::MountTarget
     Properties:
       FileSystemId: !Ref EFSFileSystem
-      SubnetId: !Ref PrivateSubnet2
+      SubnetId: !If [CreateNetwork, !Ref PrivateSubnet2, !Ref ExistingPrivateSubnet2Id]
       SecurityGroups:
         - !Ref EFSSecGroup
 
@@ -2563,17 +2638,22 @@ Outputs:
     Description: EKS cluster API endpoint
     Value: !GetAtt EKSCluster.Endpoint
   BastionPublicIP:
-    Description: Bastion host public IP
+    # Existing-VPC mode may place the bastion in a private subnet (no public IP)
+    Condition: CreateNetwork
+    Description: Bastion host public IP (informational — access is SSM-only)
     Value: !GetAtt Bastion.PublicIp
+  BastionInstanceId:
+    Description: Bastion instance ID for SSM Session Manager access
+    Value: !Ref Bastion
   VPCId:
     Description: VPC ID
-    Value: !Ref BaseVPC
+    Value: !If [CreateNetwork, !Ref BaseVPC, !Ref ExistingVpcId]
   PrivateSubnet1Id:
     Description: Private subnet 1
-    Value: !Ref PrivateSubnet1
+    Value: !If [CreateNetwork, !Ref PrivateSubnet1, !Ref ExistingPrivateSubnet1Id]
   PrivateSubnet2Id:
     Description: Private subnet 2
-    Value: !Ref PrivateSubnet2
+    Value: !If [CreateNetwork, !Ref PrivateSubnet2, !Ref ExistingPrivateSubnet2Id]
   NodeRoleArn:
     Description: EKS node instance role ARN
     Value: !GetAtt NodeInstanceRole.Arn

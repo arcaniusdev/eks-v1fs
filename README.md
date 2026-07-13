@@ -361,11 +361,28 @@ Optional parameters:
 | **ScannerEndpointMode** | `nlb` | Scanner endpoint exposure: `nlb` (internal NLB), `alb` (TLS ALB Ingress), or `none` |
 | **ACMCertificateArn** | *(empty)* | ACM certificate ARN for the scanner ALB (required when `ScannerEndpointMode=alb`) |
 | **ScannerDomain** | *(empty)* | DNS name for the scanner ALB, e.g. `scanner.example.com` (required when `ScannerEndpointMode=alb`) |
+| **ExistingVpcId** | *(empty)* | Deploy into an existing VPC instead of creating one. When set, `ExistingVpcCidr` and all three subnet parameters are required. See [Deploying into an Existing VPC](#deploying-into-an-existing-vpc) |
+| **ExistingVpcCidr** | *(empty)* | CIDR block of the existing VPC (used for scanner endpoint security group rules) |
+| **ExistingPrivateSubnet1Id** / **ExistingPrivateSubnet2Id** | *(empty)* | Two private subnets in different AZs (EKS nodes, EFS mount targets) |
+| **ExistingBastionSubnetId** | *(empty)* | Subnet for the bastion host — private is fine (access is SSM-only; it needs only outbound internet) |
 | **PMLEnabled** | `false` | Enable Predictive Machine Learning scanning (requires account support) |
 | **MaxFileSizeMB** | `500` | Maximum file size in MB the main scanner will download and scan (1–2048). Larger files are routed via server-side S3 copy — to the review bucket if the review pipeline is deployed, otherwise to quarantine with `ScanResult=S3-Oversize` |
 | **ScanTimeoutSeconds** | `600` | gRPC scan timeout; also sets the SQS visibility timeout to match |
 
-CloudFormation Rules validate the combinations at stack creation: `DeployReviewPipeline=true` asserts `DeployScannerApp=true`, and `ScannerEndpointMode=alb` asserts both `ACMCertificateArn` and `ScannerDomain` are set.
+CloudFormation Rules validate the combinations at stack creation: `DeployReviewPipeline=true` asserts `DeployScannerApp=true`, `ScannerEndpointMode=alb` asserts both `ACMCertificateArn` and `ScannerDomain` are set, and `ExistingVpcId` asserts the CIDR and all three subnet parameters are set.
+
+#### Deploying into an Existing VPC
+
+By default the stack creates its own network (VPC `10.2.0.0/16`, two public + two private subnets, an internet gateway, and two NAT gateways). Set `ExistingVpcId` (plus `ExistingVpcCidr`, `ExistingPrivateSubnet1Id`, `ExistingPrivateSubnet2Id`, and `ExistingBastionSubnetId`) to deploy into a network you already manage — none of those resources are created, and the AZ parameters are ignored.
+
+Your VPC must provide what the created network normally would:
+
+- **DNS support and DNS hostnames enabled** on the VPC
+- **Two private subnets in different AZs** with **outbound internet access** (NAT gateway or proxy) — the scanner must reach Vision One for registration, threat updates, and telemetry
+- The `kubernetes.io/role/internal-elb=1` tag on both private subnets, so the AWS Load Balancer Controller can place the internal scanner NLB/ALB
+- **A bastion subnet with outbound internet** — private is fine; the bastion has no inbound rules and is reached exclusively through SSM Session Manager (in existing-VPC mode it gets no public IP)
+
+The stack still creates its own security groups inside your VPC, and teardown removes only what the stack created — your VPC and subnets are never modified.
 
 #### Scan Policy Parameters
 
