@@ -28,4 +28,3 @@ venv/
 stress-test-report-*.html
 cost-analysis-report*.html
 docs/*.html
-!docs/v1fs-poc-guide.html
