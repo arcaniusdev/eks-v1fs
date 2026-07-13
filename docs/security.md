@@ -18,6 +18,13 @@
 - Security groups use least-privilege port rules; node-to-node rule uses all protocols (`IpProtocol: "-1"`) for DNS UDP
 - EKS API endpoint is private-only
 
+## Scanner Endpoint Exposure (ScannerEndpointMode)
+- **`nlb` (default)**: the scanner gRPC endpoint is exposed via an INTERNAL Network Load Balancer — reachable from the VPC (and peered/VPN-connected networks), never from the internet. Conditional security group rules allow TCP 50051 (gRPC) and 1344 (ICAP) from the VPC CIDR only
+- **⚠️ Network scope IS the access control in nlb mode** — verified in testing: the self-hosted scanner accepts plaintext gRPC scans on this path without validating the SDK API key. Anyone with network reachability to the NLB can submit scans. This is acceptable for a POC inside a private VPC, but do NOT extend routing to the NLB beyond networks you trust, and never re-create it as internet-facing
+- **`alb`**: TrendAI's documented topology — ALB Ingress with gRPC backend protocol and TLS (ACM certificate + customer domain). Prefer this for anything beyond a single-VPC POC
+- **`none`**: in-cluster ClusterIP only; no external exposure
+- The management service ingress is always explicitly disabled (`managementService.ingress.enabled=false`) — the chart default is enabled, and an installed ALB ingress class would otherwise expose it
+
 ## Data Protection
 - All S3 buckets: AES256 encryption, public access blocked
 - Ingest and quarantine buckets have versioning enabled
