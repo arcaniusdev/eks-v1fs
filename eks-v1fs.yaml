@@ -3,6 +3,14 @@ Description: >
   Deploy a hardened EKS cluster with Trend Micro Vision One File Security.
 
 Parameters:
+  RepoRef:
+    Description: >
+      Git ref (tag or branch) of the eks-v1fs repository the bastion clones for
+      app code, k8s manifests, and helm values. Defaults to the release tag that
+      matches this template, so the deployed components always match the template
+      you launched. Override with a branch name (e.g. main) only for development.
+    Type: String
+    Default: v1.0.0
   PrimaryAZ:
     Description: Availability Zone 1 (ignored when deploying into an existing VPC)
     Type: AWS::EC2::AvailabilityZone::Name
@@ -1671,10 +1679,13 @@ Resources:
             export REVIEW_SQS_QUEUE_URL="${ReviewQueueValue}"
             export REVIEW_AUDIT_LOG_GROUP="${ReviewAuditLogGroupValue}"
 
-            # ---- Clone repo and hand off to bootstrap ----
+            # ---- Clone repo (pinned ref) and hand off to bootstrap ----
+            # Pinning to ${RepoRef} keeps the cloned scripts/manifests/values in
+            # lockstep with this template version — no drift against main.
             apt-get update -y
             apt-get install -y git
-            git clone https://github.com/arcaniusdev/eks-v1fs.git /opt/eks-v1fs
+            git clone --depth 1 --branch "${RepoRef}" \
+              https://github.com/arcaniusdev/eks-v1fs.git /opt/eks-v1fs
             chmod +x /opt/eks-v1fs/scripts/*.sh
 
             /opt/eks-v1fs/scripts/bootstrap.sh

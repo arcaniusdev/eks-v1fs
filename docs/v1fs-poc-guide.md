@@ -147,18 +147,17 @@ Deploy from the **AWS Console** (click-by-click, below) or the **AWS CLI** (auto
 
 **Before you start:** have your Vision One API key ready (§2) and decide your deployment mode (§3). The default mode — the full scanning pipeline — needs only the API key.
 
-### Step 1 — Host the template in S3
+### Step 1 — Get the template
 
-The template is larger than CloudFormation's 51 KB inline limit, so it must be served from S3.
-
-1. Open the **S3 console** → **Create bucket** → give it any unique name (e.g. `v1fs-eval-templates-<account-id>`) → **Create bucket**.
-2. Open the bucket → **Upload** → **Add files** → select `eks-v1fs.yaml` → **Upload**.
-3. Click the uploaded object and copy its **Object URL** (looks like `https://<bucket>.s3.amazonaws.com/eks-v1fs.yaml`) — you'll paste it in Step 2.
+Download `eks-v1fs.yaml` from the repository — ideally from the tagged release, so the components the bastion pulls at deploy time match the template you launch. That's the only file you need.
 
 ### Step 2 — Start the Create stack wizard
 
 1. Open the **CloudFormation console** → **Create stack** → **With new resources (standard)**.
-2. Under **Specify template**, choose **Amazon S3 URL**, paste the Object URL from Step 1, then click **Next**.
+2. Under **Specify template**, choose **Upload a template file** → **Choose file** → select `eks-v1fs.yaml` → **Next**. (The console stages it to S3 for you — no bucket to create.)
+
+> [!NOTE]
+> Prefer hosting it yourself? Upload `eks-v1fs.yaml` to any S3 bucket and choose **Amazon S3 URL** instead. This is also what the CLI path at the end of this section requires, since the template is larger than CloudFormation's 51 KB inline limit.
 
 ### Step 3 — Name the stack and enter parameters
 
