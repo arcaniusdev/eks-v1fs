@@ -760,18 +760,34 @@ Raise the ceilings with the `ScannerMaxReplicas`, `ScannerAppMaxReplicas`, and `
 
 ## 19. Teardown
 
-One command removes the stack; a built-in cleanup step handles the resources Kubernetes created outside CloudFormation (load balancers, their security groups, leftover volumes):
+One command removes the stack:
 
 ```bash
 aws cloudformation delete-stack --stack-name v1fs-eval-1
 ```
 
-| Two things to know | Why / what to do |
-|---|---|
-| **Verdict buckets are retained** | Ingest/clean/quarantine buckets survive deletion on purpose (forensic preservation). Empty and delete them when done: `aws s3 rb s3:// --force` |
-| **Your existing bucket is untouched** | In existing-bucket mode, teardown never modifies your bucket, its objects, or its notification configuration. |
+Before CloudFormation tears down the cluster, a pre-delete cleanup Lambda removes the resources Kubernetes created *outside* CloudFormation — otherwise they'd orphan and block VPC deletion. It handles: the scanner load balancer(s), their target groups and security groups, the V1FS EBS volumes (polling a few rounds so volumes still detaching are caught), and the service-created CloudWatch log groups (EKS control plane, Lambda execution logs). Errors are non-fatal, so a hiccup here never blocks the delete.
 
-After deletion, a 60-second sweep confirms a clean account: no EC2 instances, no `available` EBS volumes, no load balancers, no non-default VPCs. Anything left carrying the stack's name is safe to delete.
+**What CloudFormation deletes automatically:** the EKS cluster, node group, NAT gateways and EIPs, EFS, SQS queues, DLQ Lambdas, IAM roles, dashboard, alarms, SSM parameter, VPC — everything that costs money to run.
+
+**What deliberately survives — clean up by hand if you want it gone:**
+
+| Left behind | Why | Remove it |
+|---|---|---|
+| **The verdict buckets** (ingest / clean / quarantine / review) | `DeletionPolicy: Retain` — kept on purpose so scanned files and verdicts survive teardown (forensics). They're versioned. | Empty (including versions) and delete: `aws s3 rb s3://<bucket> --force` |
+| **Secrets Manager secrets** (API key, and registration token if you supplied one) | Deletion enters a 7–30 day recovery window rather than removing immediately; the name stays reserved meanwhile (another reason to increment stack names). | `aws secretsmanager delete-secret --secret-id <name> --force-delete-without-recovery` |
+| **The cleanup Lambda's own log group** (`/aws/lambda/cleanup-<stack>`) | It's still in use while doing the cleanup, so it can't delete itself. | `aws logs delete-log-group --log-group-name /aws/lambda/cleanup-<stack>` (negligible cost otherwise) |
+| **Your existing ingest bucket** (existing-bucket mode) | Never touched on teardown — the bucket, its objects, and its notification configuration are left exactly as found. | Not applicable — intentional |
+
+A quick post-delete sweep to confirm a clean account:
+
+```bash
+aws ec2 describe-volumes --filters Name=status,Values=available --query 'Volumes[].VolumeId' --output text
+aws elbv2 describe-load-balancers --query 'LoadBalancers[].LoadBalancerName' --output text
+aws ec2 describe-vpcs --filters Name=is-default,Values=false --query 'Vpcs[].VpcId' --output text
+```
+
+Anything returned that carries the stack's name is safe to delete.
 
 
 ## 20. Quick reference

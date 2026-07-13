@@ -1409,7 +1409,14 @@ Resources:
                   - elasticloadbalancing:DescribeTags
                   - elasticloadbalancing:DeleteLoadBalancer
                   - elasticloadbalancing:DeleteTargetGroup
+                  - logs:DescribeLogGroups
                 Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:DeleteLogGroup
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/eks/EKSCluster-${AWS::StackName}*
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*${AWS::StackName}*
 
   CleanupLambda:
     Type: AWS::Lambda::Function
@@ -1439,6 +1446,7 @@ Resources:
               stack_name = os.environ['STACK_NAME']
               ec2 = boto3.client('ec2')
               elbv2 = boto3.client('elbv2')
+              logs = boto3.client('logs')
 
               try:
                   # 1. Delete LB-controller-created load balancers (scanner NLB/ALB).
@@ -1514,17 +1522,54 @@ Resources:
                               else:
                                   time.sleep(20)
 
-                  # 4. Delete orphaned EBS volumes (from V1FS PVCs)
+                  # 4. Delete orphaned EBS volumes (from V1FS PVCs).
+                  # Volumes only become 'available' once their node terminates,
+                  # which can lag this handler — poll a few bounded rounds so
+                  # volumes that detach shortly after we start are still caught.
+                  # Bounded well under the 300s Lambda timeout.
                   print("Checking for orphaned EBS volumes...")
-                  vols = ec2.describe_volumes(
-                      Filters=[
-                          {'Name': 'status', 'Values': ['available']},
-                          {'Name': f'tag:kubernetes.io/cluster/{cluster_name}', 'Values': ['owned']},
-                      ]
-                  )
-                  for vol in vols['Volumes']:
-                      print(f"Deleting orphaned volume: {vol['VolumeId']}")
-                      ec2.delete_volume(VolumeId=vol['VolumeId'])
+                  vol_filters = [
+                      {'Name': 'status', 'Values': ['available']},
+                      {'Name': f'tag:kubernetes.io/cluster/{cluster_name}', 'Values': ['owned']},
+                  ]
+                  deleted_vols = set()
+                  for round_no in range(4):
+                      vols = ec2.describe_volumes(Filters=vol_filters)['Volumes']
+                      fresh = [v for v in vols if v['VolumeId'] not in deleted_vols]
+                      for vol in fresh:
+                          print(f"Deleting orphaned volume: {vol['VolumeId']}")
+                          try:
+                              ec2.delete_volume(VolumeId=vol['VolumeId'])
+                              deleted_vols.add(vol['VolumeId'])
+                          except Exception as v_err:
+                              print(f"Volume delete failed (non-fatal): {v_err}")
+                      if round_no < 3:
+                          time.sleep(20)  # let more volumes finish detaching
+
+                  # 5. Delete service-created CloudWatch log groups that
+                  # CloudFormation doesn't own (EKS control plane, Lambda exec
+                  # logs). Skip this function's OWN group — it's still in use.
+                  print("Checking for orphaned log groups...")
+                  own_group = f"/aws/lambda/cleanup-{stack_name}"
+                  prefixes = [
+                      f"/aws/eks/{cluster_name}/",
+                      "/aws/lambda/",
+                  ]
+                  for prefix in prefixes:
+                      paginator = logs.get_paginator('describe_log_groups')
+                      for page in paginator.paginate(logGroupNamePrefix=prefix):
+                          for lg in page['logGroups']:
+                              name = lg['logGroupName']
+                              if name == own_group:
+                                  continue
+                              # only groups belonging to THIS stack
+                              if stack_name not in name and cluster_name not in name:
+                                  continue
+                              print(f"Deleting log group: {name}")
+                              try:
+                                  logs.delete_log_group(logGroupName=name)
+                              except Exception as lg_err:
+                                  print(f"Log group delete failed (non-fatal): {lg_err}")
 
                   cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
               except Exception as e:
