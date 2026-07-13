@@ -66,13 +66,37 @@ export KUBECONFIG=/root/.kube/config
 # ---- Create V1FS namespace and secrets ----
 kubectl create namespace visionone-filesecurity
 
-# Retrieve registration token from Secrets Manager into a temp file.
-# Using --from-file avoids shell interpolation issues with special
-# characters in the token (e.g. $, backticks, !, \).
-aws secretsmanager get-secret-value \
-  --secret-id "$V1FS_REGISTRATION_SECRET" \
-  --query SecretString --output text \
-  --region "$AWS_REGION" | tr -d '\n' > /tmp/.reg-token
+# Obtain the registration token. If one was provided as a stack parameter it
+# lives in Secrets Manager; otherwise mint one at deploy time from the Vision
+# One API using the ApiKey (POST /beta/fileSecurity/ctr/registration) — this
+# always yields a currently-valid token and removes a manual setup step.
+# Files (not shell vars) carry the credentials so `bash -x` tracing never
+# echoes them into cloud-init logs; set +x guards the sensitive block.
+if [ -n "$V1FS_REGISTRATION_SECRET" ]; then
+  aws secretsmanager get-secret-value \
+    --secret-id "$V1FS_REGISTRATION_SECRET" \
+    --query SecretString --output text \
+    --region "$AWS_REGION" | tr -d '\n' > /tmp/.reg-token
+else
+  echo "No registration token provided — minting one via the Vision One API..."
+  set +x
+  umask 077
+  printf 'Authorization: Bearer %s' "$(aws secretsmanager get-secret-value \
+    --secret-id "$V1FS_API_KEY_SECRET_ARN" \
+    --query SecretString --output text \
+    --region "$AWS_REGION")" > /tmp/.authhdr
+  curl -fsS -X POST "$V1_API_ENDPOINT/beta/fileSecurity/ctr/registration" \
+    -H @/tmp/.authhdr \
+    -H "Content-Type: application/json" | jq -r .token | tr -d '\n' > /tmp/.reg-token
+  shred -u /tmp/.authhdr
+  umask 022
+  set -x
+  # Fail fast with a clear message if the mint failed (empty/null token)
+  if [ ! -s /tmp/.reg-token ] || grep -q '^null$' /tmp/.reg-token; then
+    echo "ERROR: registration-token auto-fetch failed — provide RegistrationToken explicitly" >&2
+    exit 1
+  fi
+fi
 kubectl create secret generic token-secret \
   --from-file=registration-token=/tmp/.reg-token \
   -n visionone-filesecurity

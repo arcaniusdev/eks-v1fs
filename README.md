@@ -324,10 +324,11 @@ Pods get AWS permissions automatically through EKS Pod Identity. No access keys 
 
 ## Prerequisites
 
-You need two credentials from the TrendAI Vision One console:
+You need one credential from the TrendAI Vision One console:
 
-1. **Registration Token** — used by the scanner pods to register with Vision One. Generate this under **Cloud Security > File Security > Containerized Scanner > Get ready to deploy containerized scanner > Get registration token**.
-2. **API Key** — used by the scanning application to authenticate scan requests. Generate this under **Administration > API Keys > Add API Key** with the **"Run file scan via SDK"** permission.
+1. **API Key** — used by the scanning application to authenticate scan requests, and to auto-fetch the scanner registration token at deploy time. Generate this under **Administration > API Keys > Add API Key** with the **"Run file scan via SDK"** permission.
+
+The **registration token** (used by scanner pods to register with Vision One) is fetched automatically during deployment via the Vision One API (`POST /beta/fileSecurity/ctr/registration`) using your API key — no manual step needed. If your API key cannot mint registration tokens, generate one manually under **Cloud Security > File Security > Containerized Scanner > Get ready to deploy containerized scanner > Get registration token** and pass it as the `RegistrationToken` parameter. Tenants outside the US region should set `VisionOneApiEndpoint` to their regional API host.
 
 If you choose `ScannerEndpointMode=alb`, you also need an **ACM certificate** covering your chosen scanner domain, and the ability to create a DNS CNAME record for it.
 
@@ -335,10 +336,11 @@ If you choose `ScannerEndpointMode=alb`, you also need an **ACM certificate** co
 
 ### Launch the stack
 
-Download the `eks-v1fs.yaml` CloudFormation template and deploy it in AWS CloudFormation. The template requires two parameters:
+Download the `eks-v1fs.yaml` CloudFormation template and deploy it in AWS CloudFormation. The template requires one parameter:
 
-- **RegistrationToken** — your Vision One File Security registration token
 - **ApiKey** — your Vision One API key with "Run file scan via SDK" permission
+
+(**RegistrationToken** is optional — leave it empty and the deployment mints one automatically from the Vision One API using your ApiKey. **VisionOneApiEndpoint** defaults to the US-region host `https://api.xdr.trendmicro.com`.)
 
 Optional parameters:
 

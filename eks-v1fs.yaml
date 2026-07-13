@@ -12,13 +12,21 @@ Parameters:
     Type: AWS::EC2::AvailabilityZone::Name
     Default: us-east-1b
   RegistrationToken:
-    Description: Vision One File Security registration token
+    Description: >
+      Vision One File Security registration token. LEAVE EMPTY to auto-fetch
+      one at deploy time using the ApiKey (POST /beta/fileSecurity/ctr/registration).
+      Provide explicitly only if your API key cannot mint registration tokens.
     Type: String
     NoEcho: true
+    Default: ""
   ApiKey:
-    Description: Vision One API key with "Run file scan via SDK" permission
+    Description: Vision One API key with "Run file scan via SDK" permission (also used to auto-fetch the registration token when RegistrationToken is empty)
     Type: String
     NoEcho: true
+  VisionOneApiEndpoint:
+    Description: Vision One API endpoint for your tenant region (used for registration-token auto-fetch)
+    Type: String
+    Default: https://api.xdr.trendmicro.com
   NodeGroupMinSize:
     Type: Number
     Description: Minimum nodes in the managed node group (min 2 for CoreDNS/AZ redundancy)
@@ -196,6 +204,7 @@ Rules:
         AssertDescription: ScannerEndpointMode=alb requires ScannerDomain
 
 Conditions:
+  HaveRegToken: !Not [!Equals [!Ref RegistrationToken, ""]]
   ScannerAppEnabled: !Equals [!Ref DeployScannerApp, "true"]
   ReviewEnabled: !And
     - !Condition ScannerAppEnabled
@@ -739,10 +748,12 @@ Resources:
                 Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
-                Resource:
-                  - !Ref V1FSRegistrationSecret
-                  # ApiKey needed for bastion-side SDK sanity scans (upgrade.py endpoint fallback)
-                  - !Ref V1FSApiKeySecret
+                Resource: !If
+                  - HaveRegToken
+                  - - !Ref V1FSRegistrationSecret
+                    # ApiKey: SDK sanity scans + registration-token auto-fetch
+                    - !Ref V1FSApiKeySecret
+                  - - !Ref V1FSApiKeySecret
               # Publishes the scanner endpoint address for external POC apps
               - Sid: PublishScannerEndpoint
                 Effect: Allow
@@ -1312,6 +1323,7 @@ Resources:
                   - ec2:DeleteVolume
                   - ec2:DescribeSecurityGroups
                   - ec2:DeleteSecurityGroup
+                  - ec2:RevokeSecurityGroupIngress
                   - elasticloadbalancing:DescribeLoadBalancers
                   - elasticloadbalancing:DescribeTargetGroups
                   - elasticloadbalancing:DescribeTags
@@ -1451,6 +1463,9 @@ Resources:
       ServiceToken: !GetAtt CleanupLambda.Arn
 
   V1FSRegistrationSecret:
+    # Created only when a token is provided explicitly. When absent, the
+    # bastion mints one at deploy time via the Vision One API using ApiKey.
+    Condition: HaveRegToken
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: !Sub ${AWS::StackName}/v1fs-registration-token
@@ -1544,8 +1559,9 @@ Resources:
             export CLUSTER_NAME="EKSCluster-${AWS::StackName}"
             export VPC_ID="${BaseVPC}"
             export EFS_ID="${EFSFileSystem}"
-            export V1FS_REGISTRATION_SECRET="${V1FSRegistrationSecret}"
+            export V1FS_REGISTRATION_SECRET="${RegistrationSecretValue}"
             export V1FS_API_KEY_SECRET_ARN="${V1FSApiKeySecret}"
+            export V1_API_ENDPOINT="${VisionOneApiEndpoint}"
 
             # ---- Deployment modes ----
             export DEPLOY_SCANNER_APP="${DeployScannerApp}"
@@ -1592,7 +1608,8 @@ Resources:
             # If we reach here, everything succeeded
             SIGNAL_STATUS="SUCCESS"
             echo "Bastion provisioning complete."
-          - EcrRepoUrlValue: !If [ScannerAppEnabled, !GetAtt ScannerAppECRRepo.RepositoryUri, ""]
+          - RegistrationSecretValue: !If [HaveRegToken, !Ref V1FSRegistrationSecret, ""]
+            EcrRepoUrlValue: !If [ScannerAppEnabled, !GetAtt ScannerAppECRRepo.RepositoryUri, ""]
             FileScanQueueValue: !If [ScannerAppEnabled, !Ref FileScanQueue, ""]
             IngestBucketValue: !If
               - ScannerAppEnabled
@@ -2561,6 +2578,7 @@ Outputs:
     Description: EKS node instance role ARN
     Value: !GetAtt NodeInstanceRole.Arn
   RegistrationTokenSecretArn:
+    Condition: HaveRegToken
     Description: Secrets Manager ARN for the V1FS registration token
     Value: !Ref V1FSRegistrationSecret
   ApiKeySecretArn:
