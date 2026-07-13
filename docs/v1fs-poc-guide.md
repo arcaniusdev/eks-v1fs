@@ -143,29 +143,79 @@ Modes combine (e.g. existing bucket + review pipeline). Invalid combinations are
 
 ## 4. Deploy the stack
 
-Host the template in an S3 bucket (it exceeds CloudFormation's inline size limit), then create the stack:
+Deploy from the **AWS Console** (click-by-click, below) or the **AWS CLI** (automation — end of this section). Both produce the same stack.
+
+**Before you start:** have your Vision One API key ready (§2) and decide your deployment mode (§3). The default mode — the full scanning pipeline — needs only the API key.
+
+### Step 1 — Host the template in S3
+
+The template is larger than CloudFormation's 51 KB inline limit, so it must be served from S3.
+
+1. Open the **S3 console** → **Create bucket** → give it any unique name (e.g. `v1fs-eval-templates-<account-id>`) → **Create bucket**.
+2. Open the bucket → **Upload** → **Add files** → select `eks-v1fs.yaml` → **Upload**.
+3. Click the uploaded object and copy its **Object URL** (looks like `https://<bucket>.s3.amazonaws.com/eks-v1fs.yaml`) — you'll paste it in Step 2.
+
+### Step 2 — Start the Create stack wizard
+
+1. Open the **CloudFormation console** → **Create stack** → **With new resources (standard)**.
+2. Under **Specify template**, choose **Amazon S3 URL**, paste the Object URL from Step 1, then click **Next**.
+
+### Step 3 — Name the stack and enter parameters
+
+1. **Stack name:** use a new, unique name for every deploy — `v1fs-eval-1`, then `-2`, `-3`… (reusing a name collides with retained buckets).
+2. **ApiKey:** paste your Vision One API key.
+3. **RegistrationToken:** leave **blank** — it's fetched automatically from Vision One using your API key.
+4. Set the parameters for your chosen mode from §3; leave everything else at its default:
+   - **Full pipeline** (default): nothing else to change.
+   - **BYO scanning app**: set `DeployScannerApp` = `false`.
+   - **Existing bucket**: set `ExistingIngestBucket` to your bucket name.
+   - **Review pipeline**: set `DeployReviewPipeline` = `true`.
+   - **Non-US tenant**: set `VisionOneApiEndpoint` to your regional API host.
+5. Click **Next**.
+
+### Step 4 — Stack options
+
+Nothing required here — scroll to the bottom and click **Next**. (Tags, permissions, and rollback settings can stay at their defaults.)
+
+### Step 5 — Review and submit
+
+1. Review the summary.
+2. At the bottom, tick **"I acknowledge that AWS CloudFormation might create IAM resources with custom names"** — the stack creates named IAM roles.
+3. Click **Submit**.
+
+### Step 6 — Watch it build (~25–35 minutes)
+
+The stack opens on the **Events** tab; refresh to follow progress. Order of events: the VPC and EKS cluster come up first (~10 min), then the bastion host bootstraps everything — installs the scanner from the official Helm chart (GPG-verified, version-pinned), fetches your registration token from the Vision One API, applies the scan policy, and (in pipeline mode) builds and deploys the scanning application. The bastion signals CloudFormation only when every component is healthy, so **`CREATE_COMPLETE` means the whole system is ready** — there are no extra install steps.
+
+If the stack fails, see [Troubleshooting](#18-troubleshooting) — the bastion logs every step to `/var/log/cloud-init-output.log`.
+
+### Step 7 — Collect the outputs
+
+Open the **Outputs** tab. Depending on mode you'll find the ingest / clean / quarantine bucket names, the CloudWatch dashboard URL, and the scanner endpoint SSM parameter. You'll use these in §5 and Part II.
+
+### CLI alternative
+
+Same result from a terminal:
 
 ```bash
-# 1. Stage the template
+# Stage the template (once)
 aws s3 mb s3://<your-template-bucket>
 aws s3 cp eks-v1fs.yaml s3://<your-template-bucket>/eks-v1fs.yaml
 
-# 2. Launch (defaults = full pipeline mode)
+# Create the stack (defaults = full pipeline mode)
 aws cloudformation create-stack \
   --stack-name v1fs-eval-1 \
   --template-url https://<your-template-bucket>.s3.amazonaws.com/eks-v1fs.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameters ParameterKey=ApiKey,ParameterValue="<your-V1-api-key>"
 
-# 3. Watch (CREATE_COMPLETE in ~25–35 minutes)
+# Watch until CREATE_COMPLETE (~25–35 min)
 aws cloudformation describe-stacks --stack-name v1fs-eval-1 \
   --query 'Stacks[0].StackStatus' --output text
 ```
 
-What happens during those 30 minutes: the VPC and EKS cluster come up first (~10 min), then a bastion host bootstraps everything — installs the scanner from the official Helm chart (GPG-verified, version-pinned), fetches your registration token from the Vision One API, applies the scan policy, and (in pipeline mode) builds and deploys the scanning application. The bastion signals CloudFormation only when everything is healthy.
-
 > [!IMPORTANT]
-> **Stack names: always pick a new one.** Retained buckets keep stack-derived names, so reusing a name collides. Increment: `v1fs-eval-1`, `v1fs-eval-2`, …
+> **Always pick a new stack name.** Retained buckets keep stack-derived names, so reusing a name collides. Increment: `v1fs-eval-1`, `v1fs-eval-2`, …
 
 
 ## 5. Your first scans
