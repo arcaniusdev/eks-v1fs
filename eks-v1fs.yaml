@@ -967,6 +967,23 @@ Resources:
                   - arn:aws:elasticloadbalancing:*:*:listener/app/*/*/*
                   - arn:aws:elasticloadbalancing:*:*:listener-rule/net/*/*/*
                   - arn:aws:elasticloadbalancing:*:*:listener-rule/app/*/*/*
+              # Tag-on-create: the controller creates LBs/target groups WITH
+              # tags in the same call, which IAM evaluates as AddTags under a
+              # CreateAction context. Required for the scanner NLB/ALB.
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:AddTags
+                Resource:
+                  - arn:aws:elasticloadbalancing:*:*:targetgroup/*/*
+                  - arn:aws:elasticloadbalancing:*:*:loadbalancer/net/*/*
+                  - arn:aws:elasticloadbalancing:*:*:loadbalancer/app/*/*
+                Condition:
+                  StringEquals:
+                    elasticloadbalancing:CreateAction:
+                      - CreateTargetGroup
+                      - CreateLoadBalancer
+                  "Null":
+                    aws:RequestTag/elbv2.k8s.aws/cluster: "false"
               - Effect: Allow
                 Action:
                   - elasticloadbalancing:ModifyLoadBalancerAttributes

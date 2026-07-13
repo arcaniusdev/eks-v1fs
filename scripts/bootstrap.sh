@@ -181,6 +181,11 @@ elif [ "$ENDPOINT_MODE" = "alb" ]; then
     --set-string scanner.ingress.annotations.alb\\.ingress\\.kubernetes\\.io/listen-ports=[{\"HTTPS\":443}]"
 fi
 
+# Chart 1.4.10 workaround: the management-service init job's K8s->DB data
+# migration requires the ontap-agent-config ConfigMap and crash-loops on a
+# fresh install without it (we don't use ONTAP agents). Pre-create it empty.
+kubectl create configmap ontap-agent-config -n visionone-filesecurity 2>/dev/null || true
+
 # Install with the chart's own HPA (Trend-supported autoscaling) and the
 # repo values file as the single source of truth (no --wait; pods need
 # time to register with Vision One cloud on first startup)
@@ -223,6 +228,8 @@ if [ "$DEPLOY_REVIEW" = "true" ]; then
     -n visionone-review 2>/dev/null || true
   kubectl create secret generic device-token-secret \
     -n visionone-review 2>/dev/null || true
+  # Same chart 1.4.10 workaround as the main release (see above)
+  kubectl create configmap ontap-agent-config -n visionone-review 2>/dev/null || true
 
   echo "Installing rv V1FS scanner (unlimited decompression)..."
   helm install rv visionone-filesecurity/visionone-filesecurity \
