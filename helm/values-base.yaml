@@ -1,0 +1,42 @@
+# V1FS Helm chart values — single source of truth.
+#
+# Used by the bastion bootstrap (initial install) and scripts/upgrade.py
+# (upgrades). Keep deviations from chart defaults minimal and documented:
+# everything here is a documented chart option, so the deployment stays
+# within TrendAI's supported methodology.
+#
+# NOT set here (supplied per-deploy via --set):
+#   scanner.autoscaling.minReplicas / maxReplicas   (CloudFormation params)
+#   endpoint exposure (values-nlb.yaml overlay, or ALB ingress --set values)
+
+scanner:
+  # Chart-native HPA (CPU 80% / memory 80% targets) — the Trend-supported
+  # autoscaling mechanism. KEDA no longer scales the chart-owned scanner.
+  autoscaling:
+    enabled: true
+  # Shared scratch space across scanner pods on multiple nodes.
+  ephemeralVolume:
+    enabled: true
+    storageClass: efs-sc
+    accessMode: ReadWriteMany
+    size: 100Gi
+  # Chart default is enabled: true (inert without an ingress class).
+  # Keep explicitly disabled — ALB mode re-enables it with its own settings.
+  ingress:
+    enabled: false
+
+visiononeFilesecurity:
+  management:
+    dbEnabled: true
+
+databaseContainer:
+  storageClass:
+    create: false        # use the CloudFormation-created gp3 StorageClass
+  persistence:
+    storageClassName: gp3
+    size: 100Gi
+
+managementService:
+  # Chart default is enabled: true — never expose the management service.
+  ingress:
+    enabled: false

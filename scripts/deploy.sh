@@ -22,10 +22,10 @@ for arg in "$@"; do
   esac
 done
 
-# If any resource env var is missing, fall back to reading stack Outputs
+# If any resource env var is missing, fall back to reading stack Outputs.
+# S3_REVIEW_BUCKET is optional (empty when the review pipeline is not deployed).
 if [ -z "${SQS_QUEUE_URL:-}" ] || [ -z "${S3_INGEST_BUCKET:-}" ] || \
    [ -z "${S3_CLEAN_BUCKET:-}" ] || [ -z "${S3_QUARANTINE_BUCKET:-}" ] || \
-   [ -z "${S3_REVIEW_BUCKET:-}" ] || \
    [ -z "${V1FS_API_KEY_SECRET_ARN:-}" ] || [ -z "${ECR_REPO_URL:-}" ] || \
    [ -z "${AUDIT_LOG_GROUP:-}" ]; then
 
@@ -52,7 +52,7 @@ for o in outputs:
   S3_INGEST_BUCKET="${S3_INGEST_BUCKET:-$(get_output IngestBucketName)}"
   S3_CLEAN_BUCKET="${S3_CLEAN_BUCKET:-$(get_output CleanBucketName)}"
   S3_QUARANTINE_BUCKET="${S3_QUARANTINE_BUCKET:-$(get_output QuarantineBucketName)}"
-  S3_REVIEW_BUCKET="${S3_REVIEW_BUCKET:-$(get_output ReviewBucketName)}"
+  S3_REVIEW_BUCKET="${S3_REVIEW_BUCKET:-$(get_output ReviewBucketName || true)}"
   V1FS_API_KEY_SECRET_ARN="${V1FS_API_KEY_SECRET_ARN:-$(get_output ApiKeySecretArn)}"
   ECR_REPO_URL="${ECR_REPO_URL:-$(get_output ECRRepoUrl)}"
   AUDIT_LOG_GROUP="${AUDIT_LOG_GROUP:-$(get_output ScanAuditLogGroupName)}"
@@ -61,6 +61,22 @@ for o in outputs:
     REVIEW_AUDIT_LOG_GROUP="${REVIEW_AUDIT_LOG_GROUP:-$(get_output ReviewAuditLogGroupName)}"
   fi
 fi
+
+# Review routing: explicit env wins; otherwise route to review only if a
+# review bucket exists (i.e. the review pipeline was deployed).
+if [ -z "${REVIEW_ROUTING_ENABLED:-}" ]; then
+  if [ -n "${S3_REVIEW_BUCKET:-}" ]; then
+    REVIEW_ROUTING_ENABLED="true"
+  else
+    REVIEW_ROUTING_ENABLED="false"
+  fi
+fi
+
+# Existing-customer-bucket mode sets DELETE_SOURCE_ENABLED=false (tag, don't delete)
+DELETE_SOURCE_ENABLED="${DELETE_SOURCE_ENABLED:-true}"
+
+# KEDA max replicas for scanner-app (POC-sized default)
+SCANNER_APP_MAX_REPLICAS="${SCANNER_APP_MAX_REPLICAS:-20}"
 
 # Determine image tag: use IMAGE_TAG env var, git SHA, or "latest"
 if [ -n "${IMAGE_TAG:-}" ]; then
@@ -87,6 +103,20 @@ echo "Applying NetworkPolicy..."
 kubectl apply -f "$K8S_DIR/networkpolicy.yaml"
 
 echo "Generating and applying ConfigMap..."
+# Reconciliation on the MAIN scanner-app: only when the review pipeline is
+# absent (review scanner runs it otherwise) and the ingest bucket is
+# stack-owned (in existing-bucket mode objects legitimately persist).
+RECON_BLOCK=""
+if [ "$REVIEW_ROUTING_ENABLED" = "false" ] && [ "$DELETE_SOURCE_ENABLED" = "true" ]; then
+  RECON_BLOCK=$(cat <<RB
+  RECONCILIATION_ENABLED: "true"
+  RECONCILIATION_BUCKET: "$S3_INGEST_BUCKET"
+  RECONCILIATION_QUEUE_URL: "$SQS_QUEUE_URL"
+  RECONCILIATION_INTERVAL: "${RECONCILIATION_INTERVAL:-300}"
+  RECONCILIATION_AGE_THRESHOLD: "${RECONCILIATION_AGE_THRESHOLD:-1800}"
+RB
+)
+fi
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
@@ -109,6 +139,9 @@ data:
   SQS_VISIBILITY_TIMEOUT: "${SQS_VISIBILITY_TIMEOUT:-600}"
   PML_ENABLED: "${PML_ENABLED:-false}"
   AUDIT_LOG_GROUP: "${AUDIT_LOG_GROUP:-}"
+  REVIEW_ROUTING_ENABLED: "$REVIEW_ROUTING_ENABLED"
+  DELETE_SOURCE_ENABLED: "$DELETE_SOURCE_ENABLED"
+$RECON_BLOCK
 EOF
 
 echo "Applying Deployment..."
@@ -122,13 +155,14 @@ kubectl apply -f "$K8S_DIR/pdb.yaml"
 echo "Applying KEDA ScaledObject..."
 sed -e "s|<SQS_QUEUE_URL>|$(sed_escape "$SQS_QUEUE_URL")|g" \
     -e "s|<AWS_REGION>|$(sed_escape "$AWS_REGION")|g" \
+    -e "s|<MAX_REPLICAS>|$(sed_escape "$SCANNER_APP_MAX_REPLICAS")|g" \
     "$K8S_DIR/scaledobject.yaml" | kubectl apply -f -
 
-echo "Waiting for rollout (Karpenter may need to provision a node first)..."
+echo "Waiting for rollout (Cluster Autoscaler may need to provision a node first)..."
 if kubectl rollout status deployment/scanner-app -n visionone-filesecurity --timeout=300s; then
   echo "Deploy complete. Scanner-app is running."
 else
-  echo "WARNING: Rollout not yet complete after 300s. This is expected on first deploy while Karpenter provisions a node. The pod will start once the node is ready."
+  echo "WARNING: Rollout not yet complete after 300s. This is expected on first deploy while Cluster Autoscaler provisions a node. The pod will start once the node is ready."
 fi
 kubectl get pods -n visionone-filesecurity -l app=scanner-app
 

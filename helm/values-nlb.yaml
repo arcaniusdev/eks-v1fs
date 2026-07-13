@@ -1,0 +1,16 @@
+# Overlay: expose the scanner gRPC endpoint via an INTERNAL Network Load
+# Balancer (ScannerEndpointMode=nlb, the default). Uses the chart-native
+# externalService — creates <release>-visionone-filesecurity-scanner-lb
+# with gRPC :50051 and ICAP :1344.
+#
+# The NLB is VPC-internal: reachable from the customer's VPC (or peered
+# networks), never from the internet. Connect with the V1FS SDK:
+#   amaas.grpc.init("<nlb-hostname>:50051", api_key, False)  # plaintext in-VPC
+
+scanner:
+  externalService:
+    enabled: true
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: external
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip

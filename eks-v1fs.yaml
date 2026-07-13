@@ -19,12 +19,94 @@ Parameters:
     Description: Vision One API key with "Run file scan via SDK" permission
     Type: String
     NoEcho: true
-  DesiredCapacity:
+  NodeGroupMinSize:
     Type: Number
-    Description: Desired number of system nodes in the managed node group (Karpenter handles workload scaling)
-    Default: 3
-    MinValue: 3
-    MaxValue: 6
+    Description: Minimum nodes in the managed node group (min 2 for CoreDNS/AZ redundancy)
+    Default: 2
+    MinValue: 1
+    MaxValue: 20
+  NodeGroupDesiredSize:
+    Type: Number
+    Description: Initial desired nodes in the managed node group (Cluster Autoscaler adjusts from here)
+    Default: 2
+    MinValue: 1
+    MaxValue: 20
+  NodeGroupMaxSize:
+    Type: Number
+    Description: >
+      Maximum nodes the Cluster Autoscaler may scale the managed node group to.
+      Default 8 fits full-mode peak (10 V1FS scanners + 20 scanner-app pods +
+      review pipeline + system pods) on r7i.xlarge nodes.
+    Default: 8
+    MinValue: 1
+    MaxValue: 30
+  ScannerMinReplicas:
+    Type: Number
+    Description: Minimum V1FS scanner pods (chart HPA minReplicas)
+    Default: 1
+    MinValue: 1
+    MaxValue: 20
+  ScannerMaxReplicas:
+    Type: Number
+    Description: Maximum V1FS scanner pods (chart HPA maxReplicas, CPU/memory 80% targets)
+    Default: 10
+    MinValue: 1
+    MaxValue: 50
+  DeployScannerApp:
+    Type: String
+    Description: >
+      Deploy the S3/SQS scanning application (buckets, queues, scanner-app pods).
+      Set to false if you have your own scanning application — the stack then
+      deploys only the V1FS scanner and publishes its gRPC endpoint address.
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+  ScannerAppMaxReplicas:
+    Type: Number
+    Description: Maximum scanner-app pods (KEDA SQS-driven scaling)
+    Default: 20
+    MinValue: 1
+    MaxValue: 100
+  DeployReviewPipeline:
+    Type: String
+    Description: >
+      Deploy the review pipeline (second V1FS release with unlimited decompression
+      for deep archive analysis). Requires DeployScannerApp=true. When false,
+      files exceeding decompression limits are quarantined with an explanatory tag.
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+  ExistingIngestBucket:
+    Type: String
+    Description: >
+      Name of an EXISTING S3 bucket to scan (leave empty to create a new ingest
+      bucket). Existing buckets are wired via S3 -> EventBridge -> SQS so your
+      current bucket notification configuration is preserved, and scanned objects
+      are tagged with the verdict instead of being deleted from the bucket.
+    Default: ""
+    AllowedPattern: "^$|^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+  ScannerEndpointMode:
+    Type: String
+    Description: >
+      How to expose the V1FS scanner gRPC endpoint for external scanning
+      applications. nlb = internal Network Load Balancer (VPC-reachable, default);
+      alb = ALB Ingress with TLS (requires ACMCertificateArn and ScannerDomain);
+      none = in-cluster only.
+    Default: "nlb"
+    AllowedValues:
+      - "none"
+      - "nlb"
+      - "alb"
+  ACMCertificateArn:
+    Type: String
+    Description: ACM certificate ARN for the scanner ALB (required when ScannerEndpointMode=alb)
+    Default: ""
+  ScannerDomain:
+    Type: String
+    Description: DNS name for the scanner ALB, e.g. scanner.example.com (required when ScannerEndpointMode=alb)
+    Default: ""
   PMLEnabled:
     Type: String
     Description: Enable Predictive Machine Learning (PML) for file scanning. Requires PML support on the Vision One account.
@@ -34,15 +116,16 @@ Parameters:
       - "false"
   NodeInstanceType:
     Type: String
-    Description: EC2 instance type for system node group (hosts CoreDNS, KEDA, Karpenter, CSI drivers). Scanner workloads run on Karpenter-provisioned xlarge nodes.
-    Default: r7i.large
+    Description: >
+      EC2 instance type for the managed node group. A single node group hosts
+      both system components and scanner workloads; memory-optimized xlarge
+      (4 vCPU / 32 GiB) fits four 800m/2Gi V1FS scanner pods per node.
+    Default: r7i.xlarge
     AllowedValues:
-      - r7i.large
       - r7i.xlarge
-      - r7a.large
       - r7a.xlarge
-      - r6i.large
       - r6i.xlarge
+      - r7i.2xlarge
   MaxDecompressionLayer:
     Type: Number
     Description: >
@@ -98,14 +181,36 @@ Parameters:
     Default: 600
     MinValue: 60
     MaxValue: 3600
-  KarpenterCPULimit:
-    Type: Number
-    Description: >
-      Maximum vCPU Karpenter can provision. Must match your AWS on-demand vCPU
-      quota (Service Quotas). Default quota is 64; request increase to at least 300.
-    Default: 300
-    MinValue: 16
-    MaxValue: 1000
+Rules:
+  ReviewRequiresScannerApp:
+    RuleCondition: !Equals [!Ref DeployReviewPipeline, "true"]
+    Assertions:
+      - Assert: !Equals [!Ref DeployScannerApp, "true"]
+        AssertDescription: DeployReviewPipeline=true requires DeployScannerApp=true
+  AlbRequiresCertAndDomain:
+    RuleCondition: !Equals [!Ref ScannerEndpointMode, "alb"]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ACMCertificateArn, ""]]
+        AssertDescription: ScannerEndpointMode=alb requires ACMCertificateArn
+      - Assert: !Not [!Equals [!Ref ScannerDomain, ""]]
+        AssertDescription: ScannerEndpointMode=alb requires ScannerDomain
+
+Conditions:
+  ScannerAppEnabled: !Equals [!Ref DeployScannerApp, "true"]
+  ReviewEnabled: !And
+    - !Condition ScannerAppEnabled
+    - !Equals [!Ref DeployReviewPipeline, "true"]
+  CreateIngestBucket: !And
+    - !Condition ScannerAppEnabled
+    - !Equals [!Ref ExistingIngestBucket, ""]
+  UseExistingBucket: !And
+    - !Condition ScannerAppEnabled
+    - !Not [!Equals [!Ref ExistingIngestBucket, ""]]
+  ExposeNLB: !Equals [!Ref ScannerEndpointMode, "nlb"]
+  ExposeALB: !Equals [!Ref ScannerEndpointMode, "alb"]
+  ExposeEndpoint: !Or
+    - !Condition ExposeNLB
+    - !Condition ExposeALB
 
 Mappings:
   RegionMap:
@@ -220,8 +325,6 @@ Resources:
       Tags:
         - Key: kubernetes.io/role/internal-elb
           Value: "1"
-        - Key: karpenter.sh/discovery
-          Value: !Sub EKSCluster-${AWS::StackName}
         - Key: Name
           Value: !Sub PrivateSubnet1-${AWS::StackName}
 
@@ -235,8 +338,6 @@ Resources:
       Tags:
         - Key: kubernetes.io/role/internal-elb
           Value: "1"
-        - Key: karpenter.sh/discovery
-          Value: !Sub EKSCluster-${AWS::StackName}
         - Key: Name
           Value: !Sub PrivateSubnet2-${AWS::StackName}
 
@@ -429,8 +530,6 @@ Resources:
       VpcId: !Ref BaseVPC
       GroupDescription: EKS worker nodes - restricted ports only
       Tags:
-        - Key: karpenter.sh/discovery
-          Value: !Sub EKSCluster-${AWS::StackName}
         - Key: Name
           Value: !Sub NodeSecGroup-${AWS::StackName}
 
@@ -471,6 +570,32 @@ Resources:
       ToPort: 22
       SourceSecurityGroupId: !Ref BastionSecGroup
       Description: SSH from bastion for debugging
+
+  # Scanner endpoint exposure (NLB/ALB with ip-targets): allow VPC-internal
+  # traffic to the scanner gRPC and ICAP ports on pod ENIs (node SG).
+  # Proactive — the LB controller manages its own rules for some paths, but
+  # ip-target registration can miss node SG rules in certain configurations.
+  NodeSecGroupScannerGrpc:
+    Condition: ExposeEndpoint
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSecGroup
+      IpProtocol: tcp
+      FromPort: 50051
+      ToPort: 50051
+      CidrIp: 10.2.0.0/16
+      Description: VPC-internal gRPC to scanner pods (LB ip-targets)
+
+  NodeSecGroupScannerIcap:
+    Condition: ExposeEndpoint
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSecGroup
+      IpProtocol: tcp
+      FromPort: 1344
+      ToPort: 1344
+      CidrIp: 10.2.0.0/16
+      Description: VPC-internal ICAP to scanner pods (LB ip-targets)
 
   EKSSecGroupFromNodes:
     Type: AWS::EC2::SecurityGroupIngress
@@ -578,21 +703,27 @@ Resources:
                 Action:
                   - ecr:GetAuthorizationToken
                 Resource: "*"
-              - Sid: ECRRead
-                Effect: Allow
-                Action:
-                  - ecr:BatchGetImage
-                  - ecr:GetDownloadUrlForLayer
-                  - ecr:BatchCheckLayerAvailability
-                Resource: !GetAtt ScannerAppECRRepo.Arn
-              - Sid: ECRPush
-                Effect: Allow
-                Action:
-                  - ecr:InitiateLayerUpload
-                  - ecr:UploadLayerPart
-                  - ecr:CompleteLayerUpload
-                  - ecr:PutImage
-                Resource: !GetAtt ScannerAppECRRepo.Arn
+              - !If
+                - ScannerAppEnabled
+                - Sid: ECRRead
+                  Effect: Allow
+                  Action:
+                    - ecr:BatchGetImage
+                    - ecr:GetDownloadUrlForLayer
+                    - ecr:BatchCheckLayerAvailability
+                  Resource: !GetAtt ScannerAppECRRepo.Arn
+                - !Ref AWS::NoValue
+              - !If
+                - ScannerAppEnabled
+                - Sid: ECRPush
+                  Effect: Allow
+                  Action:
+                    - ecr:InitiateLayerUpload
+                    - ecr:UploadLayerPart
+                    - ecr:CompleteLayerUpload
+                    - ecr:PutImage
+                  Resource: !GetAtt ScannerAppECRRepo.Arn
+                - !Ref AWS::NoValue
               - Sid: STS
                 Effect: Allow
                 Action:
@@ -609,14 +740,23 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Ref V1FSRegistrationSecret
-              - Sid: S3IngestWrite
+              # Publishes the scanner endpoint address for external POC apps
+              - Sid: PublishScannerEndpoint
                 Effect: Allow
                 Action:
-                  - s3:PutObject
-                  - s3:ListBucket
-                Resource:
-                  - !GetAtt IngestBucket.Arn
-                  - !Sub ${IngestBucket.Arn}/*
+                  - ssm:PutParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/scanner-endpoint
+              - !If
+                - CreateIngestBucket
+                - Sid: S3IngestWrite
+                  Effect: Allow
+                  Action:
+                    - s3:PutObject
+                    - s3:ListBucket
+                  Resource:
+                    - !GetAtt IngestBucket.Arn
+                    - !Sub ${IngestBucket.Arn}/*
+                - !Ref AWS::NoValue
       Tags:
         - Key: Name
           Value: !Sub BastionRole-${AWS::StackName}
@@ -937,9 +1077,9 @@ Resources:
         - !Ref PrivateSubnet1
         - !Ref PrivateSubnet2
       ScalingConfig:
-        DesiredSize: !Ref DesiredCapacity
-        MinSize: 3
-        MaxSize: 6
+        DesiredSize: !Ref NodeGroupDesiredSize
+        MinSize: !Ref NodeGroupMinSize
+        MaxSize: !Ref NodeGroupMaxSize
       InstanceTypes:
         - !Ref NodeInstanceType
 
@@ -1017,6 +1157,7 @@ Resources:
       RoleArn: !GetAtt LBControllerRole.Arn
 
   KedaOperatorRole:
+    Condition: ScannerAppEnabled
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub KedaOperatorRole-${AWS::StackName}
@@ -1039,14 +1180,17 @@ Resources:
                 Action:
                   - sqs:GetQueueAttributes
                   - sqs:GetQueueUrl
-                Resource:
-                  - !GetAtt FileScanQueue.Arn
-                  - !GetAtt ReviewScanQueue.Arn
+                Resource: !If
+                  - ReviewEnabled
+                  - - !GetAtt FileScanQueue.Arn
+                    - !GetAtt ReviewScanQueue.Arn
+                  - - !GetAtt FileScanQueue.Arn
       Tags:
         - Key: Name
           Value: !Sub KedaOperatorRole-${AWS::StackName}
 
   KedaOperatorPodIdentity:
+    Condition: ScannerAppEnabled
     DependsOn: PodIdentityAgentAddon
     Type: AWS::EKS::PodIdentityAssociation
     Properties:
@@ -1055,10 +1199,15 @@ Resources:
       ServiceAccount: keda-operator
       RoleArn: !GetAtt KedaOperatorRole.Arn
 
-  KarpenterControllerRole:
+  # --- Cluster Autoscaler (Pod Identity) ---
+  # The standard Kubernetes node autoscaler. EKS managed node groups
+  # auto-tag their ASGs with k8s.io/cluster-autoscaler/enabled and
+  # k8s.io/cluster-autoscaler/<cluster-name>, so auto-discovery works
+  # without extra tagging resources.
+  ClusterAutoscalerRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub KarpenterControllerRole-${AWS::StackName}
+      RoleName: !Sub ClusterAutoscalerRole-${AWS::StackName}
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -1069,112 +1218,51 @@ Resources:
               - sts:AssumeRole
               - sts:TagSession
       Policies:
-        - PolicyName: KarpenterControllerPolicy
+        - PolicyName: ClusterAutoscalerPolicy
           PolicyDocument:
-            Fn::Sub:
-              - |
-                {
-                  "Version": "2012-10-17",
-                  "Statement": [
-                    {
-                      "Sid": "AllowEC2Actions",
-                      "Effect": "Allow",
-                      "Action": [
-                        "ec2:RunInstances",
-                        "ec2:CreateFleet",
-                        "ec2:CreateTags",
-                        "ec2:TerminateInstances",
-                        "ec2:DeleteLaunchTemplate",
-                        "ec2:CreateLaunchTemplate",
-                        "ec2:DescribeAvailabilityZones",
-                        "ec2:DescribeImages",
-                        "ec2:DescribeInstances",
-                        "ec2:DescribeInstanceTypeOfferings",
-                        "ec2:DescribeInstanceTypes",
-                        "ec2:DescribeLaunchTemplates",
-                        "ec2:DescribeSecurityGroups",
-                        "ec2:DescribeSubnets",
-                        "ec2:DescribeSpotPriceHistory"
-                      ],
-                      "Resource": "*",
-                      "Condition": {
-                        "StringEquals": {
-                          "aws:RequestedRegion": "${AWS::Region}"
-                        }
-                      }
-                    },
-                    {
-                      "Sid": "AllowSSMReadActions",
-                      "Effect": "Allow",
-                      "Action": "ssm:GetParameter",
-                      "Resource": "arn:aws:ssm:${AWS::Region}::parameter/aws/service/*"
-                    },
-                    {
-                      "Sid": "AllowPricingReadActions",
-                      "Effect": "Allow",
-                      "Action": "pricing:GetProducts",
-                      "Resource": "*"
-                    },
-                    {
-                      "Sid": "AllowPassingInstanceRole",
-                      "Effect": "Allow",
-                      "Action": "iam:PassRole",
-                      "Resource": "${NodeRoleArn}",
-                      "Condition": {
-                        "StringEquals": {
-                          "iam:PassedToService": "ec2.amazonaws.com"
-                        }
-                      }
-                    },
-                    {
-                      "Sid": "AllowGetInstanceProfile",
-                      "Effect": "Allow",
-                      "Action": "iam:GetInstanceProfile",
-                      "Resource": "*"
-                    },
-                    {
-                      "Sid": "AllowEKSActions",
-                      "Effect": "Allow",
-                      "Action": "eks:DescribeCluster",
-                      "Resource": "arn:aws:eks:${AWS::Region}:${AWS::AccountId}:cluster/${ClusterName}"
-                    }
-                  ]
-                }
-              - ClusterName: !Sub "EKSCluster-${AWS::StackName}"
-                NodeRoleArn: !GetAtt NodeInstanceRole.Arn
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadOnlyDiscovery
+                Effect: Allow
+                Action:
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:DescribeAutoScalingInstances
+                  - autoscaling:DescribeLaunchConfigurations
+                  - autoscaling:DescribeScalingActivities
+                  - autoscaling:DescribeTags
+                  - ec2:DescribeImages
+                  - ec2:DescribeInstanceTypes
+                  - ec2:DescribeLaunchTemplateVersions
+                  - ec2:GetInstanceTypesFromInstanceRequirements
+                  - eks:DescribeNodegroup
+                Resource: "*"
+              - Sid: ScaleManagedNodeGroupASGs
+                Effect: Allow
+                Action:
+                  - autoscaling:SetDesiredCapacity
+                  - autoscaling:TerminateInstanceInAutoScalingGroup
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/k8s.io/cluster-autoscaler/enabled: "true"
       Tags:
         - Key: Name
-          Value: !Sub KarpenterControllerRole-${AWS::StackName}
+          Value: !Sub ClusterAutoscalerRole-${AWS::StackName}
 
-  KarpenterControllerPodIdentity:
+  ClusterAutoscalerPodIdentity:
     DependsOn: PodIdentityAgentAddon
     Type: AWS::EKS::PodIdentityAssociation
     Properties:
       ClusterName: !Sub EKSCluster-${AWS::StackName}
       Namespace: kube-system
-      ServiceAccount: karpenter
-      RoleArn: !GetAtt KarpenterControllerRole.Arn
-
-  KarpenterNodeAccessEntry:
-    DependsOn: EKSCluster
-    Type: AWS::EKS::AccessEntry
-    Properties:
-      ClusterName: !Sub EKSCluster-${AWS::StackName}
-      PrincipalArn: !GetAtt NodeInstanceRole.Arn
-      Type: EC2_LINUX
-
-  KarpenterNodeInstanceProfile:
-    Type: AWS::IAM::InstanceProfile
-    Properties:
-      InstanceProfileName: !Sub KarpenterNodeProfile-${AWS::StackName}
-      Roles:
-        - !Ref NodeInstanceRole
+      ServiceAccount: cluster-autoscaler
+      RoleArn: !GetAtt ClusterAutoscalerRole.Arn
 
   # --- Pre-Delete Cleanup (Lambda) ---
-  # Ensures Karpenter-managed EC2 instances and orphaned EBS volumes
-  # are cleaned up before CloudFormation deletes the EKS cluster and IAM roles.
-  # Without this, stack deletion fails because orphaned resources still reference
-  # the NodeInstanceRole.
+  # Ensures orphaned EBS volumes (V1FS PVCs) and LB-controller-created
+  # load balancers / target groups / security groups are cleaned up before
+  # CloudFormation deletes the EKS cluster and VPC. Without this, stack
+  # deletion fails because orphaned resources still reference the VPC.
 
   CleanupLambdaRole:
     Type: AWS::IAM::Role
@@ -1196,14 +1284,15 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
-                  - ec2:DescribeInstances
-                  - ec2:TerminateInstances
                   - ec2:DescribeVolumes
                   - ec2:DeleteVolume
-                  - iam:ListInstanceProfiles
-                  - iam:GetInstanceProfile
-                  - iam:RemoveRoleFromInstanceProfile
-                  - iam:DeleteInstanceProfile
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DeleteSecurityGroup
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - elasticloadbalancing:DescribeTags
+                  - elasticloadbalancing:DeleteLoadBalancer
+                  - elasticloadbalancing:DeleteTargetGroup
                 Resource: "*"
 
   CleanupLambda:
@@ -1233,60 +1322,60 @@ Resources:
               cluster_name = os.environ['CLUSTER_NAME']
               stack_name = os.environ['STACK_NAME']
               ec2 = boto3.client('ec2')
-              iam = boto3.client('iam')
+              elbv2 = boto3.client('elbv2')
 
               try:
-                  # 1. Terminate Karpenter-managed EC2 instances
-                  print(f"Finding Karpenter instances for {cluster_name}...")
-                  paginator = ec2.get_paginator('describe_instances')
-                  instance_ids = []
-                  for page in paginator.paginate(
-                      Filters=[
-                          {'Name': 'tag:karpenter.sh/nodepool', 'Values': ['*']},
-                          {'Name': f'tag:kubernetes.io/cluster/{cluster_name}', 'Values': ['owned']},
-                          {'Name': 'instance-state-name', 'Values': ['running', 'pending', 'stopping', 'stopped']},
-                      ]
-                  ):
-                      for r in page['Reservations']:
-                          for i in r['Instances']:
-                              instance_ids.append(i['InstanceId'])
+                  # 1. Delete LB-controller-created load balancers (scanner NLB/ALB).
+                  # These are created by the AWS LB Controller, not CloudFormation,
+                  # and would otherwise orphan and block VPC deletion.
+                  print(f"Finding load balancers for {cluster_name}...")
+                  lb_arns = []
+                  paginator = elbv2.get_paginator('describe_load_balancers')
+                  for page in paginator.paginate():
+                      arns = [lb['LoadBalancerArn'] for lb in page['LoadBalancers']]
+                      if not arns:
+                          continue
+                      tags = elbv2.describe_tags(ResourceArns=arns)
+                      for td in tags['TagDescriptions']:
+                          for t in td['Tags']:
+                              if t['Key'] == 'elbv2.k8s.aws/cluster' and t['Value'] == cluster_name:
+                                  lb_arns.append(td['ResourceArn'])
+                  for arn in lb_arns:
+                      print(f"Deleting load balancer: {arn}")
+                      elbv2.delete_load_balancer(LoadBalancerArn=arn)
+                  if lb_arns:
+                      time.sleep(30)  # allow ENI release before SG/VPC deletion
 
-                  if instance_ids:
-                      print(f"Terminating {len(instance_ids)} Karpenter instances...")
-                      # Terminate in batches of 20
-                      for i in range(0, len(instance_ids), 20):
-                          batch = instance_ids[i:i+20]
-                          ec2.terminate_instances(InstanceIds=batch)
+                  # 2. Delete LB-controller-created target groups
+                  print("Checking for orphaned target groups...")
+                  paginator = elbv2.get_paginator('describe_target_groups')
+                  for page in paginator.paginate():
+                      arns = [tg['TargetGroupArn'] for tg in page['TargetGroups']]
+                      if not arns:
+                          continue
+                      tags = elbv2.describe_tags(ResourceArns=arns)
+                      for td in tags['TagDescriptions']:
+                          for t in td['Tags']:
+                              if t['Key'] == 'elbv2.k8s.aws/cluster' and t['Value'] == cluster_name:
+                                  print(f"Deleting target group: {td['ResourceArn']}")
+                                  try:
+                                      elbv2.delete_target_group(TargetGroupArn=td['ResourceArn'])
+                                  except Exception as tg_err:
+                                      print(f"Target group delete failed (non-fatal): {tg_err}")
 
-                      # Wait for termination (up to 120s)
-                      print("Waiting for instances to terminate...")
-                      for _ in range(24):
-                          time.sleep(5)
-                          resp = ec2.describe_instances(InstanceIds=instance_ids)
-                          states = [i['State']['Name'] for r in resp['Reservations'] for i in r['Instances']]
-                          if all(s == 'terminated' for s in states):
-                              print("All instances terminated")
-                              break
-                      else:
-                          print("Warning: some instances still terminating after 120s")
-                  else:
-                      print("No Karpenter instances found")
+                  # 3. Delete LB-controller-created security groups
+                  print("Checking for orphaned LB security groups...")
+                  sgs = ec2.describe_security_groups(
+                      Filters=[{'Name': 'tag:elbv2.k8s.aws/cluster', 'Values': [cluster_name]}]
+                  )
+                  for sg in sgs['SecurityGroups']:
+                      print(f"Deleting security group: {sg['GroupId']}")
+                      try:
+                          ec2.delete_security_group(GroupId=sg['GroupId'])
+                      except Exception as sg_err:
+                          print(f"Security group delete failed (non-fatal): {sg_err}")
 
-                  # 2. Clean up orphaned instance profiles
-                  print("Checking for Karpenter instance profiles...")
-                  profiles = iam.list_instance_profiles()
-                  for profile in profiles['InstanceProfiles']:
-                      name = profile['InstanceProfileName']
-                      if cluster_name in name and name != f'KarpenterNodeProfile-{stack_name}':
-                          print(f"Cleaning up instance profile: {name}")
-                          for role in profile['Roles']:
-                              iam.remove_role_from_instance_profile(
-                                  InstanceProfileName=name,
-                                  RoleName=role['RoleName']
-                              )
-                          iam.delete_instance_profile(InstanceProfileName=name)
-
-                  # 3. Delete orphaned EBS volumes (from V1FS PVCs)
+                  # 4. Delete orphaned EBS volumes (from V1FS PVCs)
                   print("Checking for orphaned EBS volumes...")
                   vols = ec2.describe_volumes(
                       Filters=[
@@ -1306,12 +1395,10 @@ Resources:
 
   CleanupTrigger:
     # DependsOn controls DELETE ordering (reverse of creation order).
-    # By depending on NodeInstanceRole and KarpenterNodeInstanceProfile,
-    # CloudFormation will delete this resource (running cleanup Lambda) BEFORE
-    # attempting to delete the role and instance profile.
+    # By depending on NodeInstanceRole, CloudFormation deletes this resource
+    # (running the cleanup Lambda) BEFORE tearing down node/VPC resources.
     DependsOn:
       - NodeInstanceRole
-      - KarpenterNodeInstanceProfile
     Type: Custom::CleanupTrigger
     Properties:
       ServiceToken: !GetAtt CleanupLambda.Arn
@@ -1378,351 +1465,98 @@ Resources:
       KeyName: !Ref BastionKeyPair
       AvailabilityZone: !Ref PrimaryAZ
       UserData: !Base64
-        Fn::Sub: |
-          #!/bin/bash -x
-          # ------------------------------------------------------------------
-          # Bastion provisioning script
-          # Signals CloudFormation on exit regardless of success or failure.
-          # No dependency on cfn-bootstrap / cfn-init / cfn-signal.
-          # ------------------------------------------------------------------
-          SIGNAL_STATUS="FAILURE"
+        Fn::Sub:
+          - |
+            #!/bin/bash -x
+            # ------------------------------------------------------------------
+            # Bastion provisioning: export CFN-derived environment, clone the
+            # repo, and run scripts/bootstrap.sh (all provisioning logic lives
+            # there). Signals CloudFormation on exit, success or failure.
+            # ------------------------------------------------------------------
+            SIGNAL_STATUS="FAILURE"
 
-          signal_cfn() {
-            # Use whichever aws binary is available (v2 at /usr/local/bin, v1 at /usr/bin)
-            AWS_CMD=$(command -v aws || echo "/usr/bin/aws")
-            $AWS_CMD cloudformation signal-resource \
-              --stack-name "${AWS::StackName}" \
-              --logical-resource-id Bastion \
-              --unique-id "$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo bastion)" \
-              --status "$SIGNAL_STATUS" \
-              --region "${AWS::Region}" || true
-          }
-          trap signal_cfn EXIT
+            signal_cfn() {
+              AWS_CMD=$(command -v aws || echo "/usr/bin/aws")
+              $AWS_CMD cloudformation signal-resource \
+                --stack-name "${AWS::StackName}" \
+                --logical-resource-id Bastion \
+                --unique-id "$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo bastion)" \
+                --status "$SIGNAL_STATUS" \
+                --region "${AWS::Region}" || true
+            }
+            trap signal_cfn EXIT
 
-          # Exit on first error — the trap will signal FAILURE.
-          # Commands that are allowed to fail use || true explicitly.
-          set -e
+            # Exit on first error — the trap will signal FAILURE.
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            export HOME=/root
 
-          export DEBIAN_FRONTEND=noninteractive
-          export HOME=/root
-          export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH
+            # ---- Core identifiers ----
+            export CFN_STACK_NAME="${AWS::StackName}"
+            export AWS_REGION="${AWS::Region}"
+            export CLUSTER_NAME="EKSCluster-${AWS::StackName}"
+            export VPC_ID="${BaseVPC}"
+            export EFS_ID="${EFSFileSystem}"
+            export V1FS_REGISTRATION_SECRET="${V1FSRegistrationSecret}"
+            export V1FS_API_KEY_SECRET_ARN="${V1FSApiKeySecret}"
 
-          # Ensure /usr/local/bin is on PATH and KUBECONFIG is set for SSH sessions
-          echo 'export PATH=/usr/local/bin:$PATH' > /etc/profile.d/local-bin.sh
-          echo 'export KUBECONFIG=/root/.kube/config' >> /etc/profile.d/local-bin.sh
-          chmod 644 /etc/profile.d/local-bin.sh
+            # ---- Deployment modes ----
+            export DEPLOY_SCANNER_APP="${DeployScannerApp}"
+            export DEPLOY_REVIEW="${DeployReviewPipeline}"
+            export ENDPOINT_MODE="${ScannerEndpointMode}"
+            export ACM_CERT_ARN="${ACMCertificateArn}"
+            export SCANNER_DOMAIN="${ScannerDomain}"
+            export EXISTING_INGEST_BUCKET="${ExistingIngestBucket}"
 
-          # ---- System packages ----
-          apt-get update -y
-          apt-get remove needrestart -y || true
-          apt-get install -y python3 python3-pip curl gpg apt-transport-https unzip jq
+            # ---- Scaling ----
+            export SCANNER_MIN_REPLICAS="${ScannerMinReplicas}"
+            export SCANNER_MAX_REPLICAS="${ScannerMaxReplicas}"
+            export SCANNER_APP_MAX_REPLICAS="${ScannerAppMaxReplicas}"
 
-          # ---- AWS CLI v2 ----
-          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
-          unzip -q /tmp/awscliv2.zip -d /tmp
-          /tmp/aws/install --update
-          rm -rf /tmp/aws /tmp/awscliv2.zip
-          /usr/local/bin/aws --version
+            # ---- Scan policy ----
+            export MAX_DECOMPRESSION_LAYER="${MaxDecompressionLayer}"
+            export MAX_DECOMPRESSION_FILE_COUNT="${MaxDecompressionFileCount}"
+            export MAX_DECOMPRESSION_RATIO="${MaxDecompressionRatio}"
+            export MAX_DECOMPRESSION_SIZE="${MaxDecompressionSize}"
+            export PML_ENABLED="${PMLEnabled}"
+            export MAX_FILE_SIZE_MB="${MaxFileSizeMB}"
+            export TM_AM_SCAN_TIMEOUT_SECS="${ScanTimeoutSeconds}"
 
-          # ---- Helm ----
-          curl -fsSL https://packages.buildkite.com/helm-linux/helm-debian/gpgkey | gpg --dearmor | tee /usr/share/keyrings/helm.gpg > /dev/null
-          echo "deb [signed-by=/usr/share/keyrings/helm.gpg] https://packages.buildkite.com/helm-linux/helm-debian/any/ any main" | tee /etc/apt/sources.list.d/helm-stable-debian.list
-          apt-get update -y
-          apt-get install -y helm
-          helm version
+            # ---- Scanner-app resources (empty when module disabled) ----
+            # Passed directly — stack Outputs are unavailable during CREATE_IN_PROGRESS
+            export ECR_REPO_URL="${EcrRepoUrlValue}"
+            export SQS_QUEUE_URL="${FileScanQueueValue}"
+            export S3_INGEST_BUCKET="${IngestBucketValue}"
+            export S3_CLEAN_BUCKET="${CleanBucketValue}"
+            export S3_QUARANTINE_BUCKET="${QuarantineBucketValue}"
+            export S3_REVIEW_BUCKET="${ReviewBucketValue}"
+            export AUDIT_LOG_GROUP="${AuditLogGroupValue}"
+            export REVIEW_SQS_QUEUE_URL="${ReviewQueueValue}"
+            export REVIEW_AUDIT_LOG_GROUP="${ReviewAuditLogGroupValue}"
 
-          # ---- eksctl ----
-          ARCH=amd64
-          PLATFORM=$(uname -s)_$ARCH
-          curl -sLO "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$PLATFORM.tar.gz"
-          tar -xzf "eksctl_$PLATFORM.tar.gz" -C /tmp && rm "eksctl_$PLATFORM.tar.gz"
-          mv /tmp/eksctl /usr/local/bin/eksctl
-          /usr/local/bin/eksctl version
+            # ---- Clone repo and hand off to bootstrap ----
+            apt-get update -y
+            apt-get install -y git
+            git clone https://github.com/arcaniusdev/eks-v1fs.git /opt/eks-v1fs
+            chmod +x /opt/eks-v1fs/scripts/*.sh
 
-          # ---- kubectl ----
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-          rm -f kubectl
-          /usr/local/bin/kubectl version --client
+            /opt/eks-v1fs/scripts/bootstrap.sh
 
-          # ---- Configure kubeconfig ----
-          /usr/local/bin/aws eks update-kubeconfig --region ${AWS::Region} --name EKSCluster-${AWS::StackName}
-          export KUBECONFIG=/root/.kube/config
-
-          # ---- Create V1FS namespace and secrets ----
-          /usr/local/bin/kubectl create namespace visionone-filesecurity
-
-          # Retrieve registration token from Secrets Manager into a temp file.
-          # Using --from-file avoids shell interpolation issues with special
-          # characters in the token (e.g. $, backticks, !, \).
-          /usr/local/bin/aws secretsmanager get-secret-value \
-            --secret-id "${V1FSRegistrationSecret}" \
-            --query SecretString --output text \
-            --region ${AWS::Region} | tr -d '\n' > /tmp/.reg-token
-          /usr/local/bin/kubectl create secret generic token-secret \
-            --from-file=registration-token=/tmp/.reg-token \
-            -n visionone-filesecurity
-          shred -u /tmp/.reg-token
-
-          /usr/local/bin/kubectl create secret generic device-token-secret \
-            -n visionone-filesecurity
-
-          # ---- Install AWS Load Balancer Controller via Helm ----
-          helm repo add eks https://aws.github.io/eks-charts
-          helm repo update eks
-          helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
-            -n kube-system \
-            --set clusterName=EKSCluster-${AWS::StackName} \
-            --set vpcId=${BaseVPC} \
-            --set region=${AWS::Region} \
-            --wait --timeout 5m
-
-          # ---- Install Metrics Server (cluster monitoring) ----
-          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
-          kubectl rollout status deployment/metrics-server -n kube-system --timeout=120s
-
-          # ---- Install Karpenter via Helm ----
-          helm registry logout public.ecr.aws || true
-          helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
-            --version "1.3.0" \
-            -n kube-system \
-            --set "settings.clusterName=EKSCluster-${AWS::StackName}" \
-            --set controller.resources.requests.cpu=500m \
-            --set controller.resources.requests.memory=512Mi \
-            --set controller.resources.limits.cpu=1 \
-            --set controller.resources.limits.memory=1Gi \
-            --wait --timeout 5m
-
-          # ---- Apply Karpenter NodePool and EC2NodeClass ----
-          cat <<EOFKARPENTER | kubectl apply -f -
-          apiVersion: karpenter.k8s.aws/v1
-          kind: EC2NodeClass
-          metadata:
-            name: scanner-nodes
-          spec:
-            instanceProfile: KarpenterNodeProfile-${AWS::StackName}
-            amiSelectorTerms:
-              - alias: al2023@latest
-            subnetSelectorTerms:
-              - tags:
-                  karpenter.sh/discovery: EKSCluster-${AWS::StackName}
-            securityGroupSelectorTerms:
-              - tags:
-                  karpenter.sh/discovery: EKSCluster-${AWS::StackName}
-            blockDeviceMappings:
-              - deviceName: /dev/xvda
-                ebs:
-                  volumeSize: 20Gi
-                  volumeType: gp3
-                  encrypted: true
-            metadataOptions:
-              httpEndpoint: enabled
-              httpPutResponseHopLimit: 2
-              httpTokens: required
-          ---
-          apiVersion: karpenter.sh/v1
-          kind: NodePool
-          metadata:
-            name: scanner-pool
-          spec:
-            template:
-              metadata:
-                labels:
-                  workload-type: scanner
-              spec:
-                nodeClassRef:
-                  group: karpenter.k8s.aws
-                  kind: EC2NodeClass
-                  name: scanner-nodes
-                requirements:
-                  - key: kubernetes.io/arch
-                    operator: In
-                    values: ["amd64"]
-                  - key: karpenter.sh/capacity-type
-                    operator: In
-                    values: ["on-demand"]
-                  - key: node.kubernetes.io/instance-type
-                    operator: In
-                    values:
-                      - r7i.xlarge
-                      - r7a.xlarge
-                      - r6i.xlarge
-                expireAfter: 720h
-            disruption:
-              consolidationPolicy: WhenEmptyOrUnderutilized
-              consolidateAfter: 2m
-              budgets:
-                - nodes: "10%"
-            limits:
-              cpu: ${KarpenterCPULimit}
-              memory: 2400Gi
-            weight: 10
-          EOFKARPENTER
-
-          # ---- Install KEDA via Helm ----
-          helm repo add kedacore https://kedacore.github.io/charts
-          helm repo update kedacore
-          helm install keda kedacore/keda \
-            -n keda --create-namespace \
-            --wait --timeout 5m
-
-          # ---- Create gp3 StorageClass for V1FS database ----
-          kubectl wait --for=condition=ready pod -l app=ebs-csi-controller -n kube-system --timeout=300s
-          cat <<EOFGP3 | kubectl apply -f -
-          apiVersion: storage.k8s.io/v1
-          kind: StorageClass
-          metadata:
-            name: gp3
-          provisioner: ebs.csi.aws.com
-          parameters:
-            type: gp3
-            encrypted: "true"
-          volumeBindingMode: WaitForFirstConsumer
-          allowVolumeExpansion: true
-          EOFGP3
-
-          # ---- Create EFS StorageClass for V1FS scanner ephemeral volume ----
-          kubectl wait --for=condition=ready pod -l app=efs-csi-controller -n kube-system --timeout=300s
-          cat <<EOFSC | kubectl apply -f -
-          apiVersion: storage.k8s.io/v1
-          kind: StorageClass
-          metadata:
-            name: efs-sc
-          provisioner: efs.csi.aws.com
-          parameters:
-            provisioningMode: efs-ap
-            fileSystemId: ${EFSFileSystem}
-            directoryPerms: "700"
-            uid: "0"
-            gid: "0"
-            basePath: "/scanner"
-          mountOptions:
-            - tls
-          EOFSC
-
-          # ---- Install Vision One File Security via Helm (GPG-verified) ----
-          helm repo add visionone-filesecurity https://trendmicro.github.io/visionone-file-security-helm/
-          helm repo update
-          curl -o /tmp/public-key.asc https://trendmicro.github.io/visionone-file-security-helm/public-key.asc
-          gpg --import /tmp/public-key.asc
-          gpg --export > /root/.gnupg/pubring.gpg
-
-          # Verify chart signature (validation only - not used for install)
-          helm pull --verify visionone-filesecurity/visionone-filesecurity
-
-          # Install with scanner HPA enabled and increased resources for
-          # high-throughput scanning (no --wait; pods need time to register
-          # with Vision One cloud on first startup)
-          helm install my-release visionone-filesecurity/visionone-filesecurity \
-            -n visionone-filesecurity \
-            --set scanner.autoscaling.enabled=false \
-            --set scanner.resources.requests.cpu=800m \
-            --set scanner.resources.requests.memory=2Gi \
-            --set visiononeFilesecurity.management.dbEnabled=true \
-            --set databaseContainer.storageClass.create=false \
-            --set databaseContainer.persistence.storageClassName=gp3 \
-            --set databaseContainer.persistence.size=100Gi \
-            --set scanner.ephemeralVolume.enabled=true \
-            --set scanner.ephemeralVolume.storageClass=efs-sc \
-            --set scanner.ephemeralVolume.accessMode=ReadWriteMany \
-            --set scanner.ephemeralVolume.size=100Gi
-
-          # ---- Configure V1FS scan policy via CLISH ----
-          # The management service needs to be ready before we can run CLISH.
-          # Wait for the management-service deployment rollout, then apply
-          # scan policy settings from CloudFormation parameters.
-          echo "Waiting for V1FS management service to be ready..."
-          kubectl rollout status deployment/my-release-visionone-filesecurity-management-service \
-            -n visionone-filesecurity --timeout=180s
-
-          echo "Applying scan policy settings via CLISH..."
-          kubectl exec deploy/my-release-visionone-filesecurity-management-service \
-            -n visionone-filesecurity -- \
-            clish scanner scan-policy modify \
-              --max-decompression-layer=${MaxDecompressionLayer} \
-              --max-decompression-file-count=${MaxDecompressionFileCount} \
-              --max-decompression-ratio=${MaxDecompressionRatio} \
-              --max-decompression-size=${MaxDecompressionSize}
-
-          echo "Verifying scan policy..."
-          kubectl exec deploy/my-release-visionone-filesecurity-management-service \
-            -n visionone-filesecurity -- \
-            clish scanner scan-policy show
-
-          # ---- Install second V1FS release for review pipeline (no decompression limits) ----
-          # Uses a separate namespace because the Helm chart creates shared ServiceAccounts
-          # (e.g., backend-communicator) that conflict when two releases share a namespace.
-          kubectl create namespace visionone-review 2>/dev/null || true
-          kubectl create secret generic token-secret \
-            --from-literal=registration-token="$(kubectl get secret token-secret -n visionone-filesecurity -o jsonpath='{.data.registration-token}' | base64 -d)" \
-            -n visionone-review 2>/dev/null || true
-          kubectl create secret generic device-token-secret \
-            -n visionone-review 2>/dev/null || true
-
-          echo "Installing rv V1FS scanner (unlimited decompression)..."
-          helm install rv visionone-filesecurity/visionone-filesecurity \
-            -n visionone-review \
-            --set scanner.autoscaling.enabled=false \
-            --set scanner.resources.requests.cpu=800m \
-            --set scanner.resources.requests.memory=2Gi \
-            --set visiononeFilesecurity.management.dbEnabled=true \
-            --set databaseContainer.storageClass.create=false \
-            --set databaseContainer.persistence.storageClassName=gp3 \
-            --set databaseContainer.persistence.size=100Gi \
-            --set scanner.ephemeralVolume.enabled=true \
-            --set scanner.ephemeralVolume.storageClass=efs-sc \
-            --set scanner.ephemeralVolume.accessMode=ReadWriteMany \
-            --set scanner.ephemeralVolume.size=100Gi
-
-          # No CLISH scan-policy for rv — defaults are unlimited.
-          # The review pipeline re-scans files that exceeded limits in the main pipeline.
-
-          # ---- Install Docker (needed to build scanner app image) ----
-          apt-get install -y ca-certificates gnupg lsb-release
-          install -m 0755 -d /etc/apt/keyrings
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-            | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-          chmod a+r /etc/apt/keyrings/docker.gpg
-          echo \
-            "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-            https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
-            > /etc/apt/sources.list.d/docker.list
-          apt-get update -y
-          apt-get install -y docker-ce docker-ce-cli containerd.io
-          systemctl enable docker
-          systemctl start docker
-
-          # ---- Clone scanner app repo, build image, deploy to cluster ----
-          export CFN_STACK_NAME="${AWS::StackName}"
-          export AWS_REGION="${AWS::Region}"
-
-          # Pass resource values directly — stack Outputs are not available during CREATE_IN_PROGRESS
-          export ECR_REPO_URL="${ScannerAppECRRepo.RepositoryUri}"
-          export SQS_QUEUE_URL="${FileScanQueue}"
-          export S3_INGEST_BUCKET="${IngestBucket}"
-          export S3_CLEAN_BUCKET="${CleanBucket}"
-          export S3_QUARANTINE_BUCKET="${QuarantineBucket}"
-          export S3_REVIEW_BUCKET="${ReviewBucket}"
-          export V1FS_API_KEY_SECRET_ARN="${V1FSApiKeySecret}"
-          export AUDIT_LOG_GROUP="scan-audit-${AWS::StackName}"
-          export PML_ENABLED="${PMLEnabled}"
-          export MAX_FILE_SIZE_MB="${MaxFileSizeMB}"
-          export TM_AM_SCAN_TIMEOUT_SECS="${ScanTimeoutSeconds}"
-
-          git clone https://github.com/arcaniusdev/eks-v1fs.git /opt/eks-v1fs
-          chmod +x /opt/eks-v1fs/scripts/*.sh
-
-          /opt/eks-v1fs/scripts/build-and-push.sh
-          /opt/eks-v1fs/scripts/deploy.sh
-
-          # Deploy review scanner pipeline
-          export REVIEW_SQS_QUEUE_URL="${ReviewScanQueue}"
-          export REVIEW_AUDIT_LOG_GROUP="review-audit-${AWS::StackName}"
-          /opt/eks-v1fs/scripts/deploy.sh --review
-
-          # If we reach here, everything succeeded
-          SIGNAL_STATUS="SUCCESS"
-          echo "Bastion provisioning complete."
+            # If we reach here, everything succeeded
+            SIGNAL_STATUS="SUCCESS"
+            echo "Bastion provisioning complete."
+          - EcrRepoUrlValue: !If [ScannerAppEnabled, !GetAtt ScannerAppECRRepo.RepositoryUri, ""]
+            FileScanQueueValue: !If [ScannerAppEnabled, !Ref FileScanQueue, ""]
+            IngestBucketValue: !If
+              - ScannerAppEnabled
+              - !If [CreateIngestBucket, !Ref IngestBucket, !Ref ExistingIngestBucket]
+              - ""
+            CleanBucketValue: !If [ScannerAppEnabled, !Ref CleanBucket, ""]
+            QuarantineBucketValue: !If [ScannerAppEnabled, !Ref QuarantineBucket, ""]
+            ReviewBucketValue: !If [ReviewEnabled, !Ref ReviewBucket, ""]
+            AuditLogGroupValue: !If [ScannerAppEnabled, !Sub "scan-audit-${AWS::StackName}", ""]
+            ReviewQueueValue: !If [ReviewEnabled, !Ref ReviewScanQueue, ""]
+            ReviewAuditLogGroupValue: !If [ReviewEnabled, !Sub "review-audit-${AWS::StackName}", ""]
       Tags:
         - Key: Name
           Value: !Sub Bastion-${AWS::StackName}
@@ -1754,6 +1588,7 @@ Resources:
         - !Ref EFSSecGroup
 
   ScannerAppECRRepo:
+    Condition: ScannerAppEnabled
     Type: AWS::ECR::Repository
     Properties:
       ImageScanningConfiguration:
@@ -1767,6 +1602,7 @@ Resources:
           Value: !Sub ScannerAppECR-${AWS::StackName}
 
   IngestBucket:
+    Condition: CreateIngestBucket
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     DependsOn: SQSQueuePolicy
@@ -1799,6 +1635,7 @@ Resources:
           Value: file-scan-ingest
 
   CleanBucket:
+    Condition: ScannerAppEnabled
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Type: AWS::S3::Bucket
@@ -1819,6 +1656,7 @@ Resources:
           Value: file-scan-clean
 
   QuarantineBucket:
+    Condition: ScannerAppEnabled
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Type: AWS::S3::Bucket
@@ -1841,6 +1679,7 @@ Resources:
           Value: file-scan-quarantine
 
   ReviewScanDLQ:
+    Condition: ReviewEnabled
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub review-scan-dlq-${AWS::StackName}
@@ -1852,6 +1691,7 @@ Resources:
           Value: !Sub ReviewScanDLQ-${AWS::StackName}
 
   ReviewScanQueue:
+    Condition: ReviewEnabled
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub review-scan-queue-${AWS::StackName}
@@ -1867,6 +1707,7 @@ Resources:
           Value: !Sub ReviewScanQueue-${AWS::StackName}
 
   ReviewSQSQueuePolicy:
+    Condition: ReviewEnabled
     Type: AWS::SQS::QueuePolicy
     Properties:
       Queues:
@@ -1885,6 +1726,7 @@ Resources:
                 aws:SourceAccount: !Ref AWS::AccountId
 
   ReviewBucket:
+    Condition: ReviewEnabled
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     DependsOn: ReviewSQSQueuePolicy
@@ -1910,6 +1752,7 @@ Resources:
           Value: file-scan-review
 
   FileScanDLQ:
+    Condition: ScannerAppEnabled
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub file-scan-dlq-${AWS::StackName}
@@ -1921,6 +1764,7 @@ Resources:
           Value: !Sub FileScanDLQ-${AWS::StackName}
 
   FileScanQueue:
+    Condition: ScannerAppEnabled
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub file-scan-queue-${AWS::StackName}
@@ -1936,6 +1780,7 @@ Resources:
           Value: !Sub FileScanQueue-${AWS::StackName}
 
   SQSQueuePolicy:
+    Condition: ScannerAppEnabled
     Type: AWS::SQS::QueuePolicy
     Properties:
       Queues:
@@ -1952,8 +1797,121 @@ Resources:
             Condition:
               StringEquals:
                 aws:SourceAccount: !Ref AWS::AccountId
+          - !If
+            - UseExistingBucket
+            - Sid: AllowEventBridgeDelivery
+              Effect: Allow
+              Principal:
+                Service: events.amazonaws.com
+              Action: sqs:SendMessage
+              Resource: !GetAtt FileScanQueue.Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn: !GetAtt EventBridgeIngestRule.Arn
+            - !Ref AWS::NoValue
+
+  # --- Existing-bucket wiring (S3 -> EventBridge -> SQS) ---
+  # For customer-owned buckets we must not touch their notification
+  # configuration destructively: put-bucket-notification-configuration is a
+  # full-replace API. A merge Lambda reads the current configuration, adds
+  # EventBridgeConfiguration alongside whatever exists, and writes the merged
+  # document back. On stack Delete it is a NO-OP — we never mutate the
+  # customer's bucket on teardown.
+  EventBridgeIngestRule:
+    Condition: UseExistingBucket
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ingest-object-created-${AWS::StackName}
+      Description: Route Object Created events from the existing ingest bucket to the scan queue
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+              - !Ref ExistingIngestBucket
+      Targets:
+        - Id: FileScanQueueTarget
+          Arn: !GetAtt FileScanQueue.Arn
+
+  EnableEventBridgeRole:
+    Condition: UseExistingBucket
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub EnableEventBridgeRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: MergeBucketNotification
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketNotification
+                  - s3:PutBucketNotification
+                Resource: !Sub arn:aws:s3:::${ExistingIngestBucket}
+
+  EnableEventBridgeFunction:
+    Condition: UseExistingBucket
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub enable-eventbridge-${AWS::StackName}
+      Runtime: python3.12
+      Timeout: 60
+      Handler: index.handler
+      Role: !GetAtt EnableEventBridgeRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              # Delete is a no-op: never mutate the customer's bucket on
+              # teardown — other consumers may rely on EventBridge by then.
+              if event['RequestType'] == 'Delete':
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  return
+              try:
+                  bucket = event['ResourceProperties']['BucketName']
+                  s3 = boto3.client('s3')
+                  config = s3.get_bucket_notification_configuration(Bucket=bucket)
+                  config.pop('ResponseMetadata', None)
+                  if 'EventBridgeConfiguration' in config:
+                      print(f"EventBridge already enabled on {bucket}")
+                  else:
+                      # MERGE: preserve every existing Queue/Topic/Lambda
+                      # configuration and add EventBridge alongside them.
+                      config['EventBridgeConfiguration'] = {}
+                      s3.put_bucket_notification_configuration(
+                          Bucket=bucket,
+                          NotificationConfiguration=config,
+                      )
+                      print(f"EventBridge enabled on {bucket} (merged with existing config)")
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print(f"Failed to enable EventBridge: {e}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+
+  EnableBucketEventBridge:
+    Condition: UseExistingBucket
+    Type: Custom::EnableBucketEventBridge
+    Properties:
+      ServiceToken: !GetAtt EnableEventBridgeFunction.Arn
+      BucketName: !Ref ExistingIngestBucket
 
   ScannerAppRole:
+    Condition: ScannerAppEnabled
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub ScannerAppRole-${AWS::StackName}
@@ -1978,18 +1936,34 @@ Resources:
                   - sqs:DeleteMessage
                   - sqs:GetQueueAttributes
                   - sqs:ChangeMessageVisibility
+                  # SendMessage: reconciliation re-queues orphaned files when
+                  # the review pipeline (which otherwise runs it) is disabled
+                  - sqs:SendMessage
                 Resource: !GetAtt FileScanQueue.Arn
-              - Sid: S3IngestRead
-                Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:DeleteObject
-                Resource: !Sub ${IngestBucket.Arn}/*
+              # Created-bucket mode: read + delete after routing.
+              # Existing-customer-bucket mode: read + tag verdicts, NEVER delete.
+              - !If
+                - CreateIngestBucket
+                - Sid: S3IngestRead
+                  Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:DeleteObject
+                  Resource: !Sub ${IngestBucket.Arn}/*
+                - Sid: S3ExistingIngestRead
+                  Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:PutObjectTagging
+                  Resource: !Sub arn:aws:s3:::${ExistingIngestBucket}/*
               - Sid: S3IngestList
                 Effect: Allow
                 Action:
                   - s3:ListBucket
-                Resource: !GetAtt IngestBucket.Arn
+                Resource: !If
+                  - CreateIngestBucket
+                  - !GetAtt IngestBucket.Arn
+                  - !Sub arn:aws:s3:::${ExistingIngestBucket}
               - Sid: S3CleanWrite
                 Effect: Allow
                 Action:
@@ -2002,12 +1976,15 @@ Resources:
                   - s3:PutObject
                   - s3:PutObjectTagging
                 Resource: !Sub ${QuarantineBucket.Arn}/*
-              - Sid: S3ReviewWrite
-                Effect: Allow
-                Action:
-                  - s3:PutObject
-                  - s3:PutObjectTagging
-                Resource: !Sub ${ReviewBucket.Arn}/*
+              - !If
+                - ReviewEnabled
+                - Sid: S3ReviewWrite
+                  Effect: Allow
+                  Action:
+                    - s3:PutObject
+                    - s3:PutObjectTagging
+                  Resource: !Sub ${ReviewBucket.Arn}/*
+                - !Ref AWS::NoValue
               - Sid: SecretsManagerApiKey
                 Effect: Allow
                 Action:
@@ -2024,6 +2001,7 @@ Resources:
           Value: !Sub ScannerAppRole-${AWS::StackName}
 
   ScannerAppPodIdentity:
+    Condition: ScannerAppEnabled
     DependsOn: PodIdentityAgentAddon
     Type: AWS::EKS::PodIdentityAssociation
     Properties:
@@ -2035,6 +2013,7 @@ Resources:
   # --- Monitoring & Observability ---
 
   ScanAuditLogGroup:
+    Condition: ScannerAppEnabled
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub scan-audit-${AWS::StackName}
@@ -2044,6 +2023,7 @@ Resources:
           Value: !Sub ScanAuditLogGroup-${AWS::StackName}
 
   AlarmSNSTopic:
+    Condition: ScannerAppEnabled
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub scan-alarms-${AWS::StackName}
@@ -2052,6 +2032,7 @@ Resources:
           Value: !Sub AlarmSNSTopic-${AWS::StackName}
 
   DLQAlarm:
+    Condition: ScannerAppEnabled
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub DLQ-Messages-${AWS::StackName}
@@ -2073,6 +2054,7 @@ Resources:
         - !Ref AlarmSNSTopic
 
   QueueAgeAlarm:
+    Condition: ScannerAppEnabled
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub Queue-Age-${AWS::StackName}
@@ -2096,6 +2078,7 @@ Resources:
   # --- DLQ Remediation ---
 
   DLQRemediationRole:
+    Condition: ScannerAppEnabled
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub DLQRemediationRole-${AWS::StackName}
@@ -2127,6 +2110,7 @@ Resources:
                 Resource: !GetAtt FileScanQueue.Arn
 
   DLQRemediationLambda:
+    Condition: ScannerAppEnabled
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub dlq-remediation-${AWS::StackName}
@@ -2187,6 +2171,7 @@ Resources:
                       print(f"ERROR: Failed to re-queue message {msg_id}: {e}")
 
   DLQEventSourceMapping:
+    Condition: ScannerAppEnabled
     Type: AWS::Lambda::EventSourceMapping
     Properties:
       EventSourceArn: !GetAtt FileScanDLQ.Arn
@@ -2197,6 +2182,7 @@ Resources:
   # --- Review Pipeline ---
 
   ReviewScannerAppRole:
+    Condition: ReviewEnabled
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub ReviewScannerAppRole-${AWS::StackName}
@@ -2237,7 +2223,10 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:ListBucket
-                Resource: !GetAtt IngestBucket.Arn
+                Resource: !If
+                  - CreateIngestBucket
+                  - !GetAtt IngestBucket.Arn
+                  - !Sub arn:aws:s3:::${ExistingIngestBucket}
               - Sid: SQSMainQueueSendForReconciliation
                 Effect: Allow
                 Action:
@@ -2271,6 +2260,7 @@ Resources:
           Value: !Sub ReviewScannerAppRole-${AWS::StackName}
 
   ReviewScannerAppPodIdentity:
+    Condition: ReviewEnabled
     DependsOn: PodIdentityAgentAddon
     Type: AWS::EKS::PodIdentityAssociation
     Properties:
@@ -2280,6 +2270,7 @@ Resources:
       RoleArn: !GetAtt ReviewScannerAppRole.Arn
 
   ReviewAuditLogGroup:
+    Condition: ReviewEnabled
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub review-audit-${AWS::StackName}
@@ -2289,6 +2280,7 @@ Resources:
           Value: !Sub ReviewAuditLogGroup-${AWS::StackName}
 
   ReviewDLQAlarm:
+    Condition: ReviewEnabled
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub Review-DLQ-Messages-${AWS::StackName}
@@ -2310,6 +2302,7 @@ Resources:
         - !Ref AlarmSNSTopic
 
   ReviewDLQRemediationRole:
+    Condition: ReviewEnabled
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub ReviewDLQRemRole-${AWS::StackName}
@@ -2341,6 +2334,7 @@ Resources:
                 Resource: !GetAtt ReviewScanQueue.Arn
 
   ReviewDLQRemediationLambda:
+    Condition: ReviewEnabled
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub review-dlq-remediation-${AWS::StackName}
@@ -2377,6 +2371,7 @@ Resources:
                       print(f"ERROR: Failed to re-queue message {msg_id}: {e}")
 
   ReviewDLQEventSourceMapping:
+    Condition: ReviewEnabled
     Type: AWS::Lambda::EventSourceMapping
     Properties:
       EventSourceArn: !GetAtt ReviewScanDLQ.Arn
@@ -2387,6 +2382,7 @@ Resources:
   # --- Dashboard ---
 
   ScannerDashboard:
+    Condition: ScannerAppEnabled
     Type: AWS::CloudWatch::Dashboard
     Properties:
       DashboardName: !Sub scanner-${AWS::StackName}
@@ -2530,56 +2526,89 @@ Outputs:
     Description: SSM Parameter Store path for the private key
     Value: !Sub /ec2/keypair/${BastionKeyPair.KeyPairId}
   IngestBucketName:
+    Condition: ScannerAppEnabled
     Description: S3 bucket for incoming files to scan
-    Value: !Ref IngestBucket
+    Value: !If [CreateIngestBucket, !Ref IngestBucket, !Ref ExistingIngestBucket]
   CleanBucketName:
+    Condition: ScannerAppEnabled
     Description: S3 bucket for files that passed scanning
     Value: !Ref CleanBucket
   QuarantineBucketName:
+    Condition: ScannerAppEnabled
     Description: S3 bucket for malicious files
     Value: !Ref QuarantineBucket
   ReviewBucketName:
+    Condition: ReviewEnabled
     Description: S3 bucket for files requiring manual review (decompression limits exceeded)
     Value: !Ref ReviewBucket
   ReviewScanQueueUrl:
+    Condition: ReviewEnabled
     Description: SQS queue URL for review bucket scan events
     Value: !Ref ReviewScanQueue
   ReviewScanDLQUrl:
+    Condition: ReviewEnabled
     Description: SQS dead letter queue URL for failed review scans
     Value: !Ref ReviewScanDLQ
   ReviewAuditLogGroupName:
+    Condition: ReviewEnabled
     Description: CloudWatch log group for review scan audit trail
     Value: !Ref ReviewAuditLogGroup
   FileScanQueueUrl:
+    Condition: ScannerAppEnabled
     Description: SQS queue URL for S3 file events
     Value: !Ref FileScanQueue
   FileScanQueueArn:
+    Condition: ScannerAppEnabled
     Description: SQS queue ARN for S3 file events
     Value: !GetAtt FileScanQueue.Arn
   FileScanDLQUrl:
+    Condition: ScannerAppEnabled
     Description: SQS dead letter queue URL for failed processing
     Value: !Ref FileScanDLQ
   ScannerAppRoleArn:
+    Condition: ScannerAppEnabled
     Description: IAM role ARN for the scanner app pod (via Pod Identity)
     Value: !GetAtt ScannerAppRole.Arn
   ECRRepoUrl:
+    Condition: ScannerAppEnabled
     Description: ECR repository URL for the scanner app container image
     Value: !GetAtt ScannerAppECRRepo.RepositoryUri
   KedaOperatorRoleArn:
+    Condition: ScannerAppEnabled
     Description: IAM role ARN for the KEDA operator (SQS metrics)
     Value: !GetAtt KedaOperatorRole.Arn
-  KarpenterControllerRoleArn:
-    Description: IAM role ARN for the Karpenter controller
-    Value: !GetAtt KarpenterControllerRole.Arn
+  ClusterAutoscalerRoleArn:
+    Description: IAM role ARN for the Cluster Autoscaler
+    Value: !GetAtt ClusterAutoscalerRole.Arn
   EFSFileSystemId:
     Description: EFS filesystem ID for scanner ephemeral volume
     Value: !Ref EFSFileSystem
   ScanAuditLogGroupName:
+    Condition: ScannerAppEnabled
     Description: CloudWatch log group for scan audit trail
     Value: !Ref ScanAuditLogGroup
   AlarmSNSTopicArn:
+    Condition: ScannerAppEnabled
     Description: SNS topic ARN for scan alarms (subscribe for notifications)
     Value: !Ref AlarmSNSTopic
   DashboardUrl:
+    Condition: ScannerAppEnabled
     Description: CloudWatch dashboard URL for the scanner pipeline
     Value: !Sub https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards/dashboard/scanner-${AWS::StackName}
+  ScannerEndpointParameter:
+    Condition: ExposeEndpoint
+    Description: SSM parameter holding the scanner gRPC endpoint address (published by the bastion once the load balancer is provisioned)
+    Value: !Sub /${AWS::StackName}/scanner-endpoint
+  ScannerEndpointInstructions:
+    Condition: ExposeEndpoint
+    Description: How to connect an external scanning application
+    Value: !If
+      - ExposeNLB
+      - !Sub >-
+        Read the endpoint from SSM parameter /${AWS::StackName}/scanner-endpoint,
+        then connect with the V1FS SDK from inside the VPC:
+        amaas.grpc.init("<endpoint>", api_key, False) — plaintext gRPC on :50051 (VPC-internal NLB).
+      - !Sub >-
+        Create a DNS CNAME from ${ScannerDomain} to the ALB hostname (see SSM
+        parameter /${AWS::StackName}/scanner-endpoint), then connect with TLS:
+        amaas.grpc.init("${ScannerDomain}:443", api_key, True).

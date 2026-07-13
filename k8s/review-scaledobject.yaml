@@ -30,26 +30,6 @@ spec:
         scaleOnInFlight: "true"
       authenticationRef:
         name: sqs-trigger-auth
----
-apiVersion: keda.sh/v1alpha1
-kind: ScaledObject
-metadata:
-  name: review-v1fs-scanner-sqs-scaler
-  namespace: visionone-review
-spec:
-  scaleTargetRef:
-    name: rv-visionone-filesecurity-scanner
-    kind: Deployment
-  minReplicaCount: 1
-  maxReplicaCount: 5
-  pollingInterval: 5
-  cooldownPeriod: 300
-  triggers:
-    - type: aws-sqs-queue
-      metadata:
-        queueURL: "<SQS_QUEUE_URL>"
-        queueLength: "50"
-        awsRegion: "<AWS_REGION>"
-        scaleOnInFlight: "true"
-      authenticationRef:
-        name: sqs-trigger-auth
+# NOTE: KEDA scales ONLY our review-scanner-app deployment. The rv V1FS
+# scanner (chart-owned) scales via the Helm chart's built-in HPA
+# (scanner.autoscaling.enabled=true) — the Trend-supported mechanism.

@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-Safely upgrade both V1FS Helm releases (my-release and rv)
-while preserving all custom values required by the EKS scanning pipeline.
+Safely upgrade the V1FS Helm release(s) while preserving installed values.
+
+The main release (my-release) is always upgraded; the review release (rv)
+is upgraded only if it is installed. Install-time values are preserved by
+capturing `helm get values` for each release and re-applying them, layered
+on top of helm/values-base.yaml (the repo's single source of truth). Live
+HPA min/max replicas are read from the cluster so operator tuning survives
+the upgrade.
 
 Usage:
     python3 upgrade.py [--version VERSION] [--dry-run] [--skip-sanity]
@@ -10,26 +16,13 @@ Run from the bastion host via SSM. Requires helm, kubectl, and aws CLI.
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
 
-# Custom Helm values that MUST be specified on every upgrade.
-# A plain `helm upgrade` without these reverts to chart defaults,
-# re-enabling HPA (conflicts with KEDA) and resetting resources.
-CUSTOM_VALUES = {
-    "scanner.autoscaling.enabled": "false",
-    "scanner.resources.requests.cpu": "800m",
-    "scanner.resources.requests.memory": "2Gi",
-    "visiononeFilesecurity.management.dbEnabled": "true",
-    "databaseContainer.storageClass.create": "false",
-    "databaseContainer.persistence.storageClassName": "gp3",
-    "databaseContainer.persistence.size": "100Gi",
-    "scanner.ephemeralVolume.enabled": "true",
-    "scanner.ephemeralVolume.storageClass": "efs-sc",
-    "scanner.ephemeralVolume.accessMode": "ReadWriteMany",
-    "scanner.ephemeralVolume.size": "100Gi",
-}
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+VALUES_BASE = os.path.join(SCRIPT_DIR, "..", "helm", "values-base.yaml")
 
 # CLISH scan policy field names mapped to their modify flag names.
 CLISH_FIELD_MAP = {
@@ -41,10 +34,6 @@ CLISH_FIELD_MAP = {
 
 NAMESPACE = "visionone-filesecurity"
 REVIEW_NAMESPACE = "visionone-review"
-RELEASES = [
-    ("my-release", NAMESPACE),
-    ("rv", REVIEW_NAMESPACE),
-]
 MGMT_DEPLOY = "my-release-visionone-filesecurity-management-service"
 
 
@@ -60,6 +49,16 @@ def run(cmd, check=True, capture=True):
         print(f"ERROR: Command failed with exit code {result.returncode}")
         sys.exit(1)
     return result
+
+
+def discover_releases():
+    """Return [(release, namespace)] — my-release always, rv only if installed."""
+    releases = [("my-release", NAMESPACE)]
+    result = run(f"helm list -n {REVIEW_NAMESPACE} -f '^rv$' -o json", check=False)
+    if result.returncode == 0 and result.stdout.strip():
+        if json.loads(result.stdout):
+            releases.append(("rv", REVIEW_NAMESPACE))
+    return releases
 
 
 def get_current_scan_policy():
@@ -97,13 +96,50 @@ def get_installed_version(release, namespace):
     return "unknown", "unknown"
 
 
-def build_upgrade_cmd(release, namespace, version=None):
-    """Build the helm upgrade command with all custom values."""
-    cmd = f"helm upgrade {release} visionone-filesecurity/visionone-filesecurity -n {namespace}"
+def capture_release_values(release, namespace):
+    """Save the release's user-supplied values to a temp file; return its path."""
+    path = f"/tmp/upgrade-values-{release}.yaml"
+    result = run(f"helm get values {release} -n {namespace} -o yaml", check=False)
+    content = result.stdout if result.returncode == 0 else ""
+    if content.strip() in ("", "null"):
+        content = "{}\n"
+    with open(path, "w") as f:
+        f.write(content)
+    print(f"  Captured install-time values → {path}")
+    return path
+
+
+def get_live_hpa_bounds(namespace):
+    """Read min/max replicas from the chart scanner's live HPA (operator tuning)."""
+    result = run(f"kubectl get hpa -n {namespace} -o json", check=False)
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        items = json.loads(result.stdout).get("items", [])
+    except json.JSONDecodeError:
+        return None
+    for hpa in items:
+        target = hpa.get("spec", {}).get("scaleTargetRef", {}).get("name", "")
+        if "visionone-filesecurity-scanner" in target:
+            spec = hpa["spec"]
+            return spec.get("minReplicas", 1), spec.get("maxReplicas")
+    return None
+
+
+def build_upgrade_cmd(release, namespace, values_file, hpa_bounds, version=None):
+    """Build the helm upgrade command: base values + preserved install values + live HPA bounds."""
+    cmd = (
+        f"helm upgrade {release} visionone-filesecurity/visionone-filesecurity "
+        f"-n {namespace} -f {VALUES_BASE} -f {values_file}"
+    )
     if version:
         cmd += f" --version {version}"
-    for key, val in CUSTOM_VALUES.items():
-        cmd += f" --set {key}={val}"
+    if hpa_bounds:
+        min_r, max_r = hpa_bounds
+        if min_r:
+            cmd += f" --set scanner.autoscaling.minReplicas={min_r}"
+        if max_r:
+            cmd += f" --set scanner.autoscaling.maxReplicas={max_r}"
     return cmd
 
 
@@ -115,15 +151,17 @@ def main():
     args = parser.parse_args()
 
     print("=" * 70)
-    print("V1FS Scanner Upgrade — Safe Upgrade with Custom Values")
+    print("V1FS Scanner Upgrade — Safe Upgrade with Preserved Values")
     print("=" * 70)
 
     # Step 0: Ensure environment is set up
     print("\n[0/8] Setting up environment...")
-    import os
     if not os.environ.get("KUBECONFIG"):
         os.environ["KUBECONFIG"] = "/root/.kube/config"
         print("  Set KUBECONFIG=/root/.kube/config")
+    if not os.path.isfile(VALUES_BASE):
+        print(f"ERROR: {VALUES_BASE} not found — run from the repo checkout.")
+        sys.exit(1)
     # Ensure helm repo is added (idempotent)
     run(
         "helm repo add visionone-filesecurity "
@@ -131,9 +169,12 @@ def main():
         check=False,
     )
 
+    releases = discover_releases()
+    print(f"  Releases to upgrade: {', '.join(r for r, _ in releases)}")
+
     # Step 1: Check current versions
     print("\n[1/8] Checking current versions...")
-    for release, ns in RELEASES:
+    for release, ns in releases:
         chart, app = get_installed_version(release, ns)
         print(f"  {release} ({ns}): chart={chart}, app_version={app}")
 
@@ -169,10 +210,17 @@ def main():
                     print("  Use --version X.Y.Z to force a specific version.")
                     return
 
-    # Step 4: Upgrade both releases
-    for release, ns in RELEASES:
+    # Step 4: Upgrade releases, preserving each release's installed values
+    for release, ns in releases:
         print(f"\n[4/8] Upgrading {release} in {ns}...")
-        cmd = build_upgrade_cmd(release, ns, args.version)
+        values_file = capture_release_values(release, ns)
+        hpa_bounds = get_live_hpa_bounds(ns)
+        if hpa_bounds:
+            print(f"  Live HPA bounds: min={hpa_bounds[0]}, max={hpa_bounds[1]}")
+        else:
+            print("  WARNING: No HPA found for the chart scanner — "
+                  "expected scanner.autoscaling.enabled=true. Proceeding with values-file bounds.")
+        cmd = build_upgrade_cmd(release, ns, values_file, hpa_bounds, args.version)
         if args.dry_run:
             print(f"  DRY RUN: {cmd}")
         else:
@@ -202,25 +250,34 @@ def main():
             )
     print("  NOTE: rv intentionally has NO scan policy (unlimited decompression).")
 
-    # Step 6: Verify no HPA conflict
-    print("\n[6/8] Checking for HPA conflicts...")
-    result = run(f"kubectl get hpa -n {NAMESPACE} --no-headers 2>&1", check=False)
-    if result.stdout.strip() and "No resources found" not in result.stdout:
-        print("  WARNING: HPA detected! This conflicts with KEDA. Deleting...")
-        if not args.dry_run:
-            run(f"kubectl delete hpa -n {NAMESPACE} --all")
-    else:
-        print("  OK — no HPA found.")
+    # Step 6: Verify autoscaling state — the chart's HPA MUST exist, and KEDA
+    # must scale only our scanner-app (never the chart-owned scanner).
+    print("\n[6/8] Verifying autoscaling state...")
+    for release, ns in releases:
+        if get_live_hpa_bounds(ns):
+            print(f"  OK — chart HPA present in {ns}.")
+        else:
+            print(f"  WARNING: No HPA for the chart scanner in {ns}! "
+                  f"The chart should manage its own HPA (scanner.autoscaling.enabled=true). "
+                  f"Check: helm get values {release} -n {ns}")
+    result = run("kubectl get scaledobject -A -o json", check=False)
+    if result.returncode == 0 and result.stdout.strip():
+        try:
+            for so in json.loads(result.stdout).get("items", []):
+                target = so.get("spec", {}).get("scaleTargetRef", {}).get("name", "")
+                name = so.get("metadata", {}).get("name", "?")
+                if "visionone-filesecurity-scanner" in target:
+                    print(f"  WARNING: ScaledObject {name} targets the chart-owned scanner "
+                          f"({target}) — this conflicts with the chart HPA. Delete it.")
+                else:
+                    print(f"  OK — ScaledObject {name} targets {target}.")
+        except json.JSONDecodeError:
+            pass
 
-    # Step 7: Verify ScaledObjects and pods
+    # Step 7: Verify pods
     print("\n[7/8] Verifying infrastructure...")
-    run(f"kubectl get scaledobject -n {NAMESPACE}")
-    run(f"kubectl get pods -n {NAMESPACE}")
-    print("\n  Scanner pod resources:")
-    run(
-        f"kubectl describe pod -n {NAMESPACE} -l app.kubernetes.io/component=scanner 2>&1 "
-        f"| grep -A 3 'Requests:' | head -20"
-    )
+    for _, ns in releases:
+        run(f"kubectl get pods -n {ns}")
 
     # Step 8: Sanity scan
     if args.skip_sanity:
@@ -230,12 +287,14 @@ def main():
         if args.dry_run:
             print("  DRY RUN: Would upload clean + EICAR test files")
         else:
-            # Get ingest bucket from scanner-app configmap
+            # Get ingest bucket from scanner-app configmap (absent when the
+            # scanner-app module is not deployed)
             result = run(
                 f"kubectl get configmap scanner-app-config -n {NAMESPACE} "
-                f"-o jsonpath='{{.data.S3_INGEST_BUCKET}}'",
+                f"-o jsonpath='{{.data.S3_INGEST_BUCKET}}' 2>/dev/null",
+                check=False,
             )
-            ingest = result.stdout.strip().strip("'")
+            ingest = result.stdout.strip().strip("'") if result.returncode == 0 else ""
             if ingest:
                 print(f"  Ingest bucket: {ingest}")
                 run(f"echo 'upgrade-sanity-clean' | aws s3 cp - s3://{ingest}/upgrade-sanity-clean.txt")
@@ -250,12 +309,29 @@ def main():
                     f"| grep -E 'upgrade-sanity'"
                 )
             else:
-                print("  WARNING: Could not determine ingest bucket. Skipping sanity scan.")
+                # Scanner-app module not deployed — point at the external endpoint instead
+                print("  scanner-app not deployed — checking published scanner endpoint...")
+                stack = os.environ.get("CFN_STACK_NAME", "")
+                ep = ""
+                if stack:
+                    result = run(
+                        f"aws ssm get-parameter --name /{stack}/scanner-endpoint "
+                        f"--query Parameter.Value --output text 2>/dev/null",
+                        check=False,
+                    )
+                    if result.returncode == 0:
+                        ep = result.stdout.strip()
+                if ep:
+                    print(f"  Scanner endpoint: {ep}")
+                    print("  Manual sanity scan (from a host with the V1FS SDK):")
+                    print(f"    python3 -c \"import amaas.grpc; h=amaas.grpc.init('{ep}', API_KEY, False); ...\"")
+                else:
+                    print("  No scanner-app and no published endpoint found — skipping sanity scan.")
 
     # Summary
     print("\n" + "=" * 70)
     print("Upgrade complete.")
-    for release, ns in RELEASES:
+    for release, ns in releases:
         chart, app = get_installed_version(release, ns)
         print(f"  {release} ({ns}): chart={chart}, app_version={app}")
     print("=" * 70)

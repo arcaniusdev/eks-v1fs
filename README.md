@@ -1,82 +1,142 @@
 # EKS Vision One File Security Scanner
 
-High performance malware scanning pipeline on AWS. Files uploaded to an S3 bucket are automatically scanned using [TrendAI Vision One File Security](https://docs.trendmicro.com/en-us/documentation/article/trend-vision-one-file-security-intro-origin) and routed to a clean bucket, review bucket, or quarantine bucket based on the scan result.
+Malware scanning on AWS, deployed the way TrendAI supports it. A single CloudFormation template provisions an EKS cluster running [TrendAI Vision One File Security](https://docs.trendmicro.com/en-us/documentation/article/trend-vision-one-file-security-intro-origin) — and, optionally, a complete S3 scanning pipeline where files uploaded to an S3 bucket are automatically scanned and routed to a clean bucket or quarantine bucket based on the verdict.
 
-Everything deploys from a single CloudFormation template — the EKS cluster, networking, storage, queues, IAM, and the scanner application itself.
+Everything deploys from one template — the EKS cluster, networking, storage, the scanner itself, and (if enabled) the queues, buckets, IAM, and scanning application.
 
 ## What is Vision One File Security?
 
 Vision One File Security is TrendAI's malware scanning service for files. It uses multiple detection engines — pattern matching, heuristics, and predictive machine learning (PML) — to identify threats in files of any type.
 
-In this project, the scanner runs **inside the Kubernetes cluster** as a set of pods deployed via Helm. The scanner app communicates with these pods over gRPC to scan files, and the scanner pods phone home to the Vision One cloud for threat intelligence updates and to report results.
+In this project, the scanner runs **inside the Kubernetes cluster** as a set of pods deployed via the official Helm chart. Scanning applications communicate with these pods over gRPC to scan files, and the scanner pods phone home to the Vision One cloud for threat intelligence updates and to report results.
 
 This means files are scanned locally within your VPC — they are never uploaded to an external service.
 
 For more information, see the [Vision One File Security Helm chart repository](https://trendmicro.github.io/visionone-file-security-helm/).
 
+## Architecture Realignment (July 2026)
+
+This deployment was realigned with **TrendAI's supported deployment methodology** so that POCs deploy a configuration TrendAI can support, rather than a custom high-performance variant. If you are evaluating Vision One File Security, what you deploy here is what TrendAI documents and supports.
+
+What changed:
+
+- **The V1FS scanner scales with the Helm chart's own HPA** (`scanner.autoscaling.enabled=true`, CPU 80% / memory 80% targets) — the Trend-supported autoscaling mechanism. KEDA no longer touches the chart-owned scanner; it scales only our optional scanner-app.
+- **Karpenter was removed.** The cluster uses one managed node group with the standard Kubernetes Cluster Autoscaler — the conventional, supported node-scaling path.
+- **The S3/SQS scanning application is now an optional module** (`DeployScannerApp`, default on). Turn it off and the stack is a clean TrendAI V1FS deployment plus a scanner endpoint for your own application.
+- **The review pipeline is optional and off by default** (`DeployReviewPipeline`). Without it, files that exceed decompression limits are quarantined with explanatory tags rather than passed as clean.
+- **The Helm chart is pinned to version 1.4.10**, with all custom values consolidated in `helm/values-base.yaml` — the single source of truth for install and upgrades.
+- **New deployment options**: scan an existing S3 bucket you already own (`ExistingIngestBucket`), and expose the scanner endpoint via an internal NLB (default) or a TLS ALB (`ScannerEndpointMode`).
+
+**Scaling expectations changed with it.** The chart HPA plus Cluster Autoscaler reacts in roughly 1–3 minutes (HPA metrics window + node provisioning), which is normal, expected POC behavior. The previous architecture's high-scale benchmarks (150-pod fleets, thousands of concurrent scans) no longer apply — this deployment favors supportability over peak throughput.
+
+**There is no in-place migration** from pre-realignment (Karpenter-era) stacks. Delete the old stack and deploy a new one.
+
+## Deployment Modes
+
+Four parameter combinations cover the common cases:
+
+| Mode | DeployScannerApp | DeployReviewPipeline | ExistingIngestBucket | ScannerEndpointMode | What you get |
+|---|---|---|---|---|---|
+| **Default (full auto-scan)** | `true` | `false` | *(empty)* | `nlb` | Complete pipeline: new ingest bucket → SQS → scanner-app → clean/quarantine. Decompression-limit files are quarantined with tags. Scanner endpoint also published for ad-hoc use. |
+| **Endpoint-only (bring your own app)** | `false` | `false` | — | `nlb` or `alb` | Just the TrendAI V1FS scanner on EKS plus a gRPC endpoint. No buckets, queues, ECR, scanner-app IAM, DLQ Lambdas, dashboard, or KEDA. Connect your own application via the SDK. |
+| **Existing bucket** | `true` | `false` | *your bucket name* | any | Scans a bucket you already own via S3 → EventBridge → SQS. Source objects are **tagged** with the verdict, never deleted. Verdict copies still land in clean/quarantine. |
+| **Full + review pipeline** | `true` | `true` | *(empty or set)* | any | Adds a second V1FS release with unlimited decompression that re-scans archives exceeding the main scanner's limits before a final clean/quarantine verdict. |
+
+CloudFormation Rules enforce the valid combinations: `DeployReviewPipeline=true` requires `DeployScannerApp=true`, and `ScannerEndpointMode=alb` requires both `ACMCertificateArn` and `ScannerDomain`.
+
 ## How It Works
 
-The pipeline has two stages: a **main pipeline** that scans every file with decompression limits enforced, and a **review pipeline** that re-scans files whose archives exceeded those limits with no restrictions.
+The core of every deployment is the TrendAI V1FS scanner, installed via the official Helm chart and scaled by the chart's own HPA. The scanning application and review pipeline are optional modules layered on top:
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│ MAIN PIPELINE (decompression limits enforced)                          │
-│                                                                        │
-│  S3 Ingest ──▶ SQS Queue ──▶ Scanner App ──▶ V1FS Scanner (gRPC)      │
-│                    │                               │                   │
-│                    ▼                         ┌─────┼──────┐            │
-│              DLQ (3 fails)                CLEAN  REVIEW  MALICIOUS     │
-│                    │                        │      │       │           │
-│             Lambda auto-retry               ▼      │       ▼          │
-│            (backoff → discard)        Clean Bucket  │  Quarantine      │
-│                                                    ▼                   │
-├─────────────────────────────────────── Review Bucket ──────────────────┤
-│                                            │                           │
-│ REVIEW PIPELINE (no decompression limits)  │                           │
-│                                            ▼                           │
-│                               Review SQS Queue                        │
-│                                    │                                   │
-│                                    ▼                                   │
-│                            Review Scanner ──▶ V1FS rv (no limits)      │
-│                                                    │                   │
-│                              Review DLQ      ┌─────┴─────┐            │
-│                                │           CLEAN      MALICIOUS        │
-│                         Lambda auto-retry    │           │             │
-│                                              ▼           ▼             │
-│                                        Clean Bucket  Quarantine        │
-└─────────────────────────────────────────────────────────────────────────┘
+                        ┌────────────────────────────────────────────────────┐
+                        │ EKS CLUSTER                                        │
+                        │                                                    │
+  Your own app ─────────┼──▶ NLB / ALB ──▶ TrendAI V1FS Scanner              │
+  (SDK over gRPC)       │   (optional        Helm chart 1.4.10               │
+                        │    endpoint)       chart HPA: 1–10 pods            │
+                        │                    (CPU 80% / memory 80%)          │
+                        │                        ▲ gRPC :50051               │
+                        │                        │                           │
+                        │  ┌─────────────────────┴──────────────────────┐    │
+                        │  │ OPTIONAL: scanner-app module               │    │
+  S3 Ingest ──▶ SQS ────┼──┼─▶ scanner-app pods (KEDA, 1–20)            │    │
+  (created or           │  │   route to Clean / Quarantine buckets      │    │
+   existing bucket)     │  └────────────────────────────────────────────┘    │
+                        │                                                    │
+                        │  ┌────────────────────────────────────────────┐    │
+                        │  │ OPTIONAL: review pipeline                  │    │
+  Review bucket ─▶ SQS ─┼──┼─▶ review-scanner-app ─▶ V1FS "rv" release  │    │
+                        │  │   (no decompression limits)                │    │
+                        │  └────────────────────────────────────────────┘    │
+                        └────────────────────────────────────────────────────┘
+```
+
+With the scanner-app module enabled (the default), the full pipeline looks like this:
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│ MAIN PIPELINE (decompression limits enforced)                            │
+│                                                                          │
+│  S3 Ingest ──▶ SQS Queue ──▶ Scanner App ──▶ V1FS Scanner (gRPC)         │
+│                    │                               │                     │
+│                    ▼                     ┌─────────┼──────────┐          │
+│              DLQ (3 fails)             CLEAN   DECOMP-LIMIT  MALICIOUS   │
+│                    │                     │         │            │        │
+│             Lambda auto-retry            ▼         │            ▼        │
+│            (backoff → discard)     Clean Bucket    │      Quarantine     │
+│                                                    ▼                     │
+│              review OFF (default): Quarantine + explanatory tags        │
+│              review ON:            Review Bucket ──▶ review pipeline    │
+├──────────────────────────────────────────────────────────────────────────┤
+│ REVIEW PIPELINE (optional, no decompression limits)                      │
+│                                                                          │
+│  Review Bucket ──▶ Review SQS ──▶ Review Scanner ──▶ V1FS rv (no limits) │
+│                        │                                  │              │
+│                  Review DLQ                        ┌──────┴──────┐       │
+│               Lambda auto-retry                  CLEAN       MALICIOUS   │
+│                                                    │            │        │
+│                                                    ▼            ▼        │
+│                                              Clean Bucket  Quarantine    │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Step | What happens |
 |---|---|
-| **Ingest** | A file lands in the S3 Ingest Bucket (uploaded by a user, application, or pipeline). S3 sends an `ObjectCreated` event to the SQS queue. |
+| **Ingest** | A file lands in the ingest bucket (stack-created, or your existing bucket). S3 sends an `ObjectCreated` event to the SQS queue — directly for a stack-created bucket, or via EventBridge for an existing bucket. |
 | **Scan** | A scanner-app pod long-polls the queue, downloads the file into memory, and scans it via the V1FS Python SDK over gRPC to the in-cluster scanner pods. |
-| **Route** | The file is copied to one of three destinations based on the scan result, then deleted from the Ingest Bucket. The SQS message is removed and the result is written to the CloudWatch audit trail. |
-| **Review** | Files routed to the Review Bucket are archives the main scanner could not fully analyze — the file size, nesting depth, file count, compression ratio, or decompressed size exceeded the configured limits. The review pipeline re-scans these with a second V1FS scanner release (`rv`) that has no decompression limits, then routes to Clean or Quarantine. The review pipeline keeps one pod always warm for immediate processing. |
+| **Route** | The file is copied to the destination bucket with a `ScanResult` tag. For a stack-created ingest bucket, the source object is then deleted; for an existing bucket, the source object is **tagged with the verdict and left in place**. The SQS message is removed and the result is written to the CloudWatch audit trail. |
+| **Review** *(optional)* | If the review pipeline is deployed, archives the main scanner could not fully analyze are re-scanned by a second V1FS release (`rv`) with no decompression limits, then routed to Clean or Quarantine. |
 
 **Routing rules:**
 
 | Verdict | Condition | Destination |
 |---|---|---|
-| **Clean** | `scanResult == 0`, no decompression errors | Clean Bucket |
-| **Review** | `scanResult == 0`, decompression limit exceeded | Review Bucket → re-scanned by review pipeline |
-| **Review (oversize)** | File exceeds `MAX_FILE_SIZE_MB` (default 500) | Review Bucket → server-side copy (no download), re-scanned by review pipeline |
-| **Malicious** | `scanResult > 0` | Quarantine Bucket |
+| **Clean** | `scanResult == 0`, no decompression errors | Clean Bucket (tag `ScanResult=S3-Clean`) |
+| **Malicious** | `scanResult > 0` | Quarantine Bucket (tag `ScanResult=S3-Malware`) |
+| **Decompression limit — review OFF (default)** | `scanResult == 0`, decompression limit exceeded | Quarantine Bucket with tags `ScanResult=S3-DecompressionLimit` and `ScanErrors=<error names>` |
+| **Decompression limit — review ON** | `scanResult == 0`, decompression limit exceeded | Review Bucket → re-scanned by review pipeline |
+| **Oversize — review OFF (default)** | File exceeds `MAX_FILE_SIZE_MB` (default 500) | Quarantine Bucket via server-side copy (tag `ScanResult=S3-Oversize`) |
+| **Oversize — review ON** | File exceeds `MAX_FILE_SIZE_MB` | Review Bucket via server-side copy, re-scanned with no size limit |
 
-### Scanner Application
+A file that hit a decompression limit was **not fully inspected** — treating it as clean would be unsafe. Quarantining it with explanatory tags (rather than passing it through) also fixes a bug in the previous architecture where such files could land in the clean bucket when the review pipeline was unavailable. The `ScanErrors` tag records exactly which limit was hit (`ATSE_ZIP_RATIO_ERR`, `ATSE_MAXDECOM_ERR`, `ATSE_ZIP_FILE_COUNT_ERR`, or `ATSE_EXTRACT_TOO_BIG_ERR`) so an operator can decide whether to raise the limits or deploy the review pipeline.
 
-A Python asyncio application built for speed. Scan requests use **gRPC** — a binary protocol that is dramatically faster than traditional REST/RPC, with lower latency, smaller payloads, and native streaming support. Files are scanned entirely in memory via `scan_buffer()`, eliminating disk I/O from the critical path. The result is scan latency measured in milliseconds, not seconds.
+### Scanner Application (optional module)
+
+A Python asyncio application built for efficiency. Scan requests use **gRPC** — a binary protocol with lower latency, smaller payloads, and native streaming compared to REST. Files are scanned entirely in memory via `scan_buffer()`, eliminating disk I/O from the critical path.
 
 - **gRPC-native scanning** — binary protocol with persistent HTTP/2 connections to in-cluster scanner pods, avoiding the overhead of REST serialization and per-request TCP handshakes
 - **Fully async pipeline** — `aiobotocore` for S3/SQS operations and `amaas.grpc.aio` for scan requests, all running concurrently on a single event loop with zero thread-blocking
 - **In-memory scanning** — files are downloaded as byte buffers and passed directly to the scanner over gRPC, never written to disk
-- **50 concurrent scans per pod** — each pod maintains 50 in-flight scan requests simultaneously (configurable via `MAX_CONCURRENT_SCANS`), fully saturating the scanner backend
+- **50 concurrent scans per pod** — each pod maintains 50 in-flight scan requests simultaneously (configurable via `MAX_CONCURRENT_SCANS`)
 - **Visibility heartbeat** — automatically extends SQS message visibility during long-running scans to prevent duplicate processing. On failure, immediately shortens visibility to 30 seconds for fast retry by another pod
 - **Health probes** — liveness (`/healthz`) and readiness (`/readyz`) endpoints on port 8080. Liveness catches deadlocked event loops (pod is restarted); readiness gates traffic until the gRPC scan handle is initialized
 - **Scan audit trail** — every scan result is written to CloudWatch Logs as structured JSON (file key, size, verdict, malware names, SHA256, scan duration, pod name), batched for efficiency
 - **Pull-based load distribution** — no load balancer needed. All scanner-app pods long-poll the same SQS queue, and SQS delivers each message to exactly one consumer. Pods that are free pull more messages; pods that are busy naturally slow their polling via backpressure (semaphore + 2x in-flight cap). gRPC connections to V1FS scanner pods are distributed by the Kubernetes Service at connection setup time
 - **Graceful shutdown** — handles SIGTERM to drain in-flight scans and flush audit entries before exiting (5-minute grace period)
 - **Predictive Machine Learning** — PML can be enabled for advanced threat detection (requires account-level PML support)
+
+Set `DeployScannerApp=false` if you already have a scanning application — the stack then deploys only the TrendAI V1FS scanner and publishes its endpoint. See [Connect Your Own Scanning Application](#connect-your-own-scanning-application).
 
 ### Database & Storage
 
@@ -89,99 +149,58 @@ The Vision One File Security management service uses a **PostgreSQL database** d
 
 The database configuration is immutable after initial deployment — changing storage class or size requires deleting and recreating the StatefulSet.
 
-### Performance-Optimized Compute
+### Compute
 
-The cluster uses two tiers of compute. A small managed node group of `r7i.large` instances (2 vCPU, 16 GiB) hosts system components (CoreDNS, KEDA, Karpenter, CSI drivers). Scanner workloads run on Karpenter-provisioned xlarge instances — `r7i.xlarge`, `r7a.xlarge`, or `r6i.xlarge` (4 vCPU, 32 GiB each). The R7i/R7a/R6i families provide consistent, non-burstable CPU performance with high memory-to-vCPU ratios, ensuring scanner pods have ample headroom for signature databases and in-memory file analysis without triggering OOM kills.
+The cluster uses a **single managed node group** for everything — system components and scanner workloads. The default instance type is `r7i.xlarge` (4 vCPU, 32 GiB); memory-optimized instances give the V1FS scanner headroom for signature databases and in-memory file analysis, and each xlarge node fits four scanner pods (800m CPU / 2Gi memory each — the chart default) alongside scanner-app and system pods.
 
-Each xlarge node fits 4 V1FS scanner pods (800m CPU / 2Gi memory each) alongside scanner-app pods, maximizing pod density while requiring fewer nodes to provision at scale.
+Node group sizing (all configurable via parameters):
+
+| Setting | Default | Notes |
+|---|---|---|
+| `NodeGroupMinSize` | 2 | Minimum 2 for CoreDNS/AZ redundancy |
+| `NodeGroupDesiredSize` | 2 | Starting point — Cluster Autoscaler adjusts from here |
+| `NodeGroupMaxSize` | 8 | Fits full-mode peak load (see math below) |
+
+**Why max 8 nodes:** an `r7i.xlarge` has 4 vCPU, of which roughly **3.6 vCPU is usable** after kubelet/system reservations and per-node DaemonSets. Full-mode peak pod requests total approximately **26.4 vCPU** — 10 V1FS scanner pods × 800m, 20 scanner-app pods × 500m, the review pipeline, and system components (CoreDNS, KEDA, CSI drivers, Cluster Autoscaler, LB controller, metrics server). 26.4 ÷ 3.6 ≈ 7.4, so 8 nodes covers peak with a margin. If you raise the replica maximums, raise `NodeGroupMaxSize` to match.
 
 ### Autoscaling
 
-Three independent scaling systems work in concert, each reacting to different signals but coordinating automatically through Kubernetes to deliver elastic throughput from a single idle pod to **7,500 concurrent scan slots** in under a minute.
+Scaling is deliberately conventional — each component scales by the mechanism its vendor supports:
 
-**Queue-driven pod scaling (KEDA)** — KEDA watches the SQS queue every 5 seconds and scales scanner-app pods proportionally to the backlog. When thousands of files land in the ingest bucket, the resulting SQS messages trigger rapid scale-out — 1 pod for every 5 queued messages, up to 150 pods. Each pod immediately begins pulling messages and scanning files at 50 concurrent scans. When the queue drains, KEDA scales back down after a 300-second cooldown, keeping pods alive through tail processing before releasing capacity.
+**V1FS scanner pods — chart-native HPA.** The Helm chart's built-in HorizontalPodAutoscaler (`scanner.autoscaling.enabled=true`) scales scanner pods on **CPU 80% / memory 80%** utilization targets. This is the autoscaling mechanism TrendAI documents and supports. Bounds are set by the `ScannerMinReplicas` / `ScannerMaxReplicas` CloudFormation parameters (default 1–10). The Metrics Server (installed by the bootstrap) provides the utilization metrics. **KEDA never touches the chart-owned scanner.**
 
-- Polls SQS queue depth every 5 seconds for fast reaction to bursts
-- Includes in-flight messages (being scanned but not yet deleted) in scaling decisions
-- Range: 1 to 150 pods (always at least 1 pod running, ready for immediate processing)
+**scanner-app pods — KEDA on SQS depth** *(only when `DeployScannerApp=true`)*. Our scanning application is queue-driven, so it scales on queue depth: KEDA polls the SQS queue every 5 seconds and adds 1 pod per 5 queued messages (in-flight messages included), from 1 up to `ScannerAppMaxReplicas` (default 20), with a 300-second cooldown. KEDA gets its SQS read permissions via Pod Identity — no access keys.
 
-**Queue-driven scanner scaling (KEDA)** — The V1FS scanner pods also scale based on SQS queue depth, ensuring scan backend capacity grows proportionally to demand. KEDA adds 1 scanner pod per 50 queued messages, up to 150 pods. This replaced the original CPU-based HPA which was too conservative and only scaled to 4 pods under heavy load.
+**Review pipeline** *(only when `DeployReviewPipeline=true`)*. The review-scanner-app scales via KEDA on the review queue (1–5 pods); the `rv` V1FS release scales via its own chart HPA (1–3 pods). One pod of each stays warm to avoid cold-start gRPC failures.
 
-- Scales based on SQS queue depth (50 messages per scanner pod)
-- Range: 1 to 150 scanner pods
-- Each scanner pod requests 800m CPU and 2Gi memory
+**Nodes — Cluster Autoscaler.** The standard Kubernetes Cluster Autoscaler (installed via Helm by the bootstrap, IAM via Pod Identity) discovers the managed node group's Auto Scaling Group through the `k8s.io/cluster-autoscaler` tags that EKS applies automatically. When pods can't be scheduled, it grows the ASG (up to `NodeGroupMaxSize`); it scales down nodes unneeded for 2 minutes, preferring the least-waste expander. PodDisruptionBudgets (`k8s/pdb.yaml`) protect active scan workloads during scale-down.
 
-**Review pipeline scaling (KEDA)** — The review pipeline uses the same KEDA SQS-driven pattern but with minimal scaling. Both review-scanner-app and review-v1fs-scanner scale from 1 to 5 pods based on review SQS queue depth (threshold 50), with a 300-second cooldown. One pod of each is always warm to avoid cold-start gRPC failures when files arrive for deep analysis.
-
-**Infrastructure scaling (Karpenter)** — When KEDA creates pods that can't be scheduled due to insufficient cluster capacity, Karpenter provisions new nodes directly via the EC2 Fleet API in 30-60 seconds — roughly 2x faster than the traditional Cluster Autoscaler/ASG approach. Karpenter selects the optimal instance type from a flexible set (r7i.xlarge, r7a.xlarge, r6i.xlarge) based on pending pod requirements and availability, eliminating capacity failures from single-instance-type dependency. When load subsides, Karpenter consolidates underutilized nodes after 2 minutes, intelligently bin-packing remaining pods onto fewer nodes before removing excess capacity. Pod Disruption Budgets protect active scan workloads from premature eviction during consolidation.
-
-A small managed node group (3-6 nodes) hosts system components (CoreDNS, KEDA, EBS/EFS CSI drivers, LB controller, metrics server, Karpenter itself). Scanner workloads are directed to Karpenter-provisioned nodes via nodeAffinity, keeping the system plane isolated from workload scaling turbulence.
-
-**Why Karpenter over Cluster Autoscaler:** This system is designed for sustained, latency-sensitive production traffic with unpredictable spikes. Karpenter's direct EC2 provisioning, intelligent consolidation, and multi-instance-type flexibility deliver faster scale-out, lower cost during low-demand periods, and better resilience compared to the ASG-based Cluster Autoscaler.
-
-**Karpenter NodePool configuration (`scanner-pool`):**
-
-| Setting | Value | Rationale |
-|---|---|---|
-| Instance types | r7i.xlarge, r7a.xlarge, r6i.xlarge | Memory-optimized (32 GiB), xlarge only for fewer nodes at scale |
-| Capacity type | On-demand only | No spot — scan visibility timeouts make interruptions expensive |
-| CPU limit | 300 vCPU | Matches AWS account quota, prevents over-provisioning |
-| Memory limit | 2,400 GiB | Proportional to CPU limit |
-| Consolidation policy | WhenEmptyOrUnderutilized | Bin-packs pods onto fewer nodes when load drops |
-| Consolidation delay | 2 minutes | Balances cost savings against scaling churn |
-| Disruption budget | 10% of nodes | Limits how many nodes can be drained simultaneously |
-| Node expiry | 30 days | Automatic node rotation for security patching |
-| AMI | Amazon Linux 2023 (EKS-optimized) | Auto-selected via `al2023@latest` |
-| Block storage | 20 GiB gp3, encrypted | Matches managed node group configuration |
-| IMDSv2 | Required (hop limit 2) | Security hardening |
-
-**At full scale:**
-
-| Layer | Min | Max | Multiplier |
-|---|---|---|---|
-| Scanner-app pods (KEDA) | 1 | 150 | 50 concurrent scans each |
-| V1FS scanner pods (KEDA) | 1 | 150 | gRPC scan workers |
-| Review scanner-app pods (KEDA) | 1 | 5 | Always-warm for low-latency gRPC |
-| Review V1FS scanner pods (KEDA) | 1 | 5 | Unlimited decompression, always-warm |
-| Nodes (Karpenter) | 3 | ~75 | 4 vCPU each (xlarge only) |
-| **Total concurrent scans** | **50** | **7,500** | **150x scale-out** |
-
-**Important:** At full scale (150+150 pods), the cluster requires approximately 195 on-demand vCPUs for pod requests alone (150 × 500m scanner-app + 150 × 800m V1FS scanner), plus 6 vCPU for the 3 system nodes. The default AWS account limit is 64 vCPUs — request an increase to at least 300 via the AWS Service Quotas console for "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances." The Karpenter NodePool enforces a CPU limit of 300 to prevent exceeding the account quota, providing headroom above the ~200 vCPU pod request total.
-
-**How they work together:**
+**Expected scale-up latency: 1–3 minutes.** The HPA reacts to its metrics window, and if a new node is needed, the Cluster Autoscaler provisions it through the ASG. This is normal behavior for a supported POC configuration. If a burst of files arrives, the SQS queue simply holds the backlog — nothing is lost — and drains as capacity comes online. (The previous architecture's headline numbers — 150-pod fleets, 7,500 concurrent scans, sub-minute node provisioning — belonged to the custom Karpenter/KEDA design and no longer apply.)
 
 ```
-Thousands of files arrive in S3
+Files arrive in S3 → SQS queue depth rises
          |
          v
-SQS queue depth spikes
+KEDA scales scanner-app (1 → up to 20 pods)
          |
          v
-KEDA detects backlog, scales scanner-app from 1 to 150 pods
+Scan load raises V1FS scanner CPU/memory
          |
          v
-Scanner-app pods open concurrent gRPC streams to V1FS scanner
+Chart HPA scales V1FS scanner (1 → up to 10 pods)
          |
          v
-KEDA scales V1FS scanner pods from 1 to 150 based on queue depth
+Pending pods trigger Cluster Autoscaler → ASG adds nodes (up to 8)
          |
          v
-Karpenter provisions nodes via EC2 Fleet API in 30-60 seconds
-         |
-         v
-7,500 concurrent scans running — queue drains rapidly
-         |
-         v
-Queue empty → KEDA scales pods back down → Karpenter consolidates idle nodes
+Queue drains → KEDA and HPA scale down → Cluster Autoscaler removes idle nodes
 ```
-
-KEDA and Karpenter get their AWS permissions through Pod Identity — KEDA reads SQS queue metrics, Karpenter manages EC2 instances directly. No access keys are involved.
 
 ### Failure Handling
 
 If a scan fails (gRPC error, download failure, or any transient exception), the scanner immediately shortens the SQS message visibility timeout to 30 seconds, making it available for another pod to pick up almost immediately. Without this, failed messages would stay invisible for the full visibility timeout (600 seconds) before being retried — a 10-minute delay for what might be a momentary network blip. The fast retry ensures transient failures recover in seconds, not minutes.
 
-After 3 consecutive failures, the message moves to a Dead Letter Queue. A Lambda function automatically re-queues DLQ messages with exponential backoff (60s → 300s → 900s). After 3 DLQ retries (9 total scan attempts), the message is logged as a permanent failure and discarded. Both pipelines have independent DLQs and remediation Lambdas.
+After 3 consecutive failures, the message moves to a Dead Letter Queue. A Lambda function automatically re-queues DLQ messages with exponential backoff (60s → 300s → 900s). After 3 DLQ retries (9 total scan attempts), the message is logged as a permanent failure and discarded. If the review pipeline is deployed, it has its own independent DLQ and remediation Lambda.
 
 ```
 Scan fails → visibility shortened to 30s → fast retry by another pod
@@ -193,46 +212,113 @@ Permanent failure logged and discarded
 
 ### Orphaned File Reconciliation
 
-The review scanner includes a reconciliation loop that monitors the Ingest Bucket for orphaned files — objects that were uploaded but never processed due to transient failures such as scanner pod restarts, or SQS message expiration. Every 5 minutes, the review scanner lists the Ingest Bucket and sends a synthetic SQS message for any file older than 30 minutes, re-entering it into the main scan pipeline. This ensures no file is silently dropped, even if every retry mechanism in the normal flow has been exhausted. Both the interval and age threshold are configurable via `RECONCILIATION_INTERVAL` and `RECONCILIATION_AGE_THRESHOLD` environment variables.
+A reconciliation loop monitors the ingest bucket for orphaned files — objects that were uploaded but never processed due to transient failures such as scanner pod restarts or SQS message expiration. Every 5 minutes it lists the ingest bucket and sends a synthetic SQS message for any file older than 30 minutes, re-entering it into the main scan pipeline. This ensures no file is silently dropped, even if every retry mechanism in the normal flow has been exhausted. The interval and age threshold are configurable via `RECONCILIATION_INTERVAL` and `RECONCILIATION_AGE_THRESHOLD`.
+
+Where it runs depends on the deployment mode:
+
+- **Review pipeline deployed** — the review scanner-app runs the loop (it is always warm).
+- **Review pipeline off (default)** — the main scanner-app runs the loop.
+- **Existing-bucket mode** — reconciliation is **disabled**: scanned objects legitimately remain in your bucket (they are tagged, not deleted), so "old object still present" is not a failure signal.
+
+## Scanner Endpoint Exposure
+
+The `ScannerEndpointMode` parameter controls how the V1FS scanner's gRPC endpoint is exposed to scanning applications outside the cluster:
+
+| Mode | What it creates | Connection |
+|---|---|---|
+| `nlb` *(default)* | An **internal Network Load Balancer** via the chart's `externalService` (`helm/values-nlb.yaml`), exposing gRPC on `:50051` and ICAP on `:1344`. VPC-internal only — reachable from your VPC or peered networks, never from the internet. | Plaintext gRPC in-VPC |
+| `alb` | An **ALB Ingress** using TrendAI's documented topology — the chart's scanner ingress with `backend-protocol-version: GRPC`, internal scheme, and TLS terminated with your ACM certificate. Requires `ACMCertificateArn` and `ScannerDomain`; after deployment, **you create a DNS CNAME** from `ScannerDomain` to the ALB hostname (the bastion log prints the exact record). | TLS gRPC on `:443` |
+| `none` | Nothing — the scanner is reachable only inside the cluster via its ClusterIP service. | In-cluster only |
+
+Both load balancers are created by the AWS Load Balancer Controller (installed by the bootstrap) and cleaned up automatically on stack deletion.
+
+The bastion publishes the resolved endpoint address to SSM Parameter Store at **`/<stack-name>/scanner-endpoint`** — e.g. `internal-xyz.elb.us-east-1.amazonaws.com:50051` (NLB) or `scanner.example.com:443` (ALB).
+
+## Connect Your Own Scanning Application
+
+With `DeployScannerApp=false` (or alongside the built-in pipeline), connect any application that uses the [V1FS Python SDK](https://pypi.org/project/visionone-filesecurity/) to the published endpoint.
+
+Look up the endpoint:
+
+```bash
+aws ssm get-parameter --name "/<stack-name>/scanner-endpoint" \
+  --query Parameter.Value --output text
+```
+
+Initialize the SDK against it:
+
+```python
+import amaas.grpc
+
+# NLB mode (default) — plaintext gRPC inside the VPC
+handle = amaas.grpc.init("<nlb-hostname>:50051", api_key, False)
+
+# ALB mode — TLS via your ACM certificate and domain
+handle = amaas.grpc.init("<scanner-domain>:443", api_key, True)
+
+result = amaas.grpc.scan_file(handle, "/path/to/file")
+amaas.grpc.quit(handle)
+```
+
+The `api_key` is your Vision One API key with "Run file scan via SDK" permission (the same key the stack stores in Secrets Manager). The async variant (`amaas.grpc.aio`) takes the same arguments. Your application must run in (or have network reachability to) the VPC for NLB mode; ALB mode additionally requires the DNS CNAME described above.
+
+## Scanning an Existing S3 Bucket
+
+Set `ExistingIngestBucket` to the name of a bucket you already own and the stack scans it instead of creating a new ingest bucket.
+
+**How it's wired:** S3 → **EventBridge** → SQS. An EventBridge rule filtered on your bucket forwards `Object Created` events to the scan queue. A custom-resource Lambda **merges** `EventBridgeConfiguration` into your bucket's existing notification configuration — your current event notifications (Lambda triggers, SNS topics, other queues) are preserved, never clobbered. Stack deletion never touches the bucket: no objects, tags, or notification configuration are removed.
+
+**Prerequisites:**
+
+- The bucket must exist in the same region and account as the stack.
+- Any existing notification configuration is fine — EventBridge delivery is additive.
+
+**Semantics (tag, don't delete):**
+
+- Source objects are **never deleted**. After scanning, the object in your bucket is tagged with the verdict (`ScanResult=S3-Clean`, `S3-Malware`, `S3-DecompressionLimit` + `ScanErrors=...`, or `S3-Oversize`), so results are visible in place.
+- Verdict **copies** still land in the stack's clean/quarantine buckets (and review bucket, if deployed), preserving the routed-output workflow.
+- **Reconciliation is disabled** — objects legitimately remain in the bucket, so age-based re-queueing would loop.
+- Defense in depth: the scanner-app IAM role has **no `s3:DeleteObject`** on your bucket — the pipeline cannot delete your data even if misconfigured.
 
 ## Architecture
 
 ### Infrastructure (CloudFormation)
 
-The `eks-v1fs.yaml` template creates everything:
+The `eks-v1fs.yaml` template creates everything. Resources marked *(scanner-app)* or *(review)* exist only when the corresponding module is enabled.
 
 | Resource | Purpose |
 |---|---|
 | **VPC** | `10.2.0.0/16` with public and private subnets across 2 AZs |
 | **NAT Gateways** | One per AZ — pods in private subnets reach the internet for threat intelligence updates |
 | **EKS Cluster** | Private API endpoint, full audit logging, managed addons (vpc-cni, CoreDNS, kube-proxy, Pod Identity Agent, EBS CSI Driver, EFS CSI Driver) |
-| **Node Group** | `r7i.large` system nodes (2 vCPU, 16 GiB) in private subnets, min 3 / max 6 — hosts system components only |
-| **ECR Repository** | Hosts the scanner app container image, scan-on-push enabled |
-| **S3 Buckets** | Ingest (with event notifications), Clean, Review, Quarantine — all have `DeletionPolicy: Retain` to preserve files when the stack is deleted |
-| **SQS Queues** | Main queue (600s visibility timeout, 20s long polling) + Dead Letter Queue (120s visibility timeout); Review SQS queue + Review DLQ for the review pipeline |
-| **DLQ Remediation Lambda** | Re-queues failed messages with exponential backoff (60s/300s/900s), max 3 DLQ retries before permanent discard |
-| **Review DLQ Remediation Lambda** | Same retry logic as the main DLQ Lambda, handles review pipeline failures independently |
-| **CloudWatch Alarms** | DLQ messages (any > 0), queue age (> 20 min for 5 consecutive minutes), and review DLQ messages (any > 0) via SNS topic |
-| **Scan Audit Log** | CloudWatch log group with structured JSON per scan (file, verdict, malware names, SHA256, duration), 30-day retention |
-| **Review Audit Log** | Separate CloudWatch log group (`review-audit-${StackName}`) for review pipeline scan results, 30-day retention |
-| **CloudWatch Dashboard** | 29-widget dashboard with queue health, scan throughput/latency, malware detection stats, DLQ remediation, pod distribution, recent scan results, and review pipeline metrics |
-| **IAM Roles** | Least-privilege roles for nodes, bastion, scanner app, KEDA operator, Karpenter, and DLQ remediation |
-| **Pod Identity** | Binds IAM roles to Kubernetes service accounts — no access keys needed |
+| **Managed Node Group** | Single node group of `r7i.xlarge` (default) instances in private subnets, min 2 / max 8 — hosts system components and scanner workloads, scaled by the Cluster Autoscaler |
+| **AWS Load Balancer Controller** | Creates the internal NLB or ALB for the scanner endpoint (Helm, Pod Identity) |
+| **Cluster Autoscaler** | Standard Kubernetes node autoscaler (Helm, Pod Identity, ASG auto-discovery via EKS-applied tags) |
+| **EFS Filesystem** | Encrypted shared storage (ReadWriteMany) for the V1FS scanner ephemeral volume across multiple pods |
 | **Secrets Manager** | Stores the V1FS registration token and API key |
-| **Metrics Server** | Provides CPU/memory metrics for cluster monitoring |
-| **KEDA** | Scales both scanner-app and V1FS scanner pods based on SQS queue depth; also scales review pipeline pods |
-| **Karpenter NodePool** | Provisions xlarge scanner nodes (r7i/r7a/r6i) directly via EC2 Fleet API; consolidates underutilized nodes automatically |
-| **V1FS Review Release** | Second Helm release (`rv`) with no CLISH scan policy — unlimited decompression for deep analysis of review bucket files |
-| **EFS Filesystem** | Encrypted shared storage (ReadWriteMany) for V1FS scanner ephemeral volume across multiple pods |
-| **Pre-delete Cleanup Lambda** | Runs automatically during stack deletion — terminates Karpenter EC2 instances, cleans up orphaned instance profiles, and deletes orphaned EBS volumes before CloudFormation deletes the roles and cluster |
-| **Bastion Host** | Provisions the cluster, installs Helm charts, builds and deploys the scanner app |
+| **Metrics Server** | Provides the CPU/memory metrics the chart HPA scales on |
+| **SSM Parameter** | `/<stack-name>/scanner-endpoint` — the published scanner endpoint address |
+| **ECR Repository** *(scanner-app)* | Hosts the scanner app container image, scan-on-push enabled |
+| **S3 Buckets** *(scanner-app)* | Ingest (created unless `ExistingIngestBucket` is set), Clean, Quarantine, and Review *(review only)* — all stack-created buckets have `DeletionPolicy: Retain` |
+| **EventBridge Wiring** *(existing-bucket mode)* | Events rule filtered on your bucket + a custom-resource Lambda that merges `EventBridgeConfiguration` into the bucket's notification config |
+| **SQS Queues** *(scanner-app)* | Main queue (600s visibility timeout, 20s long polling) + Dead Letter Queue; review queue + review DLQ *(review only)* |
+| **DLQ Remediation Lambda(s)** *(scanner-app)* | Re-queues failed messages with exponential backoff (60s/300s/900s), max 3 DLQ retries before permanent discard |
+| **CloudWatch Alarms** *(scanner-app)* | DLQ messages (any > 0), queue age (> 20 min for 5 consecutive minutes) via SNS topic |
+| **Scan Audit Log** *(scanner-app)* | CloudWatch log group with structured JSON per scan, 30-day retention; separate `review-audit-${StackName}` group *(review only)* |
+| **CloudWatch Dashboard** *(scanner-app)* | Queue health, scan throughput/latency, malware detection stats, DLQ remediation, recent scan results |
+| **KEDA** *(scanner-app)* | Scales the scanner-app deployment on SQS queue depth — never the chart-owned V1FS scanner |
+| **V1FS Review Release** *(review)* | Second Helm release (`rv`) in `visionone-review` with no CLISH scan policy — unlimited decompression for deep analysis |
+| **IAM Roles** | Least-privilege roles for nodes, bastion, Cluster Autoscaler, LB controller, and (when enabled) scanner app, KEDA operator, and DLQ remediation |
+| **Pod Identity** | Binds IAM roles to Kubernetes service accounts — no access keys needed |
+| **Pre-delete Cleanup Lambda** | Runs during stack deletion — removes LB-controller-created load balancers, target groups, and security groups, and deletes orphaned EBS volumes |
+| **Bastion Host** | Exports environment, clones this repo, and runs `scripts/bootstrap.sh` to provision the cluster |
 
 ### How Credentials Work
 
-The scanner app pods get AWS permissions automatically through EKS Pod Identity. No access keys are configured anywhere.
+Pods get AWS permissions automatically through EKS Pod Identity. No access keys are configured anywhere.
 
-1. CloudFormation creates IAM roles with permissions scoped to specific resources — `ScannerAppRole` for the main scanner (ingest/clean/review/quarantine buckets, main SQS queue) and `ReviewScannerAppRole` for the review scanner (review/clean/quarantine buckets, review SQS queue — deliberately no write access to the review bucket)
-2. Pod Identity Associations bind each role to its respective Kubernetes service account (`scanner-app` in `visionone-filesecurity`, `review-scanner-app` in `visionone-review`)
+1. CloudFormation creates IAM roles with permissions scoped to specific resources — `ScannerAppRole` for the main scanner-app (ingest/clean/quarantine buckets, main SQS queue; no `s3:DeleteObject` on an existing customer bucket) and, if the review pipeline is deployed, `ReviewScannerAppRole` (review/clean/quarantine buckets, review SQS queue — deliberately no write access to the review bucket)
+2. Pod Identity Associations bind each role to its Kubernetes service account (`scanner-app` in `visionone-filesecurity`, `review-scanner-app` in `visionone-review`, plus the Cluster Autoscaler, LB controller, and KEDA service accounts in their namespaces)
 3. The Pod Identity Agent (a DaemonSet on each node) intercepts credential requests from pods and injects temporary credentials
 4. Each scanner app retrieves the V1FS API key from Secrets Manager at startup using these credentials
 
@@ -241,7 +327,9 @@ The scanner app pods get AWS permissions automatically through EKS Pod Identity.
 You need two credentials from the TrendAI Vision One console:
 
 1. **Registration Token** — used by the scanner pods to register with Vision One. Generate this under **Cloud Security > File Security > Containerized Scanner > Get ready to deploy containerized scanner > Get registration token**.
-2. **API Key** — used by the scanner application to authenticate scan requests. Generate this under **Administration > API Keys > Add API Key** with the **"Run file scan via SDK"** permission.
+2. **API Key** — used by the scanning application to authenticate scan requests. Generate this under **Administration > API Keys > Add API Key** with the **"Run file scan via SDK"** permission.
+
+If you choose `ScannerEndpointMode=alb`, you also need an **ACM certificate** covering your chosen scanner domain, and the ability to create a DNS CNAME record for it.
 
 ## Deployment
 
@@ -258,10 +346,24 @@ Optional parameters:
 |---|---|---|
 | **PrimaryAZ** | `us-east-1a` | Availability Zone 1 |
 | **SecondaryAZ** | `us-east-1b` | Availability Zone 2 |
-| **NodeInstanceType** | `r7i.large` | EC2 instance type for EKS worker nodes |
-| **DesiredCapacity** | `3` | Number of system nodes in managed node group (3–6) |
+| **NodeInstanceType** | `r7i.xlarge` | EC2 instance type for the managed node group (`r7i.xlarge`, `r7a.xlarge`, `r6i.xlarge`, or `r7i.2xlarge`). One node group hosts both system components and scanner workloads |
+| **NodeGroupMinSize** | `2` | Minimum nodes in the managed node group (min 2 for CoreDNS/AZ redundancy) |
+| **NodeGroupDesiredSize** | `2` | Initial desired nodes — the Cluster Autoscaler adjusts from here |
+| **NodeGroupMaxSize** | `8` | Maximum nodes the Cluster Autoscaler may scale to. The default fits full-mode peak load on r7i.xlarge |
+| **ScannerMinReplicas** | `1` | Minimum V1FS scanner pods (chart HPA `minReplicas`) |
+| **ScannerMaxReplicas** | `10` | Maximum V1FS scanner pods (chart HPA `maxReplicas`, CPU/memory 80% targets) |
+| **DeployScannerApp** | `true` | Deploy the S3/SQS scanning application module (buckets, queues, ECR, scanner-app pods). Set to `false` to deploy only the V1FS scanner and its endpoint |
+| **ScannerAppMaxReplicas** | `20` | Maximum scanner-app pods (KEDA SQS-driven scaling) |
+| **DeployReviewPipeline** | `false` | Deploy the review pipeline (second V1FS release with unlimited decompression). Requires `DeployScannerApp=true`. When `false`, files exceeding decompression limits are quarantined with explanatory tags |
+| **ExistingIngestBucket** | *(empty)* | Name of an existing S3 bucket to scan. Leave empty to create a new ingest bucket. See [Scanning an Existing S3 Bucket](#scanning-an-existing-s3-bucket) |
+| **ScannerEndpointMode** | `nlb` | Scanner endpoint exposure: `nlb` (internal NLB), `alb` (TLS ALB Ingress), or `none` |
+| **ACMCertificateArn** | *(empty)* | ACM certificate ARN for the scanner ALB (required when `ScannerEndpointMode=alb`) |
+| **ScannerDomain** | *(empty)* | DNS name for the scanner ALB, e.g. `scanner.example.com` (required when `ScannerEndpointMode=alb`) |
 | **PMLEnabled** | `false` | Enable Predictive Machine Learning scanning (requires account support) |
-| **MaxFileSizeMB** | `500` | Maximum file size in MB the main scanner will download and scan (1–2048). Files exceeding this limit are routed to the review bucket via server-side S3 copy (no download into pod memory), where the review scanner re-scans them with no size limit |
+| **MaxFileSizeMB** | `500` | Maximum file size in MB the main scanner will download and scan (1–2048). Larger files are routed via server-side S3 copy — to the review bucket if the review pipeline is deployed, otherwise to quarantine with `ScanResult=S3-Oversize` |
+| **ScanTimeoutSeconds** | `600` | gRPC scan timeout; also sets the SQS visibility timeout to match |
+
+CloudFormation Rules validate the combinations at stack creation: `DeployReviewPipeline=true` asserts `DeployScannerApp=true`, and `ScannerEndpointMode=alb` asserts both `ACMCertificateArn` and `ScannerDomain` are set.
 
 #### Scan Policy Parameters
 
@@ -290,16 +392,20 @@ kubectl exec deploy/my-release-visionone-filesecurity-management-service \
   --max-decompression-size=512
 ```
 
-You don't need to clone the repo to deploy. The bastion host UserData automatically:
+### What the bastion does
 
-1. Installs kubectl, Helm, eksctl, Docker, and the AWS CLI
-2. Configures kubeconfig and creates the `visionone-filesecurity` namespace
-3. Installs Karpenter and KEDA via Helm
-4. Deploys the Vision One File Security scanner pods via Helm (GPG-verified)
-5. Configures the scan policy decompression limits via CLISH
-6. Installs second V1FS scanner release (`rv`) with unlimited decompression (no CLISH scan policy)
-7. Clones this repo, builds the scanner app Docker image, pushes it to ECR
-8. Deploys the scanner app and review scanner app (`deploy.sh --review`) to the cluster
+You don't need to clone the repo to deploy. The bastion host's UserData is now minimal — it **exports the CloudFormation-derived environment variables, clones this repo, and runs `scripts/bootstrap.sh`**, which:
+
+1. Installs kubectl, Helm, eksctl, and the AWS CLI, and configures kubeconfig
+2. Creates the `visionone-filesecurity` namespace and registration-token secrets
+3. Installs the AWS Load Balancer Controller, Metrics Server, and Cluster Autoscaler via Helm
+4. Installs KEDA via Helm *(only when the scanner-app module is enabled)*
+5. Creates the `gp3` (EBS) and `efs-sc` (EFS) StorageClasses
+6. Installs the TrendAI Vision One File Security Helm chart — **pinned to version 1.4.10, GPG-verified**, using `helm/values-base.yaml` plus the endpoint overlay (`helm/values-nlb.yaml` or the ALB ingress values), with the chart's own HPA enabled
+7. Configures the scan policy decompression limits via CLISH
+8. Installs the second V1FS release (`rv`) with unlimited decompression *(only when the review pipeline is enabled)*
+9. Builds the scanner-app Docker image, pushes it to ECR, and deploys the scanner-app (and review pipeline, if enabled) *(only when the scanner-app module is enabled)*
+10. Waits for the load balancer hostname and publishes the scanner endpoint to SSM Parameter Store (`/<stack-name>/scanner-endpoint`)
 
 If you want to further develop the application using [Claude Code](https://claude.ai/claude-code), clone the repo — it includes `CLAUDE.md` and supporting files in the `docs/` directory that provide Claude with comprehensive project context, architectural constraints, and operational guardrails.
 
@@ -311,31 +417,31 @@ aws cloudformation describe-stacks --stack-name my-scanner --query 'Stacks[0].St
 
 ### Stack Outputs
 
-After creation, the stack exports key resource identifiers:
+After creation, the stack exports key resource identifiers. Outputs for the scanner-app module and review pipeline exist only when those modules are enabled.
 
 | Output | Description |
 |---|---|
-| `DashboardUrl` | CloudWatch dashboard URL — real-time pipeline monitoring |
-| `IngestBucketName` | S3 bucket for uploading files to scan |
-| `CleanBucketName` | S3 bucket for files that passed scanning |
-| `QuarantineBucketName` | S3 bucket for malicious files |
-| `ReviewBucketName` | S3 bucket for files requiring manual review (decompression limits exceeded) |
-| `FileScanQueueUrl` | SQS queue URL for S3 file events |
-| `FileScanDLQUrl` | SQS dead letter queue URL |
-| `AlarmSNSTopicArn` | SNS topic for scan alarms (subscribe for notifications) |
-| `ScanAuditLogGroupName` | CloudWatch log group for scan audit trail |
-| `ReviewScanQueueUrl` | SQS queue URL for review pipeline file events |
-| `ReviewScanDLQUrl` | SQS dead letter queue URL for review pipeline |
-| `ReviewAuditLogGroupName` | CloudWatch log group for review scan audit trail |
-| `ECRRepoUrl` | ECR repository for the scanner app image |
 | `ClusterName` | EKS cluster name |
 | `BastionPublicIP` | Bastion host IP (connect via SSM, not SSH) |
+| `DashboardUrl` | CloudWatch dashboard URL — real-time pipeline monitoring *(scanner-app)* |
+| `IngestBucketName` | S3 bucket for uploading files to scan *(scanner-app; your own bucket in existing-bucket mode)* |
+| `CleanBucketName` | S3 bucket for files that passed scanning *(scanner-app)* |
+| `QuarantineBucketName` | S3 bucket for malicious, decompression-limit, and oversize files *(scanner-app)* |
+| `ReviewBucketName` | S3 bucket for files awaiting deep analysis *(review)* |
+| `FileScanQueueUrl` | SQS queue URL for S3 file events *(scanner-app)* |
+| `FileScanDLQUrl` | SQS dead letter queue URL *(scanner-app)* |
+| `AlarmSNSTopicArn` | SNS topic for scan alarms — subscribe for notifications *(scanner-app)* |
+| `ScanAuditLogGroupName` | CloudWatch log group for the scan audit trail *(scanner-app)* |
+| `ReviewScanQueueUrl` / `ReviewScanDLQUrl` / `ReviewAuditLogGroupName` | Review pipeline queue, DLQ, and audit log group *(review)* |
+| `ECRRepoUrl` | ECR repository for the scanner app image *(scanner-app)* |
+
+The scanner endpoint address is published separately to SSM Parameter Store at `/<stack-name>/scanner-endpoint` (see [Connect Your Own Scanning Application](#connect-your-own-scanning-application)).
 
 Retrieve any output:
 
 ```bash
 aws cloudformation describe-stacks --stack-name my-scanner \
-  --query 'Stacks[0].Outputs[?OutputKey==`DashboardUrl`].OutputValue' --output text
+  --query 'Stacks[0].Outputs[?OutputKey==`ClusterName`].OutputValue' --output text
 ```
 
 ### Verify
@@ -343,10 +449,6 @@ aws cloudformation describe-stacks --stack-name my-scanner \
 Connect to the bastion via Session Manager:
 
 ```bash
-INSTANCE_ID=$(aws cloudformation describe-stacks --stack-name my-scanner \
-  --query 'Stacks[0].Outputs[?OutputKey==`BastionPublicIP`].OutputValue' --output text)
-
-# Or use Session Manager (no SSH key needed):
 aws ssm start-session --target <instance-id>
 ```
 
@@ -354,13 +456,14 @@ Check that everything is running:
 
 ```bash
 kubectl get pods -n visionone-filesecurity
+kubectl get hpa -n visionone-filesecurity     # the chart's scanner HPA
 ```
 
-You should see the V1FS scanner pods and the `scanner-app` pod all in `Running` state.
+You should see the V1FS scanner pods (and, if enabled, the `scanner-app` pod) in `Running` state, and one HorizontalPodAutoscaler targeting the chart scanner.
 
 ### Test
 
-Upload a file to the ingest bucket:
+With the scanner-app module enabled, upload a file to the ingest bucket:
 
 ```bash
 INGEST_BUCKET=$(aws cloudformation describe-stacks --stack-name my-scanner \
@@ -376,7 +479,7 @@ Watch the scanner app logs:
 kubectl logs -f deployment/scanner-app -n visionone-filesecurity
 ```
 
-You should see the file scanned and routed to the clean bucket.
+You should see the file scanned and routed to the clean bucket (in existing-bucket mode, the source object is also tagged with `ScanResult=S3-Clean`).
 
 To test malware detection, upload the [EICAR test file](https://www.eicar.org/download-anti-malware-testfile/):
 
@@ -388,30 +491,36 @@ aws s3 cp /tmp/eicar.txt s3://$INGEST_BUCKET/
 
 This should be flagged as malicious and routed to the quarantine bucket.
 
+In endpoint-only mode (`DeployScannerApp=false`), test with the SDK against the published endpoint instead — see [Connect Your Own Scanning Application](#connect-your-own-scanning-application).
+
 ## Project Structure
 
 ```
 eks-v1fs.yaml              CloudFormation template (all infrastructure)
+helm/
+  values-base.yaml         V1FS Helm values — single source of truth for install and upgrades
+  values-nlb.yaml          Overlay: internal NLB endpoint via the chart's externalService
 app/
   Dockerfile               python:3.11-slim, non-root UID 999
   requirements.txt         Pinned dependencies (visionone-filesecurity, aiobotocore, boto3)
-  scanner.py               Async SQS polling, S3 download, V1FS scan, file routing, health server, audit trail
+  scanner.py               Async SQS polling, S3 download, V1FS scan, routing/tagging, health server, audit trail
   config.py                Environment variable loading and validation
 k8s/
   serviceaccount.yaml      Kubernetes ServiceAccount (Pod Identity, no annotations)
   configmap.yaml           Environment config template (populated by deploy script)
   deployment.yaml          Hardened pod spec (non-root, read-only fs, drop all capabilities)
   networkpolicy.yaml       Egress restricted to DNS, V1FS scanner, and AWS HTTPS
-  pdb.yaml                 PodDisruptionBudgets (Karpenter consolidation protection)
-  scaledobject.yaml        KEDA ScaledObject + TriggerAuthentication for SQS-driven autoscaling
+  pdb.yaml                 PodDisruptionBudgets (protect active scans during node scale-down)
+  scaledobject.yaml        KEDA ScaledObject + TriggerAuthentication — scales ONLY scanner-app
   review-serviceaccount.yaml  Review scanner ServiceAccount (Pod Identity, no annotations)
   review-deployment.yaml      Review scanner deployment (same image, reconciliation enabled)
   review-networkpolicy.yaml   Egress restricted to DNS, rv V1FS scanner, AWS HTTPS
-  review-scaledobject.yaml    KEDA ScaledObjects for review pipeline (min 1, max 5)
+  review-scaledobject.yaml    KEDA ScaledObject for the review scanner-app (min 1, max 5)
 scripts/
+  bootstrap.sh             Bastion provisioning — all cluster setup, driven by deployment-mode env vars
   build-and-push.sh        Build Docker image and push to ECR (tagged with git SHA)
   deploy.sh                Template ConfigMap from stack outputs and apply k8s manifests
-  upgrade.py               Safely upgrade both V1FS Helm releases with custom values
+  upgrade.py               Safely upgrade the V1FS Helm release(s), preserving values and HPA bounds
 ```
 
 ## Redeploying the Scanner App
@@ -424,25 +533,23 @@ export CFN_STACK_NAME=my-scanner
 export AWS_REGION=us-east-1
 /opt/eks-v1fs/scripts/build-and-push.sh
 /opt/eks-v1fs/scripts/deploy.sh
-/opt/eks-v1fs/scripts/deploy.sh --review
+/opt/eks-v1fs/scripts/deploy.sh --review   # only if the review pipeline is deployed
 ```
 
-This rebuilds the Docker image, pushes it to ECR, and re-applies the k8s manifests for both the main and review scanner apps. Both use the same Docker image — only the environment variables differ. This does **not** update the V1FS scanner — see [Updating the V1FS Scanner](#updating-the-v1fs-scanner) for that.
+This rebuilds the Docker image, pushes it to ECR, and re-applies the k8s manifests. The main and review scanner apps use the same Docker image — only the environment variables differ. This does **not** update the V1FS scanner — see [Updating the V1FS Scanner](#updating-the-v1fs-scanner) for that.
 
 ## Updating the V1FS Scanner
 
-The TrendAI Vision One File Security scanner is installed via its official Helm chart, but this deployment customizes several Helm values to integrate with our KEDA-based autoscaling and EKS infrastructure. A standard `helm upgrade` without re-specifying these values will silently revert them to chart defaults, breaking the deployment.
+The TrendAI Vision One File Security scanner is installed via its official Helm chart, pinned to a known-good version (currently **1.4.10**). All custom values live in **`helm/values-base.yaml`** — the single source of truth used by both the initial install (`scripts/bootstrap.sh`) and upgrades (`scripts/upgrade.py`). The deviations from chart defaults are deliberately minimal and all documented chart options, keeping the deployment within TrendAI's supported methodology:
 
-### Why this matters
-
-The Helm chart's default behavior conflicts with our architecture in several ways:
-
-| Default behavior | Our customization | What breaks if reverted |
+| Chart default | Our value (`values-base.yaml`) | Why |
 |---|---|---|
-| HPA enabled (`scanner.autoscaling.enabled=true`) | HPA disabled, KEDA scales instead | Two controllers fight over replica count, causing erratic scaling |
-| Default CPU/memory requests | 800m CPU / 2Gi memory | Scanner pods may be under-resourced or improperly bin-packed |
-| No EFS ephemeral volume | EFS-backed shared ephemeral storage | Scanner pods lose shared scratch space |
-| Default storage class | gp3 StorageClass for database PVC | Database PVC may fail to provision |
+| No ephemeral volume config | EFS-backed shared ephemeral volume (`efs-sc`, ReadWriteMany, 100Gi) | Scanner pods on multiple nodes share scratch space |
+| Chart-created storage class | `gp3` StorageClass (CloudFormation-created) for the database PVC | Encrypted EBS gp3 |
+| Scanner ingress enabled (inert) | Explicitly disabled — ALB mode re-enables it with its own settings | Endpoint exposure is controlled by `ScannerEndpointMode` |
+| Management-service ingress enabled | Explicitly disabled | Never expose the management service |
+
+The chart's own HPA (`scanner.autoscaling.enabled=true`) and scanner resources (800m CPU / 2Gi memory) are now **chart defaults** — no longer overridden. HPA min/max replicas come from the CloudFormation parameters at install time and are read from the live cluster at upgrade time.
 
 ### Upgrade procedure
 
@@ -454,34 +561,36 @@ python3 /opt/eks-v1fs/scripts/upgrade.py
 
 The script handles everything automatically:
 
-1. Sets up the environment (KUBECONFIG, Helm repository)
+1. Sets up the environment (KUBECONFIG, Helm repository) and **discovers the installed releases** — `my-release` always; `rv` only if the review pipeline is installed
 2. Captures the current CLISH scan policy before upgrading
-3. Updates the Helm repository and shows available versions
-4. Upgrades both Helm releases (`my-release` and `rv`) with all required custom `--set` values
-5. Re-applies the captured CLISH scan policy to `my-release` (not `rv` — it runs with unlimited decompression)
-6. Verifies no HPA was re-created (would conflict with KEDA)
-7. Verifies KEDA ScaledObjects are active and scanner pods are running
-8. Runs a sanity scan (1 clean file + 1 EICAR test file) to confirm scanning works
+3. Updates the Helm repository, shows available versions, and exits early if already up to date
+4. For each release, **captures its install-time values (`helm get values`) and the live HPA min/max replicas**, then upgrades with `helm/values-base.yaml` + the captured values + the live HPA bounds — so operator tuning (e.g. a raised `maxReplicas`) survives the upgrade
+5. Re-applies the captured CLISH scan policy to `my-release` only (not `rv` — it runs with unlimited decompression)
+6. Verifies the **chart's HPA exists** for each release, and that no KEDA ScaledObject targets the chart-owned scanner (KEDA must scale only our scanner-app)
+7. Verifies scanner pods are running
+8. Runs a sanity scan — via the ingest bucket if the scanner-app module is deployed, otherwise it prints the published SSM endpoint and an SDK one-liner for a manual check
 
-The script checks whether a newer version is available and exits early if already up to date. To force a specific version (e.g., rollback or skip a release), use `--version X.Y.Z`. Other options: `--dry-run` to preview without executing, `--skip-sanity` to skip the test scan.
+To pin a specific version (e.g., rollback or skip a release), use `--version X.Y.Z`. Other options: `--dry-run` to preview without executing, `--skip-sanity` to skip the test scan.
 
-**Do not run `helm upgrade` manually** — a plain `helm upgrade` without all `--set` values reverts to chart defaults, re-enabling HPA (conflicts with KEDA) and resetting resources. The script ensures all custom values are specified. Do not use `--reuse-values` — if the new chart version renames or adds values, it can cause silent misconfiguration.
+**Do not run `helm upgrade` manually without `-f helm/values-base.yaml`** — a plain `helm upgrade` reverts to chart defaults, losing the EFS ephemeral volume, the database storage class, and the ingress settings. Do not use `--reuse-values` — if the new chart version renames or adds values, it can cause silent misconfiguration.
 
-These resources are **not affected** by `helm upgrade` and do not need re-applying: KEDA ScaledObjects, PodDisruptionBudgets, Pod Identity associations, scanner-app deployment, and CLISH scan policy settings.
+These resources are **not affected** by `helm upgrade` and do not need re-applying: the KEDA ScaledObject (scanner-app), PodDisruptionBudgets, Pod Identity associations, the scanner-app deployment, and CLISH scan policy settings (the script re-applies the policy anyway as a safeguard).
 
 ## Security
 
 - All S3 buckets use AES256 encryption with public access fully blocked
 - SQS queues use server-side encryption
-- All S3 buckets have `DeletionPolicy: Retain` — they survive stack deletion to preserve files for forensic investigation
+- All stack-created S3 buckets have `DeletionPolicy: Retain` — they survive stack deletion to preserve files for forensic investigation
+- In existing-bucket mode, the stack never deletes objects from your bucket, and the scanner-app IAM role has no `s3:DeleteObject` permission on it
 - ECR repository has scan-on-push enabled for container vulnerability scanning
 - IMDSv2 is enforced on all nodes
 - EBS volumes are encrypted
 - EFS filesystem is encrypted at rest and in transit (TLS mount option)
+- The scanner endpoint is never internet-facing — the NLB and ALB are both internal (VPC-only), and ALB mode adds TLS via your ACM certificate
 - VPC Flow Logs capture all network traffic
 - EKS audit logging is enabled for all control plane components
 - IAM policies use least-privilege, resource-scoped permissions
-- Review scanner IAM role has no write access to the review bucket, preventing routing loops back to the review pipeline
+- The review scanner IAM role (when deployed) has no write access to the review bucket, preventing routing loops back to the review pipeline
 - Credentials are stored in Secrets Manager, never in plaintext
 - The V1FS Helm chart is GPG-verified before installation
 
@@ -491,14 +600,20 @@ These resources are **not affected** by `helm upgrade` and do not need re-applyi
 aws cloudformation delete-stack --stack-name my-scanner
 ```
 
-A pre-delete cleanup Lambda runs automatically during stack deletion — it terminates Karpenter-managed EC2 instances, cleans up orphaned instance profiles, and deletes orphaned EBS volumes before CloudFormation removes the roles and cluster. No manual cleanup is needed for these resources. Review pipeline SQS queues, the review DLQ remediation Lambda, and the review audit log group are also deleted with the stack.
+A pre-delete cleanup Lambda runs automatically during stack deletion — it removes the load balancers created by the AWS Load Balancer Controller (the scanner NLB or ALB), their target groups, and their security groups (identified by the `elbv2.k8s.aws/cluster=<cluster-name>` tag), and deletes orphaned EBS volumes before CloudFormation removes the roles and cluster. No manual cleanup is needed for these resources. Scanner-app and review pipeline resources (queues, Lambdas, log groups, the SSM endpoint parameter) are CloudFormation-managed and deleted with the stack.
 
-Note: All S3 buckets (ingest, clean, review, quarantine) have `DeletionPolicy: Retain` and are **not deleted** with the stack. This prevents accidental data loss — scanned files, review items, and quarantined malware are preserved for forensic investigation or audit. The ECR repository and its images **are** deleted with the stack. To clean up retained buckets after stack deletion:
+Notes:
+
+- All stack-created S3 buckets (ingest, clean, quarantine, review) have `DeletionPolicy: Retain` and are **not deleted** with the stack. This prevents accidental data loss — scanned files and quarantined malware are preserved for forensic investigation or audit.
+- In existing-bucket mode, **your bucket is never touched** — objects, tags, and notification configuration are all left exactly as they are.
+- The ECR repository and its images **are** deleted with the stack.
+
+To clean up retained buckets after stack deletion:
 
 ```bash
 # List retained buckets (names are in the stack outputs, saved before deletion)
 aws s3 rb s3://<ingest-bucket> --force
 aws s3 rb s3://<clean-bucket> --force
-aws s3 rb s3://<review-bucket> --force
 aws s3 rb s3://<quarantine-bucket> --force
+aws s3 rb s3://<review-bucket> --force   # if the review pipeline was deployed
 ```

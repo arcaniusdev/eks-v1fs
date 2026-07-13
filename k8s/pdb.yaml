@@ -1,3 +1,5 @@
+# PodDisruptionBudgets protect scanning workloads from node drains during
+# Cluster Autoscaler scale-down (and any other voluntary disruption).
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

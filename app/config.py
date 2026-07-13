@@ -34,6 +34,7 @@ class Config:
     health_port: int
     max_file_size_mb: int
     review_routing_enabled: bool
+    delete_source_enabled: bool
     sqs_visibility_timeout: int
     audit_queue_max_size: int
     reconciliation_enabled: bool
@@ -89,6 +90,7 @@ def load_config() -> Config:
         health_port=_int_env("HEALTH_PORT", "8080", 1, 65535),
         max_file_size_mb=_int_env("MAX_FILE_SIZE_MB", "500", 0, 4096),
         review_routing_enabled=review_routing_enabled,
+        delete_source_enabled=os.environ.get("DELETE_SOURCE_ENABLED", "true").lower() == "true",
         sqs_visibility_timeout=_int_env("SQS_VISIBILITY_TIMEOUT", "300", 30, 43200),
         audit_queue_max_size=_int_env("AUDIT_QUEUE_MAX_SIZE", "1000", 100, 100000),
         reconciliation_enabled=os.environ.get("RECONCILIATION_ENABLED", "false").lower() == "true",

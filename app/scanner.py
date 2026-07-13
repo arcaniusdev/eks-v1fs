@@ -146,10 +146,10 @@ class ScannerApp:
         )
         try:
             body = json.loads(message["Body"])
-            records = body.get("Records", [])
+            records = self._extract_records(body)
             if not records:
-                # s3:TestEvent or empty — discard
-                logger.info("No Records in message %s, deleting", message_id)
+                # s3:TestEvent, non-Object-Created EventBridge event, or empty — discard
+                logger.info("No processable records in message %s, deleting", message_id)
                 await self._delete_message(receipt_handle)
                 return
 
@@ -158,11 +158,9 @@ class ScannerApp:
                 try:
                     await self._process_record(record, message_id)
                 except Exception:
-                    bucket = record.get("s3", {}).get("bucket", {}).get("name", "?")
-                    key = record.get("s3", {}).get("object", {}).get("key", "?")
                     logger.exception(
                         "Failed processing record s3://%s/%s [msg=%s]",
-                        bucket, key, message_id,
+                        record.get("bucket", "?"), record.get("key", "?"), message_id,
                     )
                     all_succeeded = False
 
@@ -188,17 +186,52 @@ class ScannerApp:
             except asyncio.CancelledError:
                 pass
 
+    @staticmethod
+    def _extract_records(body: dict) -> list[dict]:
+        """Normalize S3 event notifications and EventBridge S3 events into
+        [{bucket, key, size}] records.
+
+        Two message shapes arrive on the queue:
+        - S3 event notification (stack-created bucket → SQS directly):
+          body["Records"][*].s3.bucket.name / .object.key — keys are
+          form-encoded (spaces as '+'), so unquote_plus is required.
+        - EventBridge "Object Created" (existing customer bucket → EventBridge
+          rule → SQS): body["detail"].bucket.name / .object.key — keys are
+          raw, NOT URL-encoded. Decoding them would corrupt keys containing
+          literal '+' or '%' characters.
+        """
+        records = []
+        if "Records" in body:
+            for record in body.get("Records", []):
+                s3_data = record.get("s3", {})
+                bucket = s3_data.get("bucket", {}).get("name")
+                key_encoded = s3_data.get("object", {}).get("key")
+                if not bucket or not key_encoded:
+                    logger.error("Malformed S3 record (missing bucket/key)")
+                    continue
+                records.append({
+                    "bucket": bucket,
+                    "key": urllib.parse.unquote_plus(key_encoded),
+                    "size": s3_data.get("object", {}).get("size", 0),
+                })
+        elif body.get("detail-type") == "Object Created":
+            detail = body.get("detail", {})
+            bucket = detail.get("bucket", {}).get("name")
+            key = detail.get("object", {}).get("key")
+            if not bucket or not key:
+                logger.error("Malformed EventBridge S3 event (missing bucket/key)")
+            else:
+                records.append({
+                    "bucket": bucket,
+                    "key": key,  # EventBridge keys are raw — no decoding
+                    "size": detail.get("object", {}).get("size", 0),
+                })
+        return records
+
     async def _process_record(self, record: dict, message_id: str) -> None:
-        # S3 event notifications encode spaces as '+' (form-encoded).
-        # Use unquote_plus to correctly decode spaces in S3 keys.
-        s3_data = record.get("s3", {})
-        bucket = s3_data.get("bucket", {}).get("name")
-        key_encoded = s3_data.get("object", {}).get("key")
-        if not bucket or not key_encoded:
-            logger.error("Malformed S3 record (missing bucket/key) [msg=%s]", message_id)
-            return
-        key = urllib.parse.unquote_plus(key_encoded)
-        size = s3_data.get("object", {}).get("size", 0)
+        bucket = record["bucket"]
+        key = record["key"]
+        size = record["size"]
 
         logger.info(
             "Processing s3://%s/%s (%d bytes) [msg=%s]",
@@ -231,7 +264,7 @@ class ScannerApp:
                 Tagging=f"ScanResult={tag}",
                 TaggingDirective="REPLACE",
             )
-            await self._delete_object(bucket, key)
+            await self._finalize_source(bucket, key, {"ScanResult": tag})
             self._enqueue_audit(key, size, verdict, {}, 0, message_id)
             return
 
@@ -262,11 +295,15 @@ class ScannerApp:
             is_malicious = result.get("scanResult", 0) > 0
             decompression_errors = self._get_decompression_errors(result)
 
-            # Route: malicious → quarantine, decompression errors → review, clean → clean
+            # Route: malicious → quarantine; decompression errors → review
+            # (or quarantine with explanatory tags when review is disabled —
+            # these files were NOT fully inspected and must not be marked clean);
+            # clean → clean
+            tags = {}
             if is_malicious:
                 dest_bucket = self.config.s3_quarantine_bucket
                 verdict = "malicious"
-                tag = "S3-Malware"
+                tags["ScanResult"] = "S3-Malware"
                 malware_names = [m.get("malwareName", "") for m in result.get("foundMalwares", [])]
                 logger.warning(
                     "MALICIOUS: s3://%s/%s → s3://%s/%s sha256=%s malware=%s",
@@ -277,22 +314,32 @@ class ScannerApp:
             elif decompression_errors and self.config.review_routing_enabled:
                 dest_bucket = self.config.s3_review_bucket
                 verdict = "review"
-                tag = "S3-Review"
+                tags["ScanResult"] = "S3-Review"
                 logger.warning(
                     "REVIEW: s3://%s/%s → s3://%s/%s (decompression limit errors: %s)",
+                    bucket, key, dest_bucket, key, decompression_errors,
+                )
+            elif decompression_errors:
+                dest_bucket = self.config.s3_quarantine_bucket
+                verdict = "quarantined-decompression-limit"
+                tags["ScanResult"] = "S3-DecompressionLimit"
+                tags["ScanErrors"] = ",".join(decompression_errors)
+                logger.warning(
+                    "DECOMPRESSION LIMIT: s3://%s/%s → s3://%s/%s (errors: %s, "
+                    "review pipeline disabled — quarantining incompletely-scanned file)",
                     bucket, key, dest_bucket, key, decompression_errors,
                 )
             else:
                 dest_bucket = self.config.s3_clean_bucket
                 verdict = "clean"
-                tag = "S3-Clean"
+                tags["ScanResult"] = "S3-Clean"
                 logger.info(
                     "CLEAN: s3://%s/%s → s3://%s/%s",
                     bucket, key, dest_bucket, key,
                 )
 
-            await self._upload(dest_bucket, key, file_bytes, tag)
-            await self._delete_object(bucket, key)
+            await self._upload(dest_bucket, key, file_bytes, tags)
+            await self._finalize_source(bucket, key, tags)
             self._enqueue_audit(key, size, verdict, result, scan_duration_ms, message_id)
         finally:
             del file_bytes  # Explicit cleanup of large buffer
@@ -337,14 +384,31 @@ class ScannerApp:
         async with resp["Body"] as stream:
             return await stream.read()
 
-    async def _upload(self, bucket: str, key: str, data: bytes, tag: str | None = None) -> None:
+    async def _upload(self, bucket: str, key: str, data: bytes, tags: dict | None = None) -> None:
         kwargs = {"Bucket": bucket, "Key": key, "Body": data}
-        if tag:
-            kwargs["Tagging"] = f"ScanResult={tag}"
+        if tags:
+            kwargs["Tagging"] = urllib.parse.urlencode(tags)
         await self.s3_client.put_object(**kwargs)
 
     async def _delete_object(self, bucket: str, key: str) -> None:
         await self.s3_client.delete_object(Bucket=bucket, Key=key)
+
+    async def _finalize_source(self, bucket: str, key: str, tags: dict) -> None:
+        """Finalize the source object after routing.
+
+        Default (stack-owned ingest bucket): delete the source — the verdict
+        bucket now holds the file. Existing-customer-bucket mode
+        (DELETE_SOURCE_ENABLED=false): never delete a customer's object;
+        tag it with the verdict instead so the result is visible in place.
+        """
+        if self.config.delete_source_enabled:
+            await self._delete_object(bucket, key)
+        else:
+            await self.s3_client.put_object_tagging(
+                Bucket=bucket,
+                Key=key,
+                Tagging={"TagSet": [{"Key": k, "Value": v} for k, v in tags.items()]},
+            )
 
     async def _delete_message(self, receipt_handle: str) -> None:
         await self.sqs_client.delete_message(
