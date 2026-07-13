@@ -33,6 +33,7 @@ class Config:
     audit_log_group: str
     health_port: int
     max_file_size_mb: int
+    max_inflight_bytes: int
     review_routing_enabled: bool
     delete_source_enabled: bool
     sqs_visibility_timeout: int
@@ -89,6 +90,10 @@ def load_config() -> Config:
         audit_log_group=os.environ.get("AUDIT_LOG_GROUP", ""),
         health_port=_int_env("HEALTH_PORT", "8080", 1, 65535),
         max_file_size_mb=_int_env("MAX_FILE_SIZE_MB", "500", 0, 4096),
+        # Total downloaded bytes allowed in memory across concurrent scans.
+        # Floored to one max-size file at runtime. Keep it comfortably below
+        # the pod memory limit (files are held as bytes plus scan overhead).
+        max_inflight_bytes=_int_env("MAX_INFLIGHT_MB", "1024", 0, 65536) * 1024 * 1024,
         review_routing_enabled=review_routing_enabled,
         delete_source_enabled=os.environ.get("DELETE_SOURCE_ENABLED", "true").lower() == "true",
         # Default matches the deploy.sh ConfigMap and the ScanTimeoutSeconds

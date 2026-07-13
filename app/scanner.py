@@ -47,6 +47,120 @@ DECOMPRESSION_ERROR_NAMES = frozenset({
 })
 
 
+class ByteBudget:
+    """Async semaphore over a byte budget.
+
+    Gates in-memory work so the total bytes held across concurrent scans stays
+    under a limit, protecting the pod from OOM when many large files arrive at
+    once — a bound the plain count semaphore (MAX_CONCURRENT_SCANS) can't give,
+    since 50 × 500 MB would dwarf any reasonable pod. A request larger than the
+    whole budget is clamped so it still runs (alone, when it reaches the front).
+    A total of 0 disables gating.
+    """
+
+    def __init__(self, total: int) -> None:
+        self._total = total
+        self._available = total
+        self._cond = asyncio.Condition()
+
+    async def acquire(self, n: int) -> int:
+        if self._total <= 0:
+            return 0
+        n = max(0, min(n, self._total))
+        async with self._cond:
+            while self._available < n:
+                await self._cond.wait()
+            self._available -= n
+        return n
+
+    async def release(self, n: int) -> None:
+        if self._total <= 0 or n <= 0:
+            return
+        async with self._cond:
+            self._available += n
+            self._cond.notify_all()
+
+
+_DELETE_STOP = object()
+
+
+class DeleteBatcher:
+    """Coalesces SQS message deletions into DeleteMessageBatch calls.
+
+    Message processors hand receipt handles here instead of calling
+    DeleteMessage per message; a background loop flushes up to 10 at a time
+    (the SQS batch limit) once that many accumulate or a short window elapses.
+    Cuts SQS delete API calls by up to 10x at load.
+    """
+
+    MAX_BATCH = 10
+
+    def __init__(self, sqs_client, queue_url: str, flush_interval: float = 0.2) -> None:
+        self._sqs = sqs_client
+        self._queue_url = queue_url
+        self._flush_interval = flush_interval
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._task: asyncio.Task | None = None
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._run())
+
+    async def add(self, receipt_handle: str) -> None:
+        await self._queue.put(receipt_handle)
+
+    async def stop(self) -> None:
+        """Flush everything enqueued so far, then stop. Safe because all
+        message producers have finished before this is called at shutdown."""
+        if self._task is None:
+            return
+        await self._queue.put(_DELETE_STOP)
+        await self._task
+
+    async def _run(self) -> None:
+        loop = asyncio.get_event_loop()
+        while True:
+            first = await self._queue.get()
+            if first is _DELETE_STOP:
+                return
+            batch = [first]
+            deadline = loop.time() + self._flush_interval
+            while len(batch) < self.MAX_BATCH:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                try:
+                    item = await asyncio.wait_for(self._queue.get(), remaining)
+                except asyncio.TimeoutError:
+                    break
+                if item is _DELETE_STOP:
+                    await self._flush(batch)
+                    return
+                batch.append(item)
+            await self._flush(batch)
+
+    async def _flush(self, batch: list) -> None:
+        if not batch:
+            return
+        try:
+            resp = await self._sqs.delete_message_batch(
+                QueueUrl=self._queue_url,
+                Entries=[
+                    {"Id": str(i), "ReceiptHandle": h} for i, h in enumerate(batch)
+                ],
+            )
+            failed = resp.get("Failed", [])
+            if failed:
+                logger.warning(
+                    "SQS batch delete: %d of %d failed; those messages reappear "
+                    "after the visibility timeout and are re-scanned",
+                    len(failed), len(batch),
+                )
+        except Exception:
+            logger.warning(
+                "SQS batch delete failed for %d messages", len(batch), exc_info=True
+            )
+
+
 class ScannerApp:
     def __init__(self, config) -> None:
         self.config = config
@@ -54,6 +168,13 @@ class ScannerApp:
         self.semaphore = asyncio.Semaphore(config.max_concurrent_scans)
         self.in_flight: set[asyncio.Task] = set()
         self.max_file_size = config.max_file_size_mb * 1024 * 1024
+        # Memory guard: bound total downloaded bytes held across concurrent
+        # scans. Floor at one max-size file so a single large file never
+        # deadlocks against its own budget.
+        self._byte_budget = ByteBudget(
+            max(config.max_inflight_bytes, self.max_file_size)
+        )
+        self._delete_batcher: DeleteBatcher | None = None
         self.scan_handle = None
         self.session = AioSession()
         self._exit_stack = AsyncExitStack()
@@ -95,6 +216,9 @@ class ScannerApp:
         self.scan_handle = amaas.grpc.aio.init(
             self.config.v1fs_server_addr, api_key, False
         )
+
+        self._delete_batcher = DeleteBatcher(self.sqs_client, self.config.sqs_queue_url)
+        self._delete_batcher.start()
 
         self._ready = True
         await self._start_health_server()
@@ -171,7 +295,7 @@ class ScannerApp:
             if not records:
                 # s3:TestEvent, non-Object-Created EventBridge event, or empty — discard
                 logger.info("No processable records in message %s, deleting", message_id)
-                await self._delete_message(receipt_handle)
+                await self._delete_batcher.add(receipt_handle)
                 return
 
             all_succeeded = True
@@ -186,7 +310,7 @@ class ScannerApp:
                     all_succeeded = False
 
             if all_succeeded:
-                await self._delete_message(receipt_handle)
+                await self._delete_batcher.add(receipt_handle)
             else:
                 logger.warning(
                     "One or more records failed in message %s — shortening visibility for fast retry",
@@ -196,7 +320,7 @@ class ScannerApp:
 
         except json.JSONDecodeError:
             logger.exception("Malformed message body [msg=%s], deleting", message_id)
-            await self._delete_message(receipt_handle)
+            await self._delete_batcher.add(receipt_handle)
         except Exception:
             logger.exception("Failed processing message %s — shortening visibility for fast retry", message_id)
             await self._shorten_visibility(receipt_handle)
@@ -289,11 +413,18 @@ class ScannerApp:
             self._enqueue_audit(key, size, verdict, {}, 0, message_id)
             return
 
+        # Reserve the memory budget before pulling the file into RAM. This
+        # bounds total in-flight bytes across concurrent scans (on top of the
+        # count semaphore), so a burst of large files can't OOM the pod.
+        reserved = await self._byte_budget.acquire(size)
+
         # Download into memory
         try:
             file_bytes = await self._download(bucket, key)
-        except ClientError as exc:
-            if exc.response["Error"]["Code"] == "NoSuchKey":
+        except BaseException as exc:
+            await self._byte_budget.release(reserved)
+            if isinstance(exc, ClientError) and \
+                    exc.response["Error"]["Code"] == "NoSuchKey":
                 logger.warning(
                     "Object s3://%s/%s no longer exists, skipping",
                     bucket, key,
@@ -364,6 +495,7 @@ class ScannerApp:
             self._enqueue_audit(key, size, verdict, result, scan_duration_ms, message_id)
         finally:
             del file_bytes  # Explicit cleanup of large buffer
+            await self._byte_budget.release(reserved)
 
     @staticmethod
     def _get_decompression_errors(result: dict) -> list[str]:
@@ -430,12 +562,6 @@ class ScannerApp:
                 Key=key,
                 Tagging={"TagSet": [{"Key": k, "Value": v} for k, v in tags.items()]},
             )
-
-    async def _delete_message(self, receipt_handle: str) -> None:
-        await self.sqs_client.delete_message(
-            QueueUrl=self.config.sqs_queue_url,
-            ReceiptHandle=receipt_handle,
-        )
 
     # --- Health Server ---
 
@@ -600,6 +726,13 @@ class ScannerApp:
         )
         if self.in_flight:
             await asyncio.gather(*self.in_flight, return_exceptions=True)
+        # Flush pending SQS deletes before the client closes — all message
+        # producers are done now, so this drains every queued handle.
+        if self._delete_batcher:
+            try:
+                await asyncio.wait_for(self._delete_batcher.stop(), timeout=10)
+            except asyncio.TimeoutError:
+                logger.warning("Delete batcher flush timed out; some messages may reappear")
         if self._reconciliation_task:
             self._reconciliation_task.cancel()
             try:

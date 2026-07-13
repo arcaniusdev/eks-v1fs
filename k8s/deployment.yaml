@@ -60,10 +60,13 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              memory: "512Mi"
+              memory: "1Gi"
               cpu: "500m"
+            # Limit must hold one max-size file (MAX_FILE_SIZE_MB, default 500)
+            # as bytes plus scan/gRPC overhead. The in-memory byte budget
+            # (MAX_INFLIGHT_MB) keeps concurrent downloads under this ceiling.
             limits:
-              memory: "1024Mi"
+              memory: "2Gi"
               cpu: "1000m"
           securityContext:
             allowPrivilegeEscalation: false
