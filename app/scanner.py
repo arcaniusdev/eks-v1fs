@@ -28,7 +28,6 @@ import time
 import urllib.parse
 from contextlib import AsyncExitStack
 
-import boto3
 import amaas.grpc.aio
 from aiobotocore.session import AioSession
 from botocore.exceptions import ClientError
@@ -78,12 +77,14 @@ class ScannerApp:
             )
 
         logger.info("Retrieving V1FS API key from Secrets Manager")
-        sm_client = boto3.client(
+        # Async client — a blocking boto3 call here would stall the event loop
+        # (and the readiness probe) if Secrets Manager is slow at startup.
+        async with self.session.create_client(
             "secretsmanager", region_name=self.config.aws_region
-        )
-        resp = sm_client.get_secret_value(
-            SecretId=self.config.v1fs_api_key_secret_arn
-        )
+        ) as sm_client:
+            resp = await sm_client.get_secret_value(
+                SecretId=self.config.v1fs_api_key_secret_arn
+            )
         api_key = resp["SecretString"]
 
         logger.info(

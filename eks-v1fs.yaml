@@ -1890,6 +1890,84 @@ Resources:
         - Key: Purpose
           Value: file-scan-review
 
+  # TLS-only bucket policies (CIS S3 best practice): deny any request not
+  # made over HTTPS. Defense-in-depth on top of encryption + public-access-block.
+  IngestBucketTLSPolicy:
+    Condition: CreateIngestBucket
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref IngestBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt IngestBucket.Arn
+              - !Sub ${IngestBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  CleanBucketTLSPolicy:
+    Condition: ScannerAppEnabled
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CleanBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt CleanBucket.Arn
+              - !Sub ${CleanBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  QuarantineBucketTLSPolicy:
+    Condition: ScannerAppEnabled
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref QuarantineBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt QuarantineBucket.Arn
+              - !Sub ${QuarantineBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  ReviewBucketTLSPolicy:
+    Condition: ReviewEnabled
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ReviewBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ReviewBucket.Arn
+              - !Sub ${ReviewBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
   FileScanDLQ:
     Condition: ScannerAppEnabled
     Type: AWS::SQS::Queue
@@ -1947,6 +2025,10 @@ Resources:
               Condition:
                 ArnEquals:
                   aws:SourceArn: !GetAtt EventBridgeIngestRule.Arn
+                StringEquals:
+                  # Defense-in-depth against a cross-account confused-deputy:
+                  # only our own account's EventBridge rule may deliver here.
+                  aws:SourceAccount: !Ref AWS::AccountId
             - !Ref AWS::NoValue
 
   # --- Existing-bucket wiring (S3 -> EventBridge -> SQS) ---

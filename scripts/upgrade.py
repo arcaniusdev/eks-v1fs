@@ -78,8 +78,14 @@ def get_current_scan_policy():
             if line.startswith(field_label):
                 # Parse value from "Max Decompress Layer Limit : 10" or "Max Decompression Size : 512 MB"
                 val = line.split(":")[-1].strip().replace(" MB", "")
-                if val:
+                # These are always integers. Validate before use — the values
+                # are later interpolated into a shell command, so rejecting
+                # non-numeric input closes any command-injection surface if the
+                # CLISH output format ever changes unexpectedly.
+                if val.isdigit():
                     policy[flag_name] = val
+                elif val:
+                    print(f"  WARNING: non-numeric scan-policy value for {flag_name!r}: {val!r} — skipping")
     return policy
 
 

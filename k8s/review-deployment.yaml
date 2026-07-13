@@ -15,6 +15,13 @@ spec:
     spec:
       serviceAccountName: review-scanner-app
       terminationGracePeriodSeconds: 300
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: review-scanner-app
       securityContext:
         runAsNonRoot: true
         runAsUser: 999

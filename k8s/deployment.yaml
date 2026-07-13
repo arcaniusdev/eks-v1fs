@@ -15,6 +15,15 @@ spec:
     spec:
       serviceAccountName: scanner-app
       terminationGracePeriodSeconds: 300
+      # Spread replicas across nodes so a single node loss / autoscaler
+      # scale-down can't take out a large share of the fleet at once.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: scanner-app
       securityContext:
         runAsNonRoot: true
         runAsUser: 999
