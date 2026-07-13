@@ -84,7 +84,7 @@ Key details:
 | Shape | Source | Location of bucket/key | Key encoding |
 |---|---|---|---|
 | S3 event notification | Stack-created ingest bucket → SQS directly | `Records[].s3.bucket.name` / `.object.key` | Form-encoded (spaces as `+`) — MUST use `urllib.parse.unquote_plus()` |
-| EventBridge "Object Created" | Existing customer bucket → EventBridge rule → SQS | `detail.bucket.name` / `detail.object.key` | RAW — NO URL decoding. Decoding would corrupt keys containing literal `+` or `%` |
+| EventBridge "Object Created" | Existing user bucket → EventBridge rule → SQS | `detail.bucket.name` / `detail.object.key` | RAW — NO URL decoding. Decoding would corrupt keys containing literal `+` or `%` |
 
 Messages with no processable records (e.g., `s3:TestEvent`, non-Object-Created EventBridge events) are deleted without processing.
 
@@ -106,13 +106,13 @@ Messages with no processable records (e.g., `s3:TestEvent`, non-Object-Created E
 After routing, `_finalize_source()` handles the source object based on `DELETE_SOURCE_ENABLED`:
 
 - **`true` (default — stack-owned ingest bucket)**: delete the source object; the verdict bucket now holds the file
-- **`false` (existing-customer-bucket mode)**: NEVER delete the customer's object — tag it with the verdict via `put_object_tagging` so the result is visible in place. The IAM policy enforces this: `ScannerAppRole` has `s3:PutObjectTagging` instead of `s3:DeleteObject` on existing buckets
+- **`false` (existing-user-bucket mode)**: NEVER delete the user's object — tag it with the verdict via `put_object_tagging` so the result is visible in place. The IAM policy enforces this: `ScannerAppRole` has `s3:PutObjectTagging` instead of `s3:DeleteObject` on existing buckets
 
 `bootstrap.sh` sets `DELETE_SOURCE_ENABLED=false` automatically when `ExistingIngestBucket` is configured.
 
 ## File Lifecycle
 
-1. **File arrives in the ingest bucket** (stack-created or customer-owned)
+1. **File arrives in the ingest bucket** (stack-created or user-owned)
 2. **Notification** → SQS message: direct S3 → SQS (created bucket) or S3 → EventBridge rule → SQS (existing bucket)
 3. **Scanner-app** picks up the message, downloads the file, scans via gRPC to the main V1FS scanner (`my-release`)
 4. **Routing decision** per the table above; source object deleted or tagged per `DELETE_SOURCE_ENABLED`
@@ -237,6 +237,6 @@ How it works:
 |---|---|
 | Review pipeline deployed | Review scanner-app (`RECONCILIATION_ENABLED=true` in the review ConfigMap) |
 | No review pipeline, stack-created ingest bucket | MAIN scanner-app — `deploy.sh` adds the reconciliation block to the main ConfigMap when review routing is false and delete-source is true. `ScannerAppRole` includes `sqs:SendMessage` on the main queue for this |
-| Existing-bucket mode (`DELETE_SOURCE_ENABLED=false`) | Forced OFF — customer objects legitimately remain in the bucket, so "old object" does not mean "orphaned" |
+| Existing-bucket mode (`DELETE_SOURCE_ENABLED=false`) | Forced OFF — user objects legitimately remain in the bucket, so "old object" does not mean "orphaned" |
 
 The `ReviewScannerAppRole` includes `s3:ListBucket` on the ingest bucket and `sqs:SendMessage` on the main FileScanQueue for the review-hosted case.

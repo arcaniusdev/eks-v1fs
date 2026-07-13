@@ -14,19 +14,23 @@ aws login
 
 Both methods obtain temporary session credentials — no long-lived access keys required. If AWS CLI commands fail with `ExpiredToken` or `InvalidClientTokenId`, prompt the user to re-authenticate by running `aws login` or `aws sso login` again. Do not attempt AWS operations without valid credentials.
 
+## Public Repository Hygiene
+
+This repository is PUBLIC. Never commit: AWS account IDs, credentials/tokens/keys of any kind, internal or identifying information (names, emails, internal URLs/hostnames), or references to specific organizations, engagements, or deployments. Use placeholders like `<ACCOUNT_ID>` in examples. Generic terms only ("user", "evaluation") — review every diff for these before committing.
+
 ## Branding
 
 Trend Micro has rebranded to **TrendAI**. Always use "TrendAI" in user-facing text (README, docs, comments). Internal references in code, SDK package names, Helm chart URLs, and config values still use the old naming (e.g., `visionone-filesecurity`, `trendmicro.github.io`) — do not change those.
 
 ## Project Overview
 
-POC-friendly EKS deployment of the TrendAI V1FS containerized scanner, aligned with TrendAI's supported deployment methodology (chart-native HPA, standard Cluster Autoscaler, pinned chart 1.4.10). A single CloudFormation template (`eks-v1fs.yaml`) provisions everything; optional modules are toggled by parameters:
+evaluation-friendly EKS deployment of the TrendAI V1FS containerized scanner, aligned with TrendAI's supported deployment methodology (chart-native HPA, standard Cluster Autoscaler, pinned chart 1.4.10). A single CloudFormation template (`eks-v1fs.yaml`) provisions everything; optional modules are toggled by parameters:
 
 | Mode | Parameters | What you get |
 |---|---|---|
 | Default full-auto | (defaults) | V1FS scanner + our scanner-app: drop files in the ingest bucket → routed to clean/quarantine |
 | BYO scanning app | `DeployScannerApp=false` | V1FS scanner only + gRPC endpoint (internal NLB by default) published to SSM `/<stack>/scanner-endpoint` |
-| Existing bucket | `ExistingIngestBucket=<name>` | Scans a customer-owned bucket via S3→EventBridge→SQS; objects are tagged with verdicts, never deleted |
+| Existing bucket | `ExistingIngestBucket=<name>` | Scans a user-owned bucket via S3→EventBridge→SQS; objects are tagged with verdicts, never deleted |
 | Full + review | `DeployReviewPipeline=true` | Adds the second `rv` release (unlimited decompression) for deep archive analysis |
 
 ```
@@ -93,7 +97,7 @@ project/
 | Review scanner-app pods (KEDA) | 5 | `k8s/review-scaledobject.yaml` |
 | Review V1FS scanner pods (chart HPA) | 3 | `scripts/bootstrap.sh` rv install |
 
-Full-mode peak ≈ 26 vCPU → 8 × r7i.xlarge nodes; fits within the default 64 on-demand vCPU quota (32 vCPU). No quota increase needed at POC scale.
+Full-mode peak ≈ 26 vCPU → 8 × r7i.xlarge nodes; fits within the default 64 on-demand vCPU quota (32 vCPU). No quota increase needed at evaluation scale.
 Review pipeline keeps 1 pod warm at all times (min replicas = 1) to avoid cold-start gRPC failures.
 Expect 1–3 minutes for HPA + Cluster Autoscaler scale-up under load — normal for the supported configuration (the old KEDA/Karpenter 150-pod burst benchmarks no longer apply).
 
@@ -168,8 +172,8 @@ Expect 1–3 minutes for HPA + Cluster Autoscaler scale-up under load — normal
 - **Endpoint address is published to SSM** — the bastion waits for the LB hostname and writes `/<stack-name>/scanner-endpoint`. Read it: `aws ssm get-parameter --name /<stack>/scanner-endpoint --query Parameter.Value --output text`
 - **Both chart ingresses default to `enabled: true` upstream** — `helm/values-base.yaml` explicitly disables `scanner.ingress` and `managementService.ingress`. Never remove those lines; an installed ALB ingress class would silently expose them
 
-### Existing-Bucket Mode (Customer-Owned Ingest)
-- **Wiring is S3 → EventBridge → SQS** — an `AWS::Events::Rule` filtered on the bucket name targets the scan queue. NEVER write a `QueueConfiguration` onto a customer bucket: `put-bucket-notification-configuration` is a full-replace API and would destroy their existing notification wiring
+### Existing-Bucket Mode (User-Owned Ingest)
+- **Wiring is S3 → EventBridge → SQS** — an `AWS::Events::Rule` filtered on the bucket name targets the scan queue. NEVER write a `QueueConfiguration` onto a user bucket: `put-bucket-notification-configuration` is a full-replace API and would destroy their existing notification wiring
 - **EventBridge enablement MERGES** — `EnableEventBridgeFunction` (custom resource) reads the bucket's current notification config, adds `EventBridgeConfiguration` alongside it, and writes the merged document. Stack Delete is a no-op on the bucket
 - **Tag, don't delete** — scanner-app runs `DELETE_SOURCE_ENABLED=false`: source objects are tagged with the verdict (`ScanResult=...`) via `put_object_tagging`, never deleted. IAM has `s3:GetObject`/`s3:PutObjectTagging`/`s3:ListBucket` on the bucket, NO `s3:DeleteObject`
 - **EventBridge S3 event keys are RAW** (not URL-encoded), unlike S3 notifications (form-encoded, need `unquote_plus`). `scanner.py:_extract_records()` handles both shapes — keep the decoding asymmetry intact
@@ -201,20 +205,20 @@ Expect 1–3 minutes for HPA + Cluster Autoscaler scale-up under load — normal
 ### Cleanup & Lifecycle
 - **Pre-delete cleanup Lambda** — `CleanupLambda` runs automatically during stack deletion. It deletes LB-controller-created load balancers/target groups/security groups (tagged `elbv2.k8s.aws/cluster=<cluster>` — the scanner NLB/ALB would otherwise orphan and block VPC deletion) and orphaned EBS volumes BEFORE CloudFormation tears down the VPC
 - **Review pipeline resources are cleaned up with the stack** — review SQS queues, review DLQ remediation Lambda, and review audit log group are all CloudFormation-managed and deleted automatically during stack deletion
-- **Existing-bucket mode never touches the customer bucket on teardown** — the EventBridge-enable custom resource is a no-op on Delete; the bucket, its objects, and its notification configuration are left exactly as found
+- **Existing-bucket mode never touches the user bucket on teardown** — the EventBridge-enable custom resource is a no-op on Delete; the bucket, its objects, and its notification configuration are left exactly as found
 - **Orphaned EBS volumes after stack deletion** — V1FS PVCs (100 GB gp3 each) persist after stack deletion. Always check: `aws ec2 describe-volumes --filters Name=status,Values=available`
 
 ## Scaling Architecture (Trend-Aligned)
 
-This deployment is deliberately aligned with TrendAI's supported methodology so POCs never run an unsupported configuration. History: an earlier iteration used KEDA to scale the chart-owned scanner and Karpenter for nodes (high-throughput, 150+150 pods) — that was removed in the July 2026 realignment. Do not reintroduce it.
+This deployment is deliberately aligned with TrendAI's supported methodology so evaluations never run an unsupported configuration. History: an earlier iteration used KEDA to scale the chart-owned scanner and Karpenter for nodes (high-throughput, 150+150 pods) — that was removed in the July 2026 realignment. Do not reintroduce it.
 
 ### Three scaling layers
 
 | Layer | Mechanism | Bounds | Why |
 |---|---|---|---|
 | V1FS scanner pods | Chart-native HPA (CPU 80% + memory 80%) | `ScannerMinReplicas`/`ScannerMaxReplicas` (1/10) | TrendAI's supported autoscaling. The scanner is memory-bound, so the memory target tracks load |
-| scanner-app pods (optional module) | KEDA on SQS depth | 1–`ScannerAppMaxReplicas` (20) | Our own component — queue depth is the natural signal; customer-owned territory, invisible to Trend supportability |
-| Nodes | Cluster Autoscaler on the managed node group | `NodeGroupMinSize`–`NodeGroupMaxSize` (2–8) | The standard Kubernetes default; Trend docs leave node scaling to the customer |
+| scanner-app pods (optional module) | KEDA on SQS depth | 1–`ScannerAppMaxReplicas` (20) | Our own component — queue depth is the natural signal; user-owned territory, invisible to Trend supportability |
+| Nodes | Cluster Autoscaler on the managed node group | `NodeGroupMinSize`–`NodeGroupMaxSize` (2–8) | The standard Kubernetes default; Trend docs leave node scaling to the user |
 
 ### Key configuration locations
 
@@ -234,7 +238,7 @@ The deploy script (`scripts/deploy.sh`) waits up to 300s for the scanner-app rol
 ## Performance Characteristics
 
 - **V1FS scanner is I/O and memory bound, not CPU bound** — the scanning engine loads signature databases into memory and spends most time on network I/O (gRPC) and disk operations. This is why the chart HPA's memory target (80%) matters as much as its CPU target, and why KEDA scales our scanner-app on queue depth rather than CPU
-- **HPA + CA scale-up takes 1–3 minutes** under sustained load — expected behavior for the supported configuration. Set POC throughput expectations accordingly; this deployment is tuned for correctness and supportability, not burst benchmarks
+- **HPA + CA scale-up takes 1–3 minutes** under sustained load — expected behavior for the supported configuration. Set evaluation throughput expectations accordingly; this deployment is tuned for correctness and supportability, not burst benchmarks
 - **r7i/r7a/r6i xlarge (memory-optimized) instances only** — 32 GiB per node provides headroom for signature databases; non-burstable CPU gives consistent performance; four 800m/2Gi scanner pods bin-pack per node
 - **Rewriting scanner-app in Go would not improve throughput** — the bottleneck is the V1FS scanner backend and network round-trips, not the Python runtime. The app spends nearly all time waiting on I/O
 - **gRPC scan timeout is configurable** — the V1FS SDK reads `TM_AM_SCAN_TIMEOUT_SECS` from environment (default 300s). Set to 600s in the configmap to prevent "Deadline Exceeded" on complex files. Files exceeding the timeout go to DLQ after 3 retries

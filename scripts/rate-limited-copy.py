@@ -8,10 +8,10 @@ Usage:
 
 Examples:
     # 20M files/day (~231/sec)
-    python3 rate-limited-copy.py eks-v1fs-malware-samples-865983313812 eks-v1fs-33-ingestbucket-xxx --rate 231
+    python3 rate-limited-copy.py eks-v1fs-malware-samples-<ACCOUNT_ID> eks-v1fs-33-ingestbucket-xxx --rate 231
 
     # 2M files/day (~23/sec)
-    python3 rate-limited-copy.py eks-v1fs-malware-samples-865983313812 eks-v1fs-33-ingestbucket-xxx --rate 23
+    python3 rate-limited-copy.py eks-v1fs-malware-samples-<ACCOUNT_ID> eks-v1fs-33-ingestbucket-xxx --rate 23
 """
 import argparse
 import time

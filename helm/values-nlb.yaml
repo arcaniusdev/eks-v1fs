@@ -3,7 +3,7 @@
 # externalService — creates <release>-visionone-filesecurity-scanner-lb
 # with gRPC :50051 and ICAP :1344.
 #
-# The NLB is VPC-internal: reachable from the customer's VPC (or peered
+# The NLB is VPC-internal: reachable from the user's VPC (or peered
 # networks), never from the internet. Connect with the V1FS SDK:
 #   amaas.grpc.init("<nlb-hostname>:50051", api_key, False)  # plaintext in-VPC
 

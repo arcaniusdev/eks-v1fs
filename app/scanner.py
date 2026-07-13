@@ -195,7 +195,7 @@ class ScannerApp:
         - S3 event notification (stack-created bucket → SQS directly):
           body["Records"][*].s3.bucket.name / .object.key — keys are
           form-encoded (spaces as '+'), so unquote_plus is required.
-        - EventBridge "Object Created" (existing customer bucket → EventBridge
+        - EventBridge "Object Created" (existing user bucket → EventBridge
           rule → SQS): body["detail"].bucket.name / .object.key — keys are
           raw, NOT URL-encoded. Decoding them would corrupt keys containing
           literal '+' or '%' characters.
@@ -397,8 +397,8 @@ class ScannerApp:
         """Finalize the source object after routing.
 
         Default (stack-owned ingest bucket): delete the source — the verdict
-        bucket now holds the file. Existing-customer-bucket mode
-        (DELETE_SOURCE_ENABLED=false): never delete a customer's object;
+        bucket now holds the file. Existing-user-bucket mode
+        (DELETE_SOURCE_ENABLED=false): never delete a user's object;
         tag it with the verdict instead so the result is visible in place.
         """
         if self.config.delete_source_enabled:

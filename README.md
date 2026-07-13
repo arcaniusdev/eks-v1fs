@@ -16,7 +16,7 @@ For more information, see the [Vision One File Security Helm chart repository](h
 
 ## Architecture Realignment (July 2026)
 
-This deployment was realigned with **TrendAI's supported deployment methodology** so that POCs deploy a configuration TrendAI can support, rather than a custom high-performance variant. If you are evaluating Vision One File Security, what you deploy here is what TrendAI documents and supports.
+This deployment was realigned with **TrendAI's supported deployment methodology** so that evaluations deploy a configuration TrendAI can support, rather than a custom high-performance variant. If you are evaluating Vision One File Security, what you deploy here is what TrendAI documents and supports.
 
 What changed:
 
@@ -27,7 +27,7 @@ What changed:
 - **The Helm chart is pinned to version 1.4.10**, with all custom values consolidated in `helm/values-base.yaml` — the single source of truth for install and upgrades.
 - **New deployment options**: scan an existing S3 bucket you already own (`ExistingIngestBucket`), and expose the scanner endpoint via an internal NLB (default) or a TLS ALB (`ScannerEndpointMode`).
 
-**Scaling expectations changed with it.** The chart HPA plus Cluster Autoscaler reacts in roughly 1–3 minutes (HPA metrics window + node provisioning), which is normal, expected POC behavior. The previous architecture's high-scale benchmarks (150-pod fleets, thousands of concurrent scans) no longer apply — this deployment favors supportability over peak throughput.
+**Scaling expectations changed with it.** The chart HPA plus Cluster Autoscaler reacts in roughly 1–3 minutes (HPA metrics window + node provisioning), which is normal, expected evaluation behavior. The previous architecture's high-scale benchmarks (150-pod fleets, thousands of concurrent scans) no longer apply — this deployment favors supportability over peak throughput.
 
 **There is no in-place migration** from pre-realignment (Karpenter-era) stacks. Delete the old stack and deploy a new one.
 
@@ -175,7 +175,7 @@ Scaling is deliberately conventional — each component scales by the mechanism 
 
 **Nodes — Cluster Autoscaler.** The standard Kubernetes Cluster Autoscaler (installed via Helm by the bootstrap, IAM via Pod Identity) discovers the managed node group's Auto Scaling Group through the `k8s.io/cluster-autoscaler` tags that EKS applies automatically. When pods can't be scheduled, it grows the ASG (up to `NodeGroupMaxSize`); it scales down nodes unneeded for 2 minutes, preferring the least-waste expander. PodDisruptionBudgets (`k8s/pdb.yaml`) protect active scan workloads during scale-down.
 
-**Expected scale-up latency: 1–3 minutes.** The HPA reacts to its metrics window, and if a new node is needed, the Cluster Autoscaler provisions it through the ASG. This is normal behavior for a supported POC configuration. If a burst of files arrives, the SQS queue simply holds the backlog — nothing is lost — and drains as capacity comes online. (The previous architecture's headline numbers — 150-pod fleets, 7,500 concurrent scans, sub-minute node provisioning — belonged to the custom Karpenter/KEDA design and no longer apply.)
+**Expected scale-up latency: 1–3 minutes.** The HPA reacts to its metrics window, and if a new node is needed, the Cluster Autoscaler provisions it through the ASG. This is normal behavior for a supported evaluation configuration. If a burst of files arrives, the SQS queue simply holds the backlog — nothing is lost — and drains as capacity comes online. (The previous architecture's headline numbers — 150-pod fleets, 7,500 concurrent scans, sub-minute node provisioning — belonged to the custom Karpenter/KEDA design and no longer apply.)
 
 ```
 Files arrive in S3 → SQS queue depth rises
@@ -317,7 +317,7 @@ The `eks-v1fs.yaml` template creates everything. Resources marked *(scanner-app)
 
 Pods get AWS permissions automatically through EKS Pod Identity. No access keys are configured anywhere.
 
-1. CloudFormation creates IAM roles with permissions scoped to specific resources — `ScannerAppRole` for the main scanner-app (ingest/clean/quarantine buckets, main SQS queue; no `s3:DeleteObject` on an existing customer bucket) and, if the review pipeline is deployed, `ReviewScannerAppRole` (review/clean/quarantine buckets, review SQS queue — deliberately no write access to the review bucket)
+1. CloudFormation creates IAM roles with permissions scoped to specific resources — `ScannerAppRole` for the main scanner-app (ingest/clean/quarantine buckets, main SQS queue; no `s3:DeleteObject` on an existing user bucket) and, if the review pipeline is deployed, `ReviewScannerAppRole` (review/clean/quarantine buckets, review SQS queue — deliberately no write access to the review bucket)
 2. Pod Identity Associations bind each role to its Kubernetes service account (`scanner-app` in `visionone-filesecurity`, `review-scanner-app` in `visionone-review`, plus the Cluster Autoscaler, LB controller, and KEDA service accounts in their namespaces)
 3. The Pod Identity Agent (a DaemonSet on each node) intercepts credential requests from pods and injects temporary credentials
 4. Each scanner app retrieves the V1FS API key from Secrets Manager at startup using these credentials

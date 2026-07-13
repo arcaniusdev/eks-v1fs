@@ -2,7 +2,7 @@
 
 ## Autoscaling Architecture (July 2026 realignment)
 
-The V1FS scanner now scales via the **Helm chart's own HPA** — the TrendAI-supported autoscaling mechanism — and KEDA scales **only our scanner-app**. The purpose of the realignment is that POCs deploy a supported configuration; the previous KEDA-scales-everything setup (150+150 pods on Karpenter nodes) was custom and unsupported. Karpenter is fully removed; a single managed node group scaled by the Cluster Autoscaler hosts all workloads.
+The V1FS scanner now scales via the **Helm chart's own HPA** — the TrendAI-supported autoscaling mechanism — and KEDA scales **only our scanner-app**. The purpose of the realignment is that evaluations deploy a supported configuration; the previous KEDA-scales-everything setup (150+150 pods on Karpenter nodes) was custom and unsupported. Karpenter is fully removed; a single managed node group scaled by the Cluster Autoscaler hosts all workloads.
 
 ### Chart HPA (V1FS scanner pods)
 - `scanner.autoscaling.enabled=true` in `helm/values-base.yaml` (single source of truth for chart values)
@@ -43,7 +43,7 @@ The V1FS scanner now scales via the **Helm chart's own HPA** — the TrendAI-sup
 
 - **Chart HPA scale-up: 1–3 minutes is normal and expected.** The HPA reacts to Metrics Server samples (15–30s), then new scanner pods must schedule, pull, start, and register with TrendAI cloud. This is slower than the old KEDA queue-depth scaling but is the supported behavior — do not "fix" it by re-adding ScaledObjects for the chart scanner
 - **Node provisioning adds 1–2 minutes** when the Cluster Autoscaler must grow the ASG before pods can schedule
-- **The old KEDA burst benchmarks no longer apply** (1 → 150 pods in ~105s, 7,500 concurrent scan slots, Karpenter fleet provisioning). This deployment is POC-sized by design
+- **The old KEDA burst benchmarks no longer apply** (1 → 150 pods in ~105s, 7,500 concurrent scan slots, Karpenter fleet provisioning). This deployment is evaluation-sized by design
 
 ## Scanner-App Settings
 - `MAX_CONCURRENT_SCANS`: 50 per pod (at default max scale: 20 pods × 50 = 1,000 scan slots)

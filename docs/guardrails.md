@@ -28,10 +28,10 @@
 - **All stack-created S3 buckets survive stack deletion** (`DeletionPolicy: Retain`). Delete manually after stack teardown. Versioned buckets (ingest, quarantine) require deleting all object versions and delete markers before the bucket can be removed.
 - **Respect the parameter Rules.** `DeployReviewPipeline=true` requires `DeployScannerApp=true`; `ScannerEndpointMode=alb` requires both `ACMCertificateArn` and `ScannerDomain`. CloudFormation rejects violations at create time.
 
-### Existing-Customer-Bucket Mode (`ExistingIngestBucket`)
-- **NEVER write `QueueConfigurations` (or any notification config) directly onto a customer's bucket.** `put-bucket-notification-configuration` is a full-replace API — a direct write destroys the customer's existing notification wiring. The ONLY supported mechanism is the `EnableEventBridgeFunction` custom-resource Lambda, which reads the current config and MERGES `EventBridgeConfiguration` alongside it. Its Delete handler is intentionally a no-op — never mutate the customer's bucket on teardown.
-- **Never delete customer bucket objects.** In existing-bucket mode `DELETE_SOURCE_ENABLED=false`: the scanner tags source objects with the verdict via `put_object_tagging`. The IAM policy enforces this (`s3:PutObjectTagging` instead of `s3:DeleteObject`). Do not grant delete permission or flip the flag.
-- **Reconciliation must stay off in existing-bucket mode.** Objects legitimately remain in the customer's bucket, so age-based re-queueing would endlessly re-scan everything.
+### Existing-User-Bucket Mode (`ExistingIngestBucket`)
+- **NEVER write `QueueConfigurations` (or any notification config) directly onto a user's bucket.** `put-bucket-notification-configuration` is a full-replace API — a direct write destroys the user's existing notification wiring. The ONLY supported mechanism is the `EnableEventBridgeFunction` custom-resource Lambda, which reads the current config and MERGES `EventBridgeConfiguration` alongside it. Its Delete handler is intentionally a no-op — never mutate the user's bucket on teardown.
+- **Never delete user bucket objects.** In existing-bucket mode `DELETE_SOURCE_ENABLED=false`: the scanner tags source objects with the verdict via `put_object_tagging`. The IAM policy enforces this (`s3:PutObjectTagging` instead of `s3:DeleteObject`). Do not grant delete permission or flip the flag.
+- **Reconciliation must stay off in existing-bucket mode.** Objects legitimately remain in the user's bucket, so age-based re-queueing would endlessly re-scan everything.
 
 ### V1FS Helm and SDK
 - **Do not run `helm upgrade` without the values files.** Always upgrade via `scripts/upgrade.py`, which layers `-f helm/values-base.yaml` + `-f <captured helm get values>` + live HPA min/max. A plain `helm upgrade` reverts to chart defaults — losing dbEnabled, storage classes, ephemeral volume, and re-enabling the chart's default-on ingresses.

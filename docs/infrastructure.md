@@ -82,10 +82,10 @@ All stack-created S3 buckets have `DeletionPolicy: Retain` — they survive stac
 
 ## Existing-Bucket Wiring (S3 → EventBridge → SQS)
 
-When `ExistingIngestBucket` is set, the stack must not touch the customer's bucket notification configuration destructively (`put-bucket-notification-configuration` is a full-replace API). Instead:
+When `ExistingIngestBucket` is set, the stack must not touch the user's bucket notification configuration destructively (`put-bucket-notification-configuration` is a full-replace API). Instead:
 
 - **`EventBridgeIngestRule`** (`AWS::Events::Rule`): matches `source=aws.s3`, `detail-type="Object Created"`, filtered on the bucket name; targets `FileScanQueue`. The SQS queue policy gains an `events.amazonaws.com` statement scoped to this rule's ARN
-- **`EnableEventBridgeFunction`** (custom-resource Lambda): reads the bucket's current notification configuration and MERGES `EventBridgeConfiguration` into it — every existing Queue/Topic/Lambda configuration is preserved. If EventBridge is already enabled, it is a no-op. On stack **Delete it is a NO-OP** — the customer's bucket is never mutated on teardown
+- **`EnableEventBridgeFunction`** (custom-resource Lambda): reads the bucket's current notification configuration and MERGES `EventBridgeConfiguration` into it — every existing Queue/Topic/Lambda configuration is preserved. If EventBridge is already enabled, it is a no-op. On stack **Delete it is a NO-OP** — the user's bucket is never mutated on teardown
 - **Scanner behavior**: `DELETE_SOURCE_ENABLED=false` — the scanner tags source objects with the verdict via `put_object_tagging` and NEVER deletes them. `ScannerAppRole` swaps `s3:DeleteObject` for `s3:PutObjectTagging` on the bucket. Reconciliation is forced off (objects legitimately remain in the bucket)
 
 ## EFS
@@ -112,7 +112,7 @@ When `ExistingIngestBucket` is set, the stack must not touch the customer's buck
 - **ReviewScannerAppRole** (`ReviewEnabled`): bound to `review-scanner-app` SA in `visionone-review` via Pod Identity. SQS poll/delete/visibility on ReviewScanQueue; S3 get/delete on review bucket; S3 put/tag on clean and quarantine; Secrets Manager read; CloudWatch Logs for review audit trail; S3 list on ingest bucket and SQS send on main FileScanQueue for reconciliation. NO write permission to the review bucket — prevents routing loops.
 - **ClusterAutoscalerRole**: bound to `cluster-autoscaler` in `kube-system` via Pod Identity. Read-only autoscaling/EC2/EKS discovery, plus `autoscaling:SetDesiredCapacity` / `TerminateInstanceInAutoScalingGroup` restricted by condition to ASGs tagged `k8s.io/cluster-autoscaler/enabled=true`.
 - **KedaOperatorRole** (`ScannerAppEnabled`): bound to `keda-operator` in `keda` via Pod Identity. SQS GetQueueAttributes/GetQueueUrl (read-only) on the scan queue(s) — the review queue is included only when `ReviewEnabled`.
-- **EnableEventBridgeRole** (`UseExistingBucket`): Lambda role with `s3:GetBucketNotification`/`s3:PutBucketNotification` scoped to the customer bucket.
+- **EnableEventBridgeRole** (`UseExistingBucket`): Lambda role with `s3:GetBucketNotification`/`s3:PutBucketNotification` scoped to the user bucket.
 - **Node role**: EKS worker node policy, CNI policy, ECR read-only, SSM, CloudWatch Logs.
 - **Bastion role**: EKS describe/access, ECR read/push, STS, CloudFormation signal/describe, Secrets Manager read, `ssm:PutParameter` on `/<stack>/scanner-endpoint`, S3 ingest write (created-bucket mode only).
 - **EBSCSIDriverRole** / **EFSCSIDriverRole**: as before (managed policy / EFS access point CRUD).

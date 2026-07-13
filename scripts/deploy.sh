@@ -72,10 +72,10 @@ if [ -z "${REVIEW_ROUTING_ENABLED:-}" ]; then
   fi
 fi
 
-# Existing-customer-bucket mode sets DELETE_SOURCE_ENABLED=false (tag, don't delete)
+# Existing-user-bucket mode sets DELETE_SOURCE_ENABLED=false (tag, don't delete)
 DELETE_SOURCE_ENABLED="${DELETE_SOURCE_ENABLED:-true}"
 
-# KEDA max replicas for scanner-app (POC-sized default)
+# KEDA max replicas for scanner-app (evaluation-sized default)
 SCANNER_APP_MAX_REPLICAS="${SCANNER_APP_MAX_REPLICAS:-20}"
 
 # Determine image tag: use IMAGE_TAG env var, git SHA, or "latest"

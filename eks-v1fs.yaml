@@ -754,7 +754,7 @@ Resources:
                     # ApiKey: SDK sanity scans + registration-token auto-fetch
                     - !Ref V1FSApiKeySecret
                   - - !Ref V1FSApiKeySecret
-              # Publishes the scanner endpoint address for external POC apps
+              # Publishes the scanner endpoint address for external evaluation apps
               - Sid: PublishScannerEndpoint
                 Effect: Allow
                 Action:
@@ -1875,12 +1875,12 @@ Resources:
             - !Ref AWS::NoValue
 
   # --- Existing-bucket wiring (S3 -> EventBridge -> SQS) ---
-  # For customer-owned buckets we must not touch their notification
+  # For user-owned buckets we must not touch their notification
   # configuration destructively: put-bucket-notification-configuration is a
   # full-replace API. A merge Lambda reads the current configuration, adds
   # EventBridgeConfiguration alongside whatever exists, and writes the merged
   # document back. On stack Delete it is a NO-OP — we never mutate the
-  # customer's bucket on teardown.
+  # user's bucket on teardown.
   EventBridgeIngestRule:
     Condition: UseExistingBucket
     Type: AWS::Events::Rule
@@ -1941,7 +1941,7 @@ Resources:
           import cfnresponse
 
           def handler(event, context):
-              # Delete is a no-op: never mutate the customer's bucket on
+              # Delete is a no-op: never mutate the user's bucket on
               # teardown — other consumers may rely on EventBridge by then.
               if event['RequestType'] == 'Delete':
                   cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
@@ -2005,7 +2005,7 @@ Resources:
                   - sqs:SendMessage
                 Resource: !GetAtt FileScanQueue.Arn
               # Created-bucket mode: read + delete after routing.
-              # Existing-customer-bucket mode: read + tag verdicts, NEVER delete.
+              # Existing-user-bucket mode: read + tag verdicts, NEVER delete.
               - !If
                 - CreateIngestBucket
                 - Sid: S3IngestRead

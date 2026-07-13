@@ -26,3 +26,4 @@ venv/
 
 # Local test artifacts
 stress-test-report-*.html
+cost-analysis-report*.html

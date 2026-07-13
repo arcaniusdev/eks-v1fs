@@ -20,8 +20,8 @@
 
 ## Scanner Endpoint Exposure (ScannerEndpointMode)
 - **`nlb` (default)**: the scanner gRPC endpoint is exposed via an INTERNAL Network Load Balancer — reachable from the VPC (and peered/VPN-connected networks), never from the internet. Conditional security group rules allow TCP 50051 (gRPC) and 1344 (ICAP) from the VPC CIDR only
-- **⚠️ Network scope IS the access control in nlb mode** — verified in testing: the self-hosted scanner accepts plaintext gRPC scans on this path without validating the SDK API key. Anyone with network reachability to the NLB can submit scans. This is acceptable for a POC inside a private VPC, but do NOT extend routing to the NLB beyond networks you trust, and never re-create it as internet-facing
-- **`alb`**: TrendAI's documented topology — ALB Ingress with gRPC backend protocol and TLS (ACM certificate + customer domain). Prefer this for anything beyond a single-VPC POC
+- **⚠️ Network scope IS the access control in nlb mode** — verified in testing: the self-hosted scanner accepts plaintext gRPC scans on this path without validating the SDK API key. Anyone with network reachability to the NLB can submit scans. This is acceptable for an evaluation inside a private VPC, but do NOT extend routing to the NLB beyond networks you trust, and never re-create it as internet-facing
+- **`alb`**: TrendAI's documented topology — ALB Ingress with gRPC backend protocol and TLS (ACM certificate + user domain). Prefer this for anything beyond a single-VPC evaluation
 - **`none`**: in-cluster ClusterIP only; no external exposure
 - The management service ingress is always explicitly disabled (`managementService.ingress.enabled=false`) — the chart default is enabled, and an installed ALB ingress class would otherwise expose it
 

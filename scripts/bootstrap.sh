@@ -10,7 +10,7 @@
 #   DEPLOY_SCANNER_APP=true|false   scanning application module
 #   DEPLOY_REVIEW=true|false        review pipeline (requires scanner app)
 #   ENDPOINT_MODE=none|nlb|alb      external gRPC endpoint exposure
-#   EXISTING_INGEST_BUCKET=<name>   existing-customer-bucket mode ("" = created)
+#   EXISTING_INGEST_BUCKET=<name>   existing-user-bucket mode ("" = created)
 # ----------------------------------------------------------------------
 set -e
 
@@ -284,7 +284,7 @@ if [ "$DEPLOY_SCANNER_APP" = "true" ]; then
   systemctl enable docker
   systemctl start docker
 
-  # Existing-customer-bucket mode: never delete the customer's objects —
+  # Existing-user-bucket mode: never delete the user's objects —
   # tag them with the verdict instead. Also disables reconciliation
   # (objects legitimately remain in the bucket).
   if [ -n "$EXISTING_INGEST_BUCKET" ]; then
