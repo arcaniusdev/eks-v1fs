@@ -99,7 +99,7 @@ project/
 
 Full-mode peak ≈ 26 vCPU → 8 × r7i.xlarge nodes; fits within the default 64 on-demand vCPU quota (32 vCPU). No quota increase needed at evaluation scale.
 Review pipeline keeps 1 pod warm at all times (min replicas = 1) to avoid cold-start gRPC failures.
-Expect 1–3 minutes for HPA + Cluster Autoscaler scale-up under load — normal for the supported configuration (the old KEDA/Karpenter 150-pod burst benchmarks no longer apply).
+Expect 1–3 minutes for HPA + Cluster Autoscaler scale-up under load — normal for the supported configuration. This is an evaluation-sized deployment, not a burst-throughput one.
 
 ## Quick Reference — Critical Rules
 
@@ -122,7 +122,7 @@ Expect 1–3 minutes for HPA + Cluster Autoscaler scale-up under load — normal
 - **Live cluster patching**: the deploy script substitutes `<SQS_QUEUE_URL>`, `<AWS_REGION>`, and `<MAX_REPLICAS>` placeholders with real values. Applying the template file directly with `kubectl apply` will break KEDA with "invalid input region" errors
 - **NodeInstanceType controls the single managed node group** — one node group (default r7i.xlarge) hosts system components AND scanner workloads. xlarge memory-optimized classes only (fits four 800m/2Gi scanner pods per node)
 - **Deployment-mode parameters**: `DeployScannerApp` (default true), `DeployReviewPipeline` (default false, requires scanner app — CFN Rule enforced), `ExistingIngestBucket` (empty = create), `ScannerEndpointMode` (none/nlb/alb; alb requires `ACMCertificateArn` + `ScannerDomain` — Rule enforced), `ExistingVpcId` (empty = create network; when set requires `ExistingVpcCidr` + 2 private subnets + bastion subnet — Rule enforced. User VPC needs DNS enabled, NAT egress, `kubernetes.io/role/internal-elb=1` on private subnets; bastion gets no public IP and the EKSCluster waits on NAT routes via a conditional `network-ready` tag reference since DependsOn can't be conditional)
-- **No in-place migration from Karpenter-era stacks** — pre-realignment stacks must be deleted and redeployed fresh
+- **No in-place migration across major architecture changes** — delete and redeploy rather than stack-updating an older deployment
 
 ### V1FS Scan Policy (CLISH)
 - **Scan policy is configured via CLISH after Helm install** — the V1FS management service exposes a CLI (`clish`) for runtime scanner configuration. Four decompression settings are available, all controlled via CloudFormation parameters and applied automatically during bastion provisioning
@@ -210,7 +210,7 @@ Expect 1–3 minutes for HPA + Cluster Autoscaler scale-up under load — normal
 
 ## Scaling Architecture (Trend-Aligned)
 
-This deployment is deliberately aligned with TrendAI's supported methodology so evaluations never run an unsupported configuration. History: an earlier iteration used KEDA to scale the chart-owned scanner and Karpenter for nodes (high-throughput, 150+150 pods) — that was removed in the July 2026 realignment. Do not reintroduce it.
+This deployment is deliberately aligned with TrendAI's supported methodology. Two guardrails to preserve it: **do not point KEDA at the chart-owned V1FS scanner** (its own HPA is the supported mechanism — KEDA scales only our scanner-app), and **do not add a node autoscaler other than the Cluster Autoscaler**.
 
 ### Three scaling layers
 

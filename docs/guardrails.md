@@ -6,7 +6,7 @@
 - **Always disable rollback when creating stacks.** Use `--disable-rollback` so you can inspect bastion `/var/log/cloud-init-output.log` when UserData fails.
 - **Always use a unique stack name for each deployment.** Reusing names conflicts with retained resources (S3 buckets, log groups, Secrets Manager secrets in pending deletion). Use incrementing suffixes (e.g., `eks-v1fs-09`, `eks-v1fs-10`).
 - **CloudFormation template exceeds 51,200-byte inline limit.** Deploy using `--template-url` with an S3-hosted copy instead of `--template-body file://`.
-- **No in-place migration from Karpenter-era stacks.** The July 2026 realignment (chart HPA, Cluster Autoscaler, single node group) cannot be applied to an existing Karpenter stack via stack update — delete and redeploy.
+- **No in-place migration across major architecture changes.** Delete and redeploy rather than stack-updating an older deployment.
 
 ## Do NOT Do These Things
 
@@ -19,7 +19,7 @@
 - **Do not add KEDA ScaledObjects targeting the chart-owned V1FS scanner.** The chart's own HPA (`scanner.autoscaling.enabled=true`) is the TrendAI-supported scaling mechanism and the whole point of the realignment. A ScaledObject on the same deployment conflicts with the chart HPA. `upgrade.py` warns if it finds one — delete it. KEDA scales ONLY our scanner-app deployments.
 - **Do not disable `scanner.autoscaling.enabled`.** It is set in `helm/values-base.yaml` and must stay enabled. The old guidance (disable chart HPA, scale with KEDA) is INVERTED and obsolete.
 - **Do not "fix" HPA scale-up latency.** 1–3 minutes from load spike to new scanner pods is expected chart-HPA behavior (Metrics Server sampling + pod start + cloud registration), plus 1–2 minutes if the Cluster Autoscaler must add a node. Do not re-introduce queue-driven scaling for the chart scanner.
-- **Do not revert to Karpenter.** All Karpenter resources (controller role, instance profile, NodePool/EC2NodeClass, Helm release, discovery tags, deployment nodeAffinity) are removed. A single managed node group + Cluster Autoscaler hosts everything.
+- **Node scaling is the Cluster Autoscaler on a single managed node group.** Do not introduce a separate node provisioner or per-workload node pools/affinity — one node group hosts everything.
 
 ### Infrastructure
 - **Do not create S3 buckets, SQS queues, ECR repos, or IAM roles from application code.** All provisioned by CloudFormation.
@@ -67,7 +67,7 @@
 - **`aws s3 sync --quiet` silently swallows errors.** Always verify S3 write access with a single test file before relying on sync results. A sync that completes in seconds for thousands of files likely means it failed silently.
 - **Apply ScaledObject templates through the deploy script, not raw kubectl.** `k8s/scaledobject.yaml` has `<SQS_QUEUE_URL>`, `<AWS_REGION>`, and `<MAX_REPLICAS>` placeholders that deploy.sh substitutes. Applying the raw file breaks KEDA with "invalid input region" errors.
 - **Delete orphaned CloudWatch log groups between stack deployments.** EKS cluster logs (`/aws/eks/...`) and VPC flow logs (`/vpc/flowlogs/...`) are not always cleaned up by CloudFormation and will cause `AlreadyExists` failures on the next stack.
-- **PodDisruptionBudgets are still required.** `k8s/pdb.yaml` protects scanner-app (maxUnavailable 25%) and the V1FS scanner (minAvailable 1) from Cluster Autoscaler node drains during scale-down. Do not remove them because "Karpenter is gone" — CA drains nodes too.
+- **PodDisruptionBudgets are still required.** `k8s/pdb.yaml` protects scanner-app (maxUnavailable 25%) and the V1FS scanner (minAvailable 1) from Cluster Autoscaler node drains during scale-down. Keep them — the autoscaler drains nodes when consolidating.
 - **`upgrade.py` sanity scan without scanner-app**: when the scanner-app module is not deployed there is no ingest bucket ConfigMap; the script instead prints the SSM-published scanner endpoint (`/<stack>/scanner-endpoint`) and instructions for a manual SDK scan. This is expected, not a failure.
 
 ## Environment and PATH (bastion context)

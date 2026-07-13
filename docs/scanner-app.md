@@ -184,7 +184,7 @@ Scanner-app pod resources:
 - Limits: 1000m CPU, 1024Mi memory
 - Security: non-root (UID 999), read-only root fs, all capabilities dropped
 - `/tmp` writable via 10Mi emptyDir
-- No nodeAffinity — pods schedule onto the single managed node group (Karpenter node targeting is removed)
+- No nodeAffinity — pods schedule onto the single managed node group
 
 ## Deployment Workflow
 

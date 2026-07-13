@@ -51,9 +51,9 @@ A single CloudFormation template stands up an EKS cluster running the **TrendAI 
 Files are scanned **inside your VPC** — the bytes never leave your account. Scan metadata (verdicts, threat names) reports to your Vision One console. Around the scanner core, optional modules — a complete S3 scanning pipeline, a deep-analysis review pipeline, an external endpoint — turn on and off with template parameters.
 
 
-### Everything the stack builds
+### The architecture in one picture
 
-One diagram, every resource. The colored border shows which parameter creates it — a default deploy builds the green (core) and amber (scanner-app) items.
+Every resource the stack creates, and how a scan flows through them. Node color shows which parameter creates each piece — a default deploy builds the green (core) and amber (scanner-app) items; purple, blue, and red switch on with their modes.
 
 ```mermaid
 flowchart TB

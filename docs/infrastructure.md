@@ -21,7 +21,7 @@ Conditional resources by mode:
 - **`ReviewEnabled`** (`DeployReviewPipeline=true`): review bucket, review queues/DLQ, `ReviewScannerAppRole`, review audit log group, review DLQ Lambda/alarm, `rv` Helm release
 - **`ExposeEndpoint`** (`nlb` or `alb`): node security group ingress rules for gRPC/ICAP, endpoint publication to SSM
 
-Removed parameters: `DesiredCapacity`, `KarpenterCPULimit`. **There is no in-place migration path from Karpenter-era stacks — delete and redeploy.**
+**No in-place migration across major architecture changes — delete and redeploy rather than stack-updating an older deployment.**
 
 ## Networking
 - **VPC**: `10.2.0.0/16` with DNS support and hostnames enabled
@@ -36,7 +36,7 @@ Removed parameters: `DesiredCapacity`, `KarpenterCPULimit`. **There is no in-pla
 - **API endpoint**: private only (`EndpointPublicAccess: false`)
 - **Authentication**: `API_AND_CONFIG_MAP` mode with EKS Access Entries
 - **Logging**: API, audit, authenticator, controller manager, scheduler — all enabled
-- **Single managed node group**: hosts BOTH system components and scanner workloads (no Karpenter, no node tiers, no nodeAffinity). `NodeInstanceType` default `r7i.xlarge` (allowed: r7i.xlarge, r7a.xlarge, r6i.xlarge, r7i.2xlarge — memory-optimized, 4 vCPU / 32 GiB fits four 800m/2Gi V1FS scanner pods per node). Sizing: `NodeGroupMinSize`/`NodeGroupDesiredSize`/`NodeGroupMaxSize` = 2/2/8. The default max of 8 fits full-mode peak (10 V1FS scanners + 20 scanner-app pods + review pipeline + system pods)
+- **Single managed node group**: hosts BOTH system components and scanner workloads — one node tier, no per-workload nodeAffinity. `NodeInstanceType` default `r7i.xlarge` (allowed: r7i.xlarge, r7a.xlarge, r6i.xlarge, r7i.2xlarge — memory-optimized, 4 vCPU / 32 GiB fits four 800m/2Gi V1FS scanner pods per node). Sizing: `NodeGroupMinSize`/`NodeGroupDesiredSize`/`NodeGroupMaxSize` = 2/2/8. The default max of 8 fits full-mode peak (10 V1FS scanners + 20 scanner-app pods + review pipeline + system pods)
 - **Cluster Autoscaler** scales the node group (see Kubernetes Resources below). EKS auto-tags the node group's ASG with `k8s.io/cluster-autoscaler/enabled` and `k8s.io/cluster-autoscaler/<cluster-name>`, so ASG auto-discovery works with no extra tagging resources
 - **IMDSv2**: enforced on nodes (`HttpTokens: required`)
 - **EBS**: encrypted, gp3 volumes on all instances
@@ -117,7 +117,7 @@ When `ExistingIngestBucket` is set, the stack must not touch the user's bucket n
 - **Bastion role**: EKS describe/access, ECR read/push, STS, CloudFormation signal/describe, Secrets Manager read, `ssm:PutParameter` on `/<stack>/scanner-endpoint`, S3 ingest write (created-bucket mode only).
 - **EBSCSIDriverRole** / **EFSCSIDriverRole**: as before (managed policy / EFS access point CRUD).
 
-All Karpenter IAM (controller role, node instance profile) is REMOVED.
+Node scaling uses the Cluster Autoscaler (`ClusterAutoscalerRole` via Pod Identity); there is no controller-managed node provisioner or dedicated node instance profile.
 
 ## Pre-Delete Cleanup Lambda
 
@@ -127,7 +127,7 @@ All Karpenter IAM (controller role, node instance profile) is REMOVED.
 3. Security groups with the same tag
 4. Orphaned `available` EBS volumes tagged `kubernetes.io/cluster/<cluster-name>=owned` (V1FS PVCs)
 
-All Karpenter cleanup logic (instance termination, instance profile cleanup) is gone — there are no Karpenter resources to clean up. Errors are non-fatal; the Lambda always signals SUCCESS so stack deletion is never blocked.
+The cleanup Lambda removes only LB-controller-created load balancers / target groups / security groups and orphaned EBS volumes. Errors are non-fatal; the Lambda always signals SUCCESS so stack deletion is never blocked.
 
 ## Access
 - **Bastion host**: Ubuntu `t3.medium` in public subnet with AWS CLI v2, kubectl, helm, eksctl installed by bootstrap. Kubeconfig and KUBECONFIG env var pre-configured. Access via AWS Systems Manager Session Manager (primary). SSH key stored in SSM Parameter Store for emergency use only.

@@ -14,22 +14,18 @@ This means files are scanned locally within your VPC — they are never uploaded
 
 For more information, see the [Vision One File Security Helm chart repository](https://trendmicro.github.io/visionone-file-security-helm/).
 
-## Architecture Realignment (July 2026)
+## Supported by design
 
-This deployment was realigned with **TrendAI's supported deployment methodology** so that evaluations deploy a configuration TrendAI can support, rather than a custom high-performance variant. If you are evaluating Vision One File Security, what you deploy here is what TrendAI documents and supports.
+This stack deploys Vision One File Security the way TrendAI documents and supports. What that means concretely:
 
-What changed:
-
-- **The V1FS scanner scales with the Helm chart's own HPA** (`scanner.autoscaling.enabled=true`, CPU 80% / memory 80% targets) — the Trend-supported autoscaling mechanism. KEDA no longer touches the chart-owned scanner; it scales only our optional scanner-app.
-- **Karpenter was removed.** The cluster uses one managed node group with the standard Kubernetes Cluster Autoscaler — the conventional, supported node-scaling path.
-- **The S3/SQS scanning application is now an optional module** (`DeployScannerApp`, default on). Turn it off and the stack is a clean TrendAI V1FS deployment plus a scanner endpoint for your own application.
+- **The V1FS scanner scales with the Helm chart's own HPA** (`scanner.autoscaling.enabled=true`, CPU 80% / memory 80% targets) — TrendAI's supported autoscaling mechanism. Replica bounds come from `ScannerMinReplicas` / `ScannerMaxReplicas` (default 1–10).
+- **Nodes scale with the standard Kubernetes Cluster Autoscaler** on a single managed node group.
+- **The S3/SQS scanning application is an optional module** (`DeployScannerApp`, default on). Turn it off and the stack is a clean V1FS deployment plus a scanner endpoint for your own application. When on, the scanning app scales on SQS queue depth via KEDA.
 - **The review pipeline is optional and off by default** (`DeployReviewPipeline`). Without it, files that exceed decompression limits are quarantined with explanatory tags rather than passed as clean.
-- **The Helm chart is pinned to version 1.4.10**, with all custom values consolidated in `helm/values-base.yaml` — the single source of truth for install and upgrades.
-- **New deployment options**: scan an existing S3 bucket you already own (`ExistingIngestBucket`), and expose the scanner endpoint via an internal NLB (default) or a TLS ALB (`ScannerEndpointMode`).
+- **The Helm chart version is pinned**, with all custom values consolidated in `helm/values-base.yaml` — the single source of truth for install and upgrades.
+- **Deployment options**: scan a new or existing S3 bucket (`ExistingIngestBucket`), expose the scanner endpoint via an internal NLB (default) or a TLS ALB (`ScannerEndpointMode`), and deploy into a new or existing VPC (`ExistingVpcId`).
 
-**Scaling expectations changed with it.** The chart HPA plus Cluster Autoscaler reacts in roughly 1–3 minutes (HPA metrics window + node provisioning), which is normal, expected evaluation behavior. The previous architecture's high-scale benchmarks (150-pod fleets, thousands of concurrent scans) no longer apply — this deployment favors supportability over peak throughput.
-
-**There is no in-place migration** from pre-realignment (Karpenter-era) stacks. Delete the old stack and deploy a new one.
+**Scaling is steady, not bursty.** The chart HPA plus Cluster Autoscaler react in roughly 1–3 minutes (metrics window + node provisioning) — normal for a supported configuration. A burst of files simply queues in SQS and drains as capacity comes online; nothing is lost. This deployment favors supportability over peak throughput.
 
 ## Deployment Modes
 
@@ -175,7 +171,7 @@ Scaling is deliberately conventional — each component scales by the mechanism 
 
 **Nodes — Cluster Autoscaler.** The standard Kubernetes Cluster Autoscaler (installed via Helm by the bootstrap, IAM via Pod Identity) discovers the managed node group's Auto Scaling Group through the `k8s.io/cluster-autoscaler` tags that EKS applies automatically. When pods can't be scheduled, it grows the ASG (up to `NodeGroupMaxSize`); it scales down nodes unneeded for 2 minutes, preferring the least-waste expander. PodDisruptionBudgets (`k8s/pdb.yaml`) protect active scan workloads during scale-down.
 
-**Expected scale-up latency: 1–3 minutes.** The HPA reacts to its metrics window, and if a new node is needed, the Cluster Autoscaler provisions it through the ASG. This is normal behavior for a supported evaluation configuration. If a burst of files arrives, the SQS queue simply holds the backlog — nothing is lost — and drains as capacity comes online. (The previous architecture's headline numbers — 150-pod fleets, 7,500 concurrent scans, sub-minute node provisioning — belonged to the custom Karpenter/KEDA design and no longer apply.)
+**Expected scale-up latency: 1–3 minutes.** The HPA reacts to its metrics window, and if a new node is needed, the Cluster Autoscaler provisions it through the ASG. This is normal behavior for a supported evaluation configuration. If a burst of files arrives, the SQS queue simply holds the backlog — nothing is lost — and drains as capacity comes online.
 
 ```
 Files arrive in S3 → SQS queue depth rises
