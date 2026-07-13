@@ -1387,17 +1387,40 @@ Resources:
                                   except Exception as tg_err:
                                       print(f"Target group delete failed (non-fatal): {tg_err}")
 
-                  # 3. Delete LB-controller-created security groups
+                  # 3. Delete LB-controller-created security groups.
+                  # The controller's shared backend SG is referenced by rules it
+                  # added to other SGs (e.g. the node SG) — revoke those
+                  # references first, then retry the delete while ENIs release.
                   print("Checking for orphaned LB security groups...")
                   sgs = ec2.describe_security_groups(
                       Filters=[{'Name': 'tag:elbv2.k8s.aws/cluster', 'Values': [cluster_name]}]
                   )
                   for sg in sgs['SecurityGroups']:
-                      print(f"Deleting security group: {sg['GroupId']}")
+                      sg_id = sg['GroupId']
+                      # Revoke rules in OTHER security groups that reference this one
                       try:
-                          ec2.delete_security_group(GroupId=sg['GroupId'])
-                      except Exception as sg_err:
-                          print(f"Security group delete failed (non-fatal): {sg_err}")
+                          refs = ec2.describe_security_groups(
+                              Filters=[{'Name': 'ip-permission.group-id', 'Values': [sg_id]}]
+                          )
+                          for ref in refs['SecurityGroups']:
+                              perms = [p for p in ref['IpPermissions']
+                                       if any(g.get('GroupId') == sg_id for g in p.get('UserIdGroupPairs', []))]
+                              if perms:
+                                  print(f"Revoking rules referencing {sg_id} from {ref['GroupId']}")
+                                  ec2.revoke_security_group_ingress(GroupId=ref['GroupId'], IpPermissions=perms)
+                      except Exception as ref_err:
+                          print(f"Reference revocation failed (non-fatal): {ref_err}")
+                      # Retry delete — ENI release after LB deletion takes time
+                      for attempt in range(5):
+                          try:
+                              ec2.delete_security_group(GroupId=sg_id)
+                              print(f"Deleted security group: {sg_id}")
+                              break
+                          except Exception as sg_err:
+                              if attempt == 4:
+                                  print(f"Security group delete failed after retries (non-fatal): {sg_err}")
+                              else:
+                                  time.sleep(20)
 
                   # 4. Delete orphaned EBS volumes (from V1FS PVCs)
                   print("Checking for orphaned EBS volumes...")
