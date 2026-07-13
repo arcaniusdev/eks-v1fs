@@ -1,3 +1,23 @@
+"""S3 → SQS → V1FS scanning service.
+
+One async event loop drives everything:
+
+  _poll_loop            long-polls SQS, spawns one task per message
+    _process_message    heartbeat + parse (S3 or EventBridge shape) + ack/retry
+      _process_record   download → scan via gRPC → route → finalize + audit
+
+Routing: malicious → quarantine · decompression-limit → review (or
+quarantine+tags when review is off) · clean → clean. Incompletely-scanned
+files are never marked clean.
+
+Support loops (started in start(), stopped in _shutdown()):
+  health server         /healthz + /readyz on :8080 for kubelet probes
+  audit flusher         batches scan results to CloudWatch Logs
+  reconciliation        re-queues ingest objects that never got scanned
+
+Concurrency is bounded by a semaphore (MAX_CONCURRENT_SCANS); all
+configuration comes from environment variables via config.load_config().
+"""
 import asyncio
 import json
 import logging
