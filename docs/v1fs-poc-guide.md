@@ -170,6 +170,7 @@ Download `eks-v1fs.yaml` from the [**eks-v1fs repository**](https://github.com/a
    - **Existing bucket**: set `ExistingIngestBucket` to your bucket name.
    - **Review pipeline**: set `DeployReviewPipeline` = `true`.
    - **Non-US tenant**: set `VisionOneApiEndpoint` to your regional API host.
+   - **Node type / Graviton**: `NodeInstanceType` picks the EC2 instance type for the worker nodes (default `r7i.xlarge`, x86). **Graviton ARM types are fully supported** — choose `r8g.xlarge` (~11% lower compute cost) or `r7g.xlarge` (~19% lower). The stack handles everything automatically: the node group switches to an ARM64 AMI and the scanning application image is built for ARM. All scanner components ship multi-architecture images, so functionality is identical.
 5. Click **Next**.
 
 ### Step 4 — Stack options
@@ -744,6 +745,8 @@ The scanner scales with the Helm chart's own autoscaler (CPU and memory targets,
 | Repeat scans of the same file are near-instant | The scanner caches verdicts by file hash. For honest benchmarks use unique files, or restart the scan-cache deployment between runs |
 
 Raise the ceilings with the `ScannerMaxReplicas`, `ScannerAppMaxReplicas`, and `NodeGroupMaxSize` parameters if your evaluation needs more sustained throughput.
+
+**Node instance type.** `NodeInstanceType` accepts memory-optimized xlarge classes — x86 (`r7i.xlarge` default, `r7a.xlarge`, `r6i.xlarge`, `r7i.2xlarge`) and **Graviton ARM** (`r8g.xlarge`, `r7g.xlarge`). ARM types cost 11–19% less per node-hour with identical functionality; the template selects the matching ARM64 node image and builds the scanning application for ARM automatically.
 
 
 ## 18. Troubleshooting
