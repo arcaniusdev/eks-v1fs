@@ -170,7 +170,7 @@ Download `eks-v1fs.yaml` from the [**eks-v1fs repository**](https://github.com/a
    - **Existing bucket**: set `ExistingIngestBucket` to your bucket name.
    - **Review pipeline**: set `DeployReviewPipeline` = `true`.
    - **Non-US tenant**: set `VisionOneApiEndpoint` to your regional API host.
-   - **Node type / Graviton**: `NodeInstanceType` picks the EC2 instance type for the worker nodes (default `r7i.xlarge`, x86). **Graviton ARM types are fully supported** — choose `r8g.xlarge` (~11% lower compute cost) or `r7g.xlarge` (~19% lower). The stack handles everything automatically: the node group switches to an ARM64 AMI and the scanning application image is built for ARM. All scanner components ship multi-architecture images, so functionality is identical.
+   - **Node type**: `NodeInstanceType` picks the EC2 instance type for the worker nodes (default `r7i.xlarge`, x86). Graviton ARM types are fully supported — choose `r8g.xlarge` (~11% lower compute cost) or `r7g.xlarge` (~19% lower). The stack handles everything automatically: the node group switches to an ARM64 AMI and the scanning application image is built for ARM. All scanner components ship multi-architecture images, so functionality is identical.
 5. Click **Next**.
 
 ### Step 4 — Stack options
