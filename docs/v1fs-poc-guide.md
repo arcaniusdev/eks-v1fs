@@ -149,7 +149,7 @@ Deploy from the **AWS Console** (click-by-click, below) or the **AWS CLI** (auto
 
 ### Step 1 — Get the template
 
-Download `eks-v1fs.yaml` from the [**eks-v1fs repository**](https://github.com/arcaniusdev/eks-v1fs) — ideally from the [latest tagged release](https://github.com/arcaniusdev/eks-v1fs/tags), so the components the bastion pulls at deploy time match the template you launch. That's the only file you need. (Direct link to the current release template: `https://raw.githubusercontent.com/arcaniusdev/eks-v1fs/v1.0.1/eks-v1fs.yaml`.)
+Download `eks-v1fs.yaml` from the [**eks-v1fs repository**](https://github.com/arcaniusdev/eks-v1fs) — ideally from the [latest tagged release](https://github.com/arcaniusdev/eks-v1fs/tags), so the components the bastion pulls at deploy time match the template you launch. That's the only file you need. (Direct link to the current release template: `https://raw.githubusercontent.com/arcaniusdev/eks-v1fs/v1.0.2/eks-v1fs.yaml`.)
 
 ### Step 2 — Start the Create stack wizard
 
