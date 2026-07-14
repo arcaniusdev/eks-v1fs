@@ -475,7 +475,9 @@ class ScannerApp:
                 dest_bucket = self.config.s3_quarantine_bucket
                 verdict = "quarantined-decompression-limit"
                 tags["ScanResult"] = "S3-DecompressionLimit"
-                tags["ScanErrors"] = ",".join(decompression_errors)
+                # Dedupe and join with '-' (a comma is NOT a legal S3 tag-value
+                # character; a multi-error file would otherwise fail to upload).
+                tags["ScanErrors"] = "-".join(dict.fromkeys(decompression_errors))
                 logger.warning(
                     "DECOMPRESSION LIMIT: s3://%s/%s → s3://%s/%s (errors: %s, "
                     "review pipeline disabled — quarantining incompletely-scanned file)",
@@ -537,10 +539,25 @@ class ScannerApp:
         async with resp["Body"] as stream:
             return await stream.read()
 
+    # S3 object-tag values allow letters, numbers, spaces, and + - = . _ : / @
+    _TAG_DISALLOWED = re.compile(r"[^\w \-=.:/@+]", re.UNICODE)
+
+    @classmethod
+    def _safe_tag(cls, value: str) -> str:
+        """Coerce a value into a legal S3 tag value (max 256 chars).
+
+        Defense-in-depth: a tag value with a disallowed character (e.g. a comma)
+        makes put_object raise InvalidTag, which would fail the whole scan and
+        poison-loop the message. Never let tag content break routing.
+        """
+        return cls._TAG_DISALLOWED.sub("_", value)[:256]
+
     async def _upload(self, bucket: str, key: str, data: bytes, tags: dict | None = None) -> None:
         kwargs = {"Bucket": bucket, "Key": key, "Body": data}
         if tags:
-            kwargs["Tagging"] = urllib.parse.urlencode(tags)
+            kwargs["Tagging"] = urllib.parse.urlencode(
+                {k: self._safe_tag(v) for k, v in tags.items()}
+            )
         await self.s3_client.put_object(**kwargs)
 
     async def _delete_object(self, bucket: str, key: str) -> None:
