@@ -1145,7 +1145,20 @@ Resources:
         # referencing the NAT gateways and private routes here makes the cluster
         # wait for them (DependsOn cannot be conditional). Inert in existing-VPC mode.
         - Key: network-ready
-          Value: !If [CreateNetwork, !Sub "${NGW1}-${NGW2}-${PrivateRoute1}-${PrivateRoute2}", "existing-vpc"]
+          # Referencing NAT gateways + private routes makes the cluster wait for
+          # egress to exist (DependsOn can't be conditional). Ref of an
+          # AWS::EC2::Route returns "<rtb-id>|<cidr>" — the '|' is an invalid tag
+          # character, so take the route-table-id half via Split/Select. The
+          # reference still registers the CloudFormation dependency.
+          Value: !If
+            - CreateNetwork
+            - !Join
+              - "-"
+              - - !Ref NGW1
+                - !Ref NGW2
+                - !Select [0, !Split ["|", !Ref PrivateRoute1]]
+                - !Select [0, !Split ["|", !Ref PrivateRoute2]]
+            - existing-vpc
 
   BastionAccessEntry:
     DependsOn: EKSCluster
