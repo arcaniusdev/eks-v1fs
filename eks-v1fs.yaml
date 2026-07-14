@@ -167,12 +167,16 @@ Parameters:
       EC2 instance type for the managed node group. A single node group hosts
       both system components and scanner workloads; memory-optimized xlarge
       (4 vCPU / 32 GiB) fits four 800m/2Gi V1FS scanner pods per node.
+      Graviton (r8g/r7g) types switch the node AMI to ARM64 and the
+      scanner-app image build to linux/arm64 automatically.
     Default: r7i.xlarge
     AllowedValues:
       - r7i.xlarge
       - r7a.xlarge
       - r6i.xlarge
       - r7i.2xlarge
+      - r8g.xlarge
+      - r7g.xlarge
   MaxDecompressionLayer:
     Type: Number
     Description: >
@@ -280,6 +284,27 @@ Mappings:
       ami: ami-0884d2865dbe9de4b
     us-west-2:
       ami: ami-0606dd43116f5ed57
+  # Node CPU architecture per instance type: selects the node group AMI and
+  # the scanner-app image build platform (TARGET_ARCH in bastion UserData)
+  NodeArchMap:
+    r7i.xlarge:
+      amiType: AL2023_x86_64_STANDARD
+      arch: amd64
+    r7a.xlarge:
+      amiType: AL2023_x86_64_STANDARD
+      arch: amd64
+    r6i.xlarge:
+      amiType: AL2023_x86_64_STANDARD
+      arch: amd64
+    r7i.2xlarge:
+      amiType: AL2023_x86_64_STANDARD
+      arch: amd64
+    r8g.xlarge:
+      amiType: AL2023_ARM_64_STANDARD
+      arch: arm64
+    r7g.xlarge:
+      amiType: AL2023_ARM_64_STANDARD
+      arch: arm64
 
 Resources:
 
@@ -1210,6 +1235,7 @@ Resources:
         MaxSize: !Ref NodeGroupMaxSize
       InstanceTypes:
         - !Ref NodeInstanceType
+      AmiType: !FindInMap [NodeArchMap, !Ref NodeInstanceType, amiType]
 
   CNIAddOn:
     DependsOn: EKSCluster
@@ -1727,6 +1753,7 @@ Resources:
 
             # ---- Scanner-app resources (empty when module disabled) ----
             # Passed directly — stack Outputs are unavailable during CREATE_IN_PROGRESS
+            export TARGET_ARCH="${NodeArchValue}"
             export ECR_REPO_URL="${EcrRepoUrlValue}"
             export SQS_QUEUE_URL="${FileScanQueueValue}"
             export S3_INGEST_BUCKET="${IngestBucketValue}"
@@ -1752,6 +1779,7 @@ Resources:
             SIGNAL_STATUS="SUCCESS"
             echo "Bastion provisioning complete."
           - RegistrationSecretValue: !If [HaveRegToken, !Ref V1FSRegistrationSecret, ""]
+            NodeArchValue: !FindInMap [NodeArchMap, !Ref NodeInstanceType, arch]
             VpcIdValue: !If [CreateNetwork, !Ref BaseVPC, !Ref ExistingVpcId]
             EcrRepoUrlValue: !If [ScannerAppEnabled, !GetAtt ScannerAppECRRepo.RepositoryUri, ""]
             FileScanQueueValue: !If [ScannerAppEnabled, !Ref FileScanQueue, ""]

@@ -42,8 +42,21 @@ if ! aws ecr get-login-password --region "$AWS_REGION" \
   exit 1
 fi
 
-echo "Building image..."
-docker build -t scanner-app "$APP_DIR"
+# Build for the node group's CPU architecture (TARGET_ARCH set by UserData;
+# defaults to amd64 for manual runs). Cross-arch builds need QEMU binfmt.
+TARGET_ARCH="${TARGET_ARCH:-amd64}"
+NATIVE_ARCH="$(uname -m)"
+case "$NATIVE_ARCH" in
+  x86_64) NATIVE_ARCH=amd64 ;;
+  aarch64|arm64) NATIVE_ARCH=arm64 ;;
+esac
+if [ "$TARGET_ARCH" != "$NATIVE_ARCH" ]; then
+  echo "Cross-building for $TARGET_ARCH on $NATIVE_ARCH — installing QEMU binfmt..."
+  docker run --privileged --rm tonistiigi/binfmt --install "$TARGET_ARCH"
+fi
+
+echo "Building image (linux/$TARGET_ARCH)..."
+docker build --platform "linux/$TARGET_ARCH" -t scanner-app "$APP_DIR"
 
 echo "Tagging and pushing to $ECR_REPO_URL..."
 docker tag scanner-app:latest "${ECR_REPO_URL}:${IMAGE_TAG}"

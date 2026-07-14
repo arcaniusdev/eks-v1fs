@@ -280,7 +280,7 @@ if [ "$DEPLOY_SCANNER_APP" = "true" ]; then
     https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
     > /etc/apt/sources.list.d/docker.list
   apt-get update -y
-  apt-get install -y docker-ce docker-ce-cli containerd.io
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin
   systemctl enable docker
   systemctl start docker
 
