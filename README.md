@@ -147,7 +147,7 @@ The database configuration is immutable after initial deployment — changing st
 
 ### Compute
 
-The cluster uses a **single managed node group** for everything — system components and scanner workloads. The default instance type is `r7i.xlarge` (4 vCPU, 32 GiB); memory-optimized instances give the V1FS scanner headroom for signature databases and in-memory file analysis, and each xlarge node fits four scanner pods (800m CPU / 2Gi memory each — the chart default) alongside scanner-app and system pods.
+The cluster uses a **single managed node group** for everything — system components and scanner workloads. The default instance type is `r7i.xlarge` (4 vCPU, 32 GiB); memory-optimized instances give the V1FS scanner headroom for signature databases and in-memory file analysis, and each xlarge node fits four scanner pods (800m CPU / 2Gi memory each — the chart default) alongside scanner-app and system pods. **Graviton ARM instance types** (`r8g.xlarge`, `r7g.xlarge`) are fully supported at 11–19% lower node cost — the template switches the node AMI and application image build to ARM64 automatically, and every component ships multi-architecture images.
 
 Node group sizing (all configurable via parameters):
 
@@ -344,7 +344,7 @@ Optional parameters:
 |---|---|---|
 | **PrimaryAZ** | `us-east-1a` | Availability Zone 1 |
 | **SecondaryAZ** | `us-east-1b` | Availability Zone 2 |
-| **NodeInstanceType** | `r7i.xlarge` | EC2 instance type for the managed node group (`r7i.xlarge`, `r7a.xlarge`, `r6i.xlarge`, or `r7i.2xlarge`). One node group hosts both system components and scanner workloads |
+| **NodeInstanceType** | `r7i.xlarge` | EC2 instance type for the managed node group — x86 (`r7i.xlarge`, `r7a.xlarge`, `r6i.xlarge`, `r7i.2xlarge`) or Graviton ARM (`r8g.xlarge`, `r7g.xlarge`). ARM types select an ARM64 node AMI and ARM image build automatically. One node group hosts both system components and scanner workloads |
 | **NodeGroupMinSize** | `2` | Minimum nodes in the managed node group (min 2 for CoreDNS/AZ redundancy) |
 | **NodeGroupDesiredSize** | `2` | Initial desired nodes — the Cluster Autoscaler adjusts from here |
 | **NodeGroupMaxSize** | `8` | Maximum nodes the Cluster Autoscaler may scale to. The default fits full-mode peak load on r7i.xlarge |
