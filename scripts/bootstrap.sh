@@ -245,6 +245,13 @@ ENDPOINT_ARGS=""
 if [ "$ENDPOINT_MODE" = "nlb" ]; then
   ENDPOINT_ARGS="-f $REPO_DIR/helm/values-nlb.yaml"
 elif [ "$ENDPOINT_MODE" = "alb" ]; then
+  # ALB idle timeout must exceed the scanner's scan timeout, else the ALB
+  # severs a connection during a long file's quiet analysis phase (no bytes
+  # flow while the engine crunches) before the scanner's own deadline fires,
+  # turning a slow scan into an opaque connection reset that DLQ-loops. Add a
+  # 60s buffer so TM_AM_SCAN_TIMEOUT_SECS wins the race. Max ALB value is 4000.
+  IDLE_TIMEOUT=$(( ${TM_AM_SCAN_TIMEOUT_SECS:-600} + 60 ))
+  [ "$IDLE_TIMEOUT" -gt 4000 ] && IDLE_TIMEOUT=4000
   ENDPOINT_ARGS="--set scanner.ingress.enabled=true \
     --set scanner.ingress.className=alb \
     --set scanner.ingress.hosts[0].host=$SCANNER_DOMAIN \
@@ -252,6 +259,7 @@ elif [ "$ENDPOINT_MODE" = "alb" ]; then
     --set scanner.ingress.annotations.alb\\.ingress\\.kubernetes\\.io/target-type=ip \
     --set scanner.ingress.annotations.alb\\.ingress\\.kubernetes\\.io/scheme=internal \
     --set scanner.ingress.annotations.alb\\.ingress\\.kubernetes\\.io/certificate-arn=$ACM_CERT_ARN \
+    --set-string scanner.ingress.annotations.alb\\.ingress\\.kubernetes\\.io/load-balancer-attributes=idle_timeout.timeout_seconds=$IDLE_TIMEOUT \
     --set-string scanner.ingress.annotations.alb\\.ingress\\.kubernetes\\.io/listen-ports=[{\"HTTPS\":443}]"
 fi
 
