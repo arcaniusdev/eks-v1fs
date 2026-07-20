@@ -138,11 +138,13 @@ Parameters:
     Type: String
     Description: >
       How to expose the V1FS scanner gRPC endpoint for external scanning
-      applications. auto (default) = ALB when DeployScannerApp=false (BYO
-      scanner — L7, per-request gRPC balancing), NLB when DeployScannerApp=true
-      (full-auto). nlb = internal Network Load Balancer (VPC-reachable, L4);
-      alb = ALB Ingress with TLS (requires ScannerDomain plus either
-      ACMCertificateArn or SelfSignedScannerCert=true); none = in-cluster only.
+      applications. auto (default) = internal ALB with TLS (L7, per-request
+      gRPC balancing) for BOTH full-auto and BYO deployments, so the scanner
+      endpoint looks identical in both. nlb = internal Network Load Balancer
+      (L4) — reserved for a future ICAP use case (ICAP needs L4; ALB is
+      HTTP-only), not used otherwise; alb = same as auto (explicit); none =
+      in-cluster only (no external endpoint). ALB modes need ScannerDomain
+      (defaulted) plus a cert (SelfSignedScannerCert defaults true).
     Default: "auto"
     AllowedValues:
       - "auto"
@@ -167,8 +169,12 @@ Parameters:
       - "false"
   ScannerDomain:
     Type: String
-    Description: DNS name for the scanner ALB, e.g. scanner.example.com (required when ScannerEndpointMode=alb)
-    Default: ""
+    Description: >
+      DNS name clients use to reach the scanner ALB and the SAN of the
+      self-signed cert. Override with your own name when you set up a real DNS
+      record; the default works out-of-the-box for evaluation (point the name
+      at the ALB in the client's resolver / a private hosted zone).
+    Default: "scanner.v1fs.internal"
   PMLEnabled:
     Type: String
     Description: Enable Predictive Machine Learning (PML) for file scanning. Requires PML support on the Vision One account.
@@ -254,12 +260,10 @@ Rules:
       - Assert: !Equals [!Ref DeployScannerApp, "true"]
         AssertDescription: DeployReviewPipeline=true requires DeployScannerApp=true
   AlbRequiresCertAndDomain:
-    # Fires for explicit alb, or auto resolving to ALB (BYO scanner).
+    # Fires whenever the ALB is exposed (explicit alb, or auto which -> ALB).
     RuleCondition: !Or
       - !Equals [!Ref ScannerEndpointMode, "alb"]
-      - !And
-        - !Equals [!Ref ScannerEndpointMode, "auto"]
-        - !Equals [!Ref DeployScannerApp, "false"]
+      - !Equals [!Ref ScannerEndpointMode, "auto"]
     Assertions:
       - Assert: !Or
           - !Not [!Equals [!Ref ACMCertificateArn, ""]]
@@ -292,17 +296,12 @@ Conditions:
   UseExistingBucket: !And
     - !Condition ScannerAppEnabled
     - !Not [!Equals [!Ref ExistingIngestBucket, ""]]
-  # auto resolves by deployment shape: BYO (no scanner-app) -> ALB, full-auto -> NLB.
-  ExposeNLB: !Or
-    - !Equals [!Ref ScannerEndpointMode, "nlb"]
-    - !And
-      - !Equals [!Ref ScannerEndpointMode, "auto"]
-      - !Equals [!Ref DeployScannerApp, "true"]
+  # auto -> ALB for both full-auto and BYO (identical endpoint shape).
+  # nlb is only ever created when explicitly requested (future ICAP use case).
+  ExposeNLB: !Equals [!Ref ScannerEndpointMode, "nlb"]
   ExposeALB: !Or
     - !Equals [!Ref ScannerEndpointMode, "alb"]
-    - !And
-      - !Equals [!Ref ScannerEndpointMode, "auto"]
-      - !Equals [!Ref DeployScannerApp, "false"]
+    - !Equals [!Ref ScannerEndpointMode, "auto"]
   ExposeEndpoint: !Or
     - !Condition ExposeNLB
     - !Condition ExposeALB

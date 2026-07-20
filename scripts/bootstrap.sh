@@ -21,16 +21,13 @@ export HOME=/root
 export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-# Resolve the 'auto' endpoint mode by deployment shape: BYO (no scanner-app)
-# exposes an ALB (L7, per-request gRPC balancing); full-auto exposes an NLB.
+# Resolve the 'auto' endpoint mode: always ALB (L7, per-request gRPC balancing),
+# for both full-auto and BYO, so the scanner endpoint is identical in both.
+# nlb is only used when explicitly requested (future ICAP use case).
 # Mirrors the ExposeALB/ExposeNLB Conditions in the CloudFormation template.
 if [ "${ENDPOINT_MODE:-}" = "auto" ]; then
-  if [ "${DEPLOY_SCANNER_APP:-}" = "false" ]; then
-    ENDPOINT_MODE="alb"
-  else
-    ENDPOINT_MODE="nlb"
-  fi
-  echo "Resolved ScannerEndpointMode=auto -> $ENDPOINT_MODE (DeployScannerApp=${DEPLOY_SCANNER_APP:-})"
+  ENDPOINT_MODE="alb"
+  echo "Resolved ScannerEndpointMode=auto -> alb"
 fi
 
 # Ensure /usr/local/bin is on PATH and KUBECONFIG is set for SSH sessions
