@@ -21,6 +21,18 @@ export HOME=/root
 export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Resolve the 'auto' endpoint mode by deployment shape: BYO (no scanner-app)
+# exposes an ALB (L7, per-request gRPC balancing); full-auto exposes an NLB.
+# Mirrors the ExposeALB/ExposeNLB Conditions in the CloudFormation template.
+if [ "${ENDPOINT_MODE:-}" = "auto" ]; then
+  if [ "${DEPLOY_SCANNER_APP:-}" = "false" ]; then
+    ENDPOINT_MODE="alb"
+  else
+    ENDPOINT_MODE="nlb"
+  fi
+  echo "Resolved ScannerEndpointMode=auto -> $ENDPOINT_MODE (DeployScannerApp=${DEPLOY_SCANNER_APP:-})"
+fi
+
 # Ensure /usr/local/bin is on PATH and KUBECONFIG is set for SSH sessions
 echo 'export PATH=/usr/local/bin:$PATH' > /etc/profile.d/local-bin.sh
 echo 'export KUBECONFIG=/root/.kube/config' >> /etc/profile.d/local-bin.sh
@@ -188,6 +200,44 @@ gpg --export > /root/.gnupg/pubring.gpg
 # Verify chart signature (validation only - not used for install)
 helm pull --verify visionone-filesecurity/visionone-filesecurity --version "$V1FS_CHART_VERSION"
 
+# ---- Self-signed scanner cert for ALB mode (optional) ----
+# ALB mode needs an ACM cert for its HTTPS/gRPC listener. When the user does
+# not bring one, generate a self-signed cert for the scanner domain, import it
+# to ACM for the listener, and store the public cert in a Secret + SSM so gRPC
+# clients can trust it (SDK ca_cert / V1FS_CA_CERT). No publicly-signed
+# certificate required. The SAN must match the host clients connect to, since
+# the V1FS SDK verifies the cert name and has no skip-verify option.
+if [ "$ENDPOINT_MODE" = "alb" ] && [ "$SELF_SIGNED_CERT" = "true" ] && [ -z "$ACM_CERT_ARN" ]; then
+  echo "Generating self-signed scanner cert for $SCANNER_DOMAIN..."
+  CERT_DIR="$(mktemp -d)"
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$CERT_DIR/tls.key" -out "$CERT_DIR/tls.crt" \
+    -days 825 -subj "/CN=$SCANNER_DOMAIN" \
+    -addext "subjectAltName=DNS:$SCANNER_DOMAIN"
+
+  echo "Importing self-signed cert to ACM..."
+  ACM_CERT_ARN=$(aws acm import-certificate \
+    --certificate "fileb://$CERT_DIR/tls.crt" \
+    --private-key "fileb://$CERT_DIR/tls.key" \
+    --tags "Key=Name,Value=scanner-selfsigned-$CFN_STACK_NAME" \
+    --region "$AWS_REGION" \
+    --query CertificateArn --output text)
+  echo "Imported ACM cert: $ACM_CERT_ARN"
+
+  # Store ONLY the public cert (self-signed = its own CA) for clients to trust.
+  # The private key stays in ACM (the ALB uses it); it is never persisted here.
+  kubectl create secret generic scanner-tls-ca \
+    --from-file=ca.crt="$CERT_DIR/tls.crt" \
+    -n visionone-filesecurity --dry-run=client -o yaml | kubectl apply -f -
+  aws ssm put-parameter \
+    --name "/$CFN_STACK_NAME/scanner-ca-cert" \
+    --value "$(cat "$CERT_DIR/tls.crt")" \
+    --type String --overwrite --region "$AWS_REGION"
+  echo "Scanner CA cert stored in Secret scanner-tls-ca and SSM /$CFN_STACK_NAME/scanner-ca-cert"
+
+  rm -rf "$CERT_DIR"
+fi
+
 # Endpoint-mode helm arguments.
 # nlb: chart-native externalService as an internal NLB (values-nlb.yaml)
 # alb: chart-native ingress with gRPC backend + TLS (Trend's documented topology)
@@ -333,6 +383,10 @@ if [ "$ENDPOINT_MODE" != "none" ]; then
     echo "Scanner endpoint published: $ENDPOINT"
     if [ "$ENDPOINT_MODE" = "alb" ] && [ -n "$HOSTNAME" ]; then
       echo "NOTE: create a DNS CNAME: $SCANNER_DOMAIN -> $HOSTNAME"
+      if [ "$SELF_SIGNED_CERT" = "true" ]; then
+        echo "NOTE: self-signed cert in Secret scanner-tls-ca and SSM /$CFN_STACK_NAME/scanner-ca-cert."
+        echo "      gRPC clients must trust it (SDK ca_cert / V1FS_CA_CERT)."
+      fi
     fi
   else
     echo "WARNING: scanner endpoint hostname not available after 10 minutes."

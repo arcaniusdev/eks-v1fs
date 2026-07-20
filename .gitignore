@@ -28,3 +28,6 @@ venv/
 stress-test-report-*.html
 cost-analysis-report*.html
 docs/*.html
+
+# Temp working directory (local only)
+temp/

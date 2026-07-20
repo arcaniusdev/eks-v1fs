@@ -138,18 +138,33 @@ Parameters:
     Type: String
     Description: >
       How to expose the V1FS scanner gRPC endpoint for external scanning
-      applications. nlb = internal Network Load Balancer (VPC-reachable, default);
-      alb = ALB Ingress with TLS (requires ACMCertificateArn and ScannerDomain);
-      none = in-cluster only.
-    Default: "nlb"
+      applications. auto (default) = ALB when DeployScannerApp=false (BYO
+      scanner — L7, per-request gRPC balancing), NLB when DeployScannerApp=true
+      (full-auto). nlb = internal Network Load Balancer (VPC-reachable, L4);
+      alb = ALB Ingress with TLS (requires ScannerDomain plus either
+      ACMCertificateArn or SelfSignedScannerCert=true); none = in-cluster only.
+    Default: "auto"
     AllowedValues:
+      - "auto"
       - "none"
       - "nlb"
       - "alb"
   ACMCertificateArn:
     Type: String
-    Description: ACM certificate ARN for the scanner ALB (required when ScannerEndpointMode=alb)
+    Description: ACM certificate ARN for the scanner ALB (ScannerEndpointMode=alb). Leave empty to auto-generate one via SelfSignedScannerCert.
     Default: ""
+  SelfSignedScannerCert:
+    Type: String
+    Description: >
+      When ScannerEndpointMode=alb and no ACMCertificateArn is supplied, the
+      bastion generates a self-signed cert for ScannerDomain, imports it to ACM
+      for the ALB listener, and stores it in a Secret so gRPC clients can trust
+      it (SDK ca_cert). Removes the need to bring a publicly-signed certificate.
+      Default true so BYO ALB mode is no-touch; set false to require your own ACM cert.
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
   ScannerDomain:
     Type: String
     Description: DNS name for the scanner ALB, e.g. scanner.example.com (required when ScannerEndpointMode=alb)
@@ -239,12 +254,19 @@ Rules:
       - Assert: !Equals [!Ref DeployScannerApp, "true"]
         AssertDescription: DeployReviewPipeline=true requires DeployScannerApp=true
   AlbRequiresCertAndDomain:
-    RuleCondition: !Equals [!Ref ScannerEndpointMode, "alb"]
+    # Fires for explicit alb, or auto resolving to ALB (BYO scanner).
+    RuleCondition: !Or
+      - !Equals [!Ref ScannerEndpointMode, "alb"]
+      - !And
+        - !Equals [!Ref ScannerEndpointMode, "auto"]
+        - !Equals [!Ref DeployScannerApp, "false"]
     Assertions:
-      - Assert: !Not [!Equals [!Ref ACMCertificateArn, ""]]
-        AssertDescription: ScannerEndpointMode=alb requires ACMCertificateArn
+      - Assert: !Or
+          - !Not [!Equals [!Ref ACMCertificateArn, ""]]
+          - !Equals [!Ref SelfSignedScannerCert, "true"]
+        AssertDescription: ALB scanner endpoint requires either ACMCertificateArn or SelfSignedScannerCert=true
       - Assert: !Not [!Equals [!Ref ScannerDomain, ""]]
-        AssertDescription: ScannerEndpointMode=alb requires ScannerDomain
+        AssertDescription: ALB scanner endpoint requires ScannerDomain
   ExistingVpcRequiresAllParts:
     RuleCondition: !Not [!Equals [!Ref ExistingVpcId, ""]]
     Assertions:
@@ -270,8 +292,17 @@ Conditions:
   UseExistingBucket: !And
     - !Condition ScannerAppEnabled
     - !Not [!Equals [!Ref ExistingIngestBucket, ""]]
-  ExposeNLB: !Equals [!Ref ScannerEndpointMode, "nlb"]
-  ExposeALB: !Equals [!Ref ScannerEndpointMode, "alb"]
+  # auto resolves by deployment shape: BYO (no scanner-app) -> ALB, full-auto -> NLB.
+  ExposeNLB: !Or
+    - !Equals [!Ref ScannerEndpointMode, "nlb"]
+    - !And
+      - !Equals [!Ref ScannerEndpointMode, "auto"]
+      - !Equals [!Ref DeployScannerApp, "true"]
+  ExposeALB: !Or
+    - !Equals [!Ref ScannerEndpointMode, "alb"]
+    - !And
+      - !Equals [!Ref ScannerEndpointMode, "auto"]
+      - !Equals [!Ref DeployScannerApp, "false"]
   ExposeEndpoint: !Or
     - !Condition ExposeNLB
     - !Condition ExposeALB
@@ -863,7 +894,21 @@ Resources:
                 Effect: Allow
                 Action:
                   - ssm:PutParameter
-                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/scanner-endpoint
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/scanner-endpoint
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/scanner-ca-cert
+              - !If
+                - ExposeALB
+                # Self-signed ALB cert: import a freshly-generated cert into ACM
+                # for the ingress listener. ImportCertificate targets a new ARN
+                # so it cannot be resource-scoped; the LB controller reads it.
+                - Sid: ImportSelfSignedScannerCert
+                  Effect: Allow
+                  Action:
+                    - acm:ImportCertificate
+                    - acm:AddTagsToCertificate
+                  Resource: "*"
+                - !Ref AWS::NoValue
               - !If
                 - CreateIngestBucket
                 - Sid: S3IngestWrite
@@ -1449,6 +1494,10 @@ Resources:
                   - elasticloadbalancing:DeleteLoadBalancer
                   - elasticloadbalancing:DeleteTargetGroup
                   - logs:DescribeLogGroups
+                  # Delete the self-signed scanner cert the bastion imported (ALB mode)
+                  - acm:ListCertificates
+                  - acm:ListTagsForCertificate
+                  - acm:DeleteCertificate
                 Resource: "*"
               - Effect: Allow
                 Action:
@@ -1486,6 +1535,7 @@ Resources:
               ec2 = boto3.client('ec2')
               elbv2 = boto3.client('elbv2')
               logs = boto3.client('logs')
+              acm = boto3.client('acm')
 
               try:
                   # 1. Delete LB-controller-created load balancers (scanner NLB/ALB).
@@ -1508,6 +1558,33 @@ Resources:
                       elbv2.delete_load_balancer(LoadBalancerArn=arn)
                   if lb_arns:
                       time.sleep(30)  # allow ENI release before SG/VPC deletion
+
+                  # 1b. Delete the self-signed scanner cert the bastion imported
+                  # to ACM (ALB mode). Only deletable once the ALB listener is
+                  # gone (deleted above); retry while ACM releases the in-use
+                  # association. Discovered by the Name tag the bastion sets.
+                  print("Checking for imported self-signed scanner certs...")
+                  cert_tag = f"scanner-selfsigned-{stack_name}"
+                  cert_paginator = acm.get_paginator('list_certificates')
+                  for page in cert_paginator.paginate():
+                      for cert in page['CertificateSummaryList']:
+                          arn = cert['CertificateArn']
+                          try:
+                              tags = acm.list_tags_for_certificate(CertificateArn=arn)['Tags']
+                          except Exception:
+                              continue
+                          if not any(t['Key'] == 'Name' and t.get('Value') == cert_tag for t in tags):
+                              continue
+                          for attempt in range(5):
+                              try:
+                                  acm.delete_certificate(CertificateArn=arn)
+                                  print(f"Deleted ACM cert: {arn}")
+                                  break
+                              except Exception as c_err:
+                                  if attempt == 4:
+                                      print(f"ACM cert delete failed after retries (non-fatal): {c_err}")
+                                  else:
+                                      time.sleep(15)
 
                   # 2. Delete LB-controller-created target groups
                   print("Checking for orphaned target groups...")
@@ -1734,6 +1811,7 @@ Resources:
             export DEPLOY_REVIEW="${DeployReviewPipeline}"
             export ENDPOINT_MODE="${ScannerEndpointMode}"
             export ACM_CERT_ARN="${ACMCertificateArn}"
+            export SELF_SIGNED_CERT="${SelfSignedScannerCert}"
             export SCANNER_DOMAIN="${ScannerDomain}"
             export EXISTING_INGEST_BUCKET="${ExistingIngestBucket}"
 
@@ -2919,6 +2997,10 @@ Outputs:
     Condition: ScannerAppEnabled
     Description: CloudWatch dashboard URL for the scanner pipeline
     Value: !Sub https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards/dashboard/scanner-${AWS::StackName}
+  ScannerEndpointAddress:
+    Condition: ExposeALB
+    Description: gRPC endpoint address for external scanning applications (ALB, TLS on :443). Create a DNS record for ScannerDomain pointing at the ALB (see ScannerEndpointParameter for the ALB hostname).
+    Value: !Sub "${ScannerDomain}:443"
   ScannerEndpointParameter:
     Condition: ExposeEndpoint
     Description: SSM parameter holding the scanner gRPC endpoint address (published by the bastion once the load balancer is provisioned)
@@ -2935,4 +3017,7 @@ Outputs:
       - !Sub >-
         Create a DNS CNAME from ${ScannerDomain} to the ALB hostname (see SSM
         parameter /${AWS::StackName}/scanner-endpoint), then connect with TLS:
-        amaas.grpc.init("${ScannerDomain}:443", api_key, True).
+        amaas.grpc.init("${ScannerDomain}:443", api_key, True). If a self-signed
+        cert was generated (SelfSignedScannerCert=true), fetch it from SSM
+        /${AWS::StackName}/scanner-ca-cert and pass it as the SDK ca_cert:
+        amaas.grpc.init("${ScannerDomain}:443", api_key, True, "/path/to/ca.crt").

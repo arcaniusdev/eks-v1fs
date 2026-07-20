@@ -13,6 +13,11 @@ data:
   S3_CLEAN_BUCKET: "<from CleanBucketName output>"
   S3_REVIEW_BUCKET: "<from ReviewBucketName output>"
   V1FS_SERVER_ADDR: "<V1FS_RELEASE_NAME>-visionone-filesecurity-scanner:50051"
+  # TLS to the scanner. Defaults below are the in-cluster plaintext path.
+  # For ALB mode set V1FS_SERVER_ADDR=<ScannerDomain>:443, V1FS_TLS_ENABLED=true,
+  # and (self-signed cert) V1FS_CA_CERT=/etc/v1fs-tls/ca.crt.
+  V1FS_TLS_ENABLED: "false"
+  V1FS_CA_CERT: ""
   V1FS_API_KEY_SECRET_ARN: "<from ApiKeySecretArn output>"
   AWS_REGION: "us-east-1"
   LOG_LEVEL: "INFO"

@@ -25,6 +25,8 @@ class Config:
     s3_quarantine_bucket: str
     s3_review_bucket: str
     v1fs_server_addr: str
+    v1fs_tls_enabled: bool
+    v1fs_ca_cert: str
     v1fs_api_key_secret_arn: str
     aws_region: str
     log_level: str
@@ -82,6 +84,12 @@ def load_config() -> Config:
             "V1FS_SERVER_ADDR",
             "my-release-visionone-filesecurity-scanner:50051",
         ),
+        # TLS to the scanner. Default off: the in-cluster ClusterIP/NLB path is
+        # plaintext gRPC. Set true for ALB mode (:443). V1FS_CA_CERT points at a
+        # PEM to trust — required for a self-signed ALB cert; leave empty to use
+        # the system trust store (publicly-signed certs).
+        v1fs_tls_enabled=os.environ.get("V1FS_TLS_ENABLED", "false").lower() == "true",
+        v1fs_ca_cert=os.environ.get("V1FS_CA_CERT", ""),
         v1fs_api_key_secret_arn=required["V1FS_API_KEY_SECRET_ARN"],
         aws_region=required["AWS_REGION"],
         log_level=log_level,

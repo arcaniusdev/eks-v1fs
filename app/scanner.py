@@ -210,12 +210,20 @@ class ScannerApp:
         api_key = resp["SecretString"]
 
         logger.info(
-            "Initializing V1FS async gRPC handle at %s",
+            "Initializing V1FS async gRPC handle at %s (tls=%s, ca_cert=%s)",
             self.config.v1fs_server_addr,
+            self.config.v1fs_tls_enabled,
+            self.config.v1fs_ca_cert or "system",
         )
-        # init is synchronous - do not await
+        # init is synchronous - do not await. The SDK's ca_cert arg is the
+        # "Bring Your Own Certificate" path: pass a PEM to trust (self-signed
+        # ALB cert), or None to use the system trust store. There is no
+        # skip-verify option — a self-signed cert MUST be supplied here.
         self.scan_handle = amaas.grpc.aio.init(
-            self.config.v1fs_server_addr, api_key, False
+            self.config.v1fs_server_addr,
+            api_key,
+            self.config.v1fs_tls_enabled,
+            self.config.v1fs_ca_cert or None,
         )
 
         self._delete_batcher = DeleteBatcher(self.sqs_client, self.config.sqs_queue_url)
