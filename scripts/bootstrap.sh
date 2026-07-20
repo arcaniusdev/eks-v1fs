@@ -252,9 +252,14 @@ elif [ "$ENDPOINT_MODE" = "alb" ]; then
   # 60s buffer so TM_AM_SCAN_TIMEOUT_SECS wins the race. Max ALB value is 4000.
   IDLE_TIMEOUT=$(( ${TM_AM_SCAN_TIMEOUT_SECS:-600} + 60 ))
   [ "$IDLE_TIMEOUT" -gt 4000 ] && IDLE_TIMEOUT=4000
+  # hosts[0].host replaces the chart's default hosts[0] object wholesale, which
+  # drops its default paths and renders an Ingress with no spec.rules[].http.paths
+  # (invalid). Set the path explicitly alongside the host.
   ENDPOINT_ARGS="--set scanner.ingress.enabled=true \
     --set scanner.ingress.className=alb \
     --set scanner.ingress.hosts[0].host=$SCANNER_DOMAIN \
+    --set scanner.ingress.hosts[0].paths[0].path=/ \
+    --set scanner.ingress.hosts[0].paths[0].pathType=Prefix \
     --set scanner.ingress.annotations.alb\\.ingress\\.kubernetes\\.io/backend-protocol-version=GRPC \
     --set scanner.ingress.annotations.alb\\.ingress\\.kubernetes\\.io/target-type=ip \
     --set scanner.ingress.annotations.alb\\.ingress\\.kubernetes\\.io/scheme=internal \
