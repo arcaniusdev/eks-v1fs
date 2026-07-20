@@ -40,6 +40,12 @@ apt-get update -y
 apt-get remove needrestart -y || true
 apt-get install -y python3 python3-pip curl gpg apt-transport-https unzip jq
 
+# Python libraries for in-VPC testing from the bastion: boto3 (S3 access — the
+# AWS CLI bundles its own Python and does NOT expose boto3 to system python3)
+# and the V1FS gRPC SDK, so load/sanity scans against the scanner endpoint run
+# without a manual install. Version matches app/requirements.txt.
+pip3 install --quiet boto3 "visionone-filesecurity==1.4.1" || true
+
 # ---- AWS CLI v2 ----
 curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
 unzip -q /tmp/awscliv2.zip -d /tmp
