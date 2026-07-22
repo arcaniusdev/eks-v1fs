@@ -150,8 +150,10 @@ helm install cluster-autoscaler autoscaler/cluster-autoscaler \
   --set extraArgs.scale-down-unneeded-time=2m \
   --wait --timeout 5m
 
-# ---- Install KEDA via Helm (scales only our scanner-app) ----
-if [ "$DEPLOY_SCANNER_APP" = "true" ]; then
+# ---- Install KEDA via Helm ----
+# Needed for the scanner-app (full-auto) and/or to scale the V1FS scanner on a
+# customer-provided external queue (BYO). Mirrors the KedaNeeded CFN Condition.
+if [ "$DEPLOY_SCANNER_APP" = "true" ] || [ -n "${EXTERNAL_SCAN_QUEUE_ARN:-}" ]; then
   helm repo add kedacore https://kedacore.github.io/charts
   helm repo update kedacore
   helm install keda kedacore/keda \
@@ -277,13 +279,13 @@ fi
 kubectl create configmap ontap-agent-config -n visionone-filesecurity 2>/dev/null || true
 
 # Scanner autoscaler selection (this branch):
-#   full-auto (scanner-app + our SQS queue) -> KEDA scales the scanner on queue
-#     depth; the chart HPA stays DISABLED (values-base autoscaling.enabled=false)
-#     and deploy.sh applies k8s/scanner-scaledobject.yaml. Bounds live on the
-#     ScaledObject, so pass nothing here.
-#   BYO (no scanner-app, no queue, KEDA not installed) -> fall back to the
+#   full-auto (our SQS queue) OR BYO-with-external-queue -> KEDA scales the
+#     scanner on queue depth; chart HPA stays DISABLED (values-base
+#     autoscaling.enabled=false). The ScaledObject is applied by deploy.sh
+#     (full-auto) or below (BYO+external). Bounds live on it, so pass nothing.
+#   BYO with NO queue (no scanner-app, no external queue) -> fall back to the
 #     chart's CPU/mem HPA so the scanner still autoscales; re-enable it here.
-if [ "$DEPLOY_SCANNER_APP" = "true" ]; then
+if [ "$DEPLOY_SCANNER_APP" = "true" ] || [ -n "${EXTERNAL_SCAN_QUEUE_ARN:-}" ]; then
   SCANNER_AUTOSCALE_ARGS=""   # KEDA owns scanner scaling; chart HPA off
 else
   SCANNER_AUTOSCALE_ARGS="--set scanner.autoscaling.enabled=true \
@@ -383,6 +385,26 @@ if [ "$DEPLOY_SCANNER_APP" = "true" ]; then
   if [ "$DEPLOY_REVIEW" = "true" ]; then
     "$REPO_DIR/scripts/deploy.sh" --review
   fi
+fi
+
+# ---- BYO external-queue: KEDA scales the scanner on the customer's queue ----
+# In full-auto, deploy.sh applies this ScaledObject against our queue. In BYO
+# (deploy.sh is not run) with an external queue, apply it here against that
+# queue so the scanner fleet still tracks the backlog. The chart HPA is off.
+if [ "$DEPLOY_SCANNER_APP" != "true" ] && [ -n "${EXTERNAL_SCAN_QUEUE_ARN:-}" ]; then
+  echo "Applying KEDA scanner ScaledObject for external queue..."
+  # arn:aws:sqs:REGION:ACCOUNT:NAME -> URL. Region taken from the ARN so a
+  # cross-region queue resolves correctly.
+  EXT_REGION=$(echo "$EXTERNAL_SCAN_QUEUE_ARN" | cut -d: -f4)
+  EXT_ACCOUNT=$(echo "$EXTERNAL_SCAN_QUEUE_ARN" | cut -d: -f5)
+  EXT_NAME=$(echo "$EXTERNAL_SCAN_QUEUE_ARN" | cut -d: -f6)
+  EXT_QUEUE_URL="https://sqs.${EXT_REGION}.amazonaws.com/${EXT_ACCOUNT}/${EXT_NAME}"
+  sed -e "s|<SQS_QUEUE_URL>|${EXT_QUEUE_URL}|g" \
+      -e "s|<AWS_REGION>|${EXT_REGION}|g" \
+      -e "s|<SCANNER_MIN_REPLICAS>|${SCANNER_MIN_REPLICAS:-1}|g" \
+      -e "s|<SCANNER_MAX_REPLICAS>|${SCANNER_MAX_REPLICAS:-10}|g" \
+      -e "s|<SCANNER_QUEUE_LENGTH>|${SCANNER_QUEUE_LENGTH:-50}|g" \
+      "$REPO_DIR/k8s/scanner-scaledobject.yaml" | kubectl apply -f -
 fi
 
 # ---- Publish the scanner endpoint address to SSM ----

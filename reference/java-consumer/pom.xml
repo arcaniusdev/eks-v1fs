@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Reference SQS-driven scanner consumer for the keda-scanner-queue-depth branch.
+  NOT deployed by the CloudFormation stack — it is a worked example for a
+  customer whose API gateway feeds an SQS queue. It shows the pull /
+  competing-consumers pattern: drain the queue, discover scanner pods from the
+  NLB target group, and hand each scan to a pod with free capacity (least-busy),
+  connecting DIRECTLY to pod IPs (no LB in the scan path, no L7 latency).
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>v1fs-sqs-consumer</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <aws.sdk.version>2.31.0</aws.sdk.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>software.amazon.awssdk</groupId>
+        <artifactId>bom</artifactId>
+        <version>${aws.sdk.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <!-- Trend Vision One File Security SDK (the same one the POC guide uses) -->
+    <dependency>
+      <groupId>com.trend</groupId>
+      <artifactId>file-security-java-sdk</artifactId>
+      <version>1.+</version>
+    </dependency>
+    <!-- SQS (drain), ELBv2 (discover scanner pod IPs), S3 (fetch objects) -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>sqs</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>elasticloadbalancingv2</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+    </dependency>
+  </dependencies>
+</project>

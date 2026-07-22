@@ -109,6 +109,16 @@ Parameters:
     AllowedValues:
       - "true"
       - "false"
+  ExternalScanQueueArn:
+    Type: String
+    Description: >
+      BYO mode: ARN of YOUR existing SQS queue that feeds scan work. When set,
+      KEDA is installed and scales the V1FS scanner on this queue's depth (the
+      scanner fleet tracks your backlog), and the chart HPA is disabled. Leave
+      empty in full-auto (the stack's own scan queue is used). Cross-account
+      queue: your queue's resource policy must allow the KedaOperatorRole
+      principal sqs:GetQueueAttributes.
+    Default: ""
   ScannerAppMaxReplicas:
     Type: Number
     Description: Maximum scanner-app pods (KEDA SQS-driven scaling)
@@ -287,6 +297,12 @@ Conditions:
   HaveRegToken: !Not [!Equals [!Ref RegistrationToken, ""]]
   CreateNetwork: !Equals [!Ref ExistingVpcId, ""]
   ScannerAppEnabled: !Equals [!Ref DeployScannerApp, "true"]
+  HasExternalScanQueue: !Not [!Equals [!Ref ExternalScanQueueArn, ""]]
+  # KEDA is installed for the scanner-app (full-auto) OR to scale the scanner
+  # on a customer-provided external queue (BYO).
+  KedaNeeded: !Or
+    - !Equals [!Ref DeployScannerApp, "true"]
+    - !Not [!Equals [!Ref ExternalScanQueueArn, ""]]
   ReviewEnabled: !And
     - !Condition ScannerAppEnabled
     - !Equals [!Ref DeployReviewPipeline, "true"]
@@ -1355,7 +1371,7 @@ Resources:
       RoleArn: !GetAtt LBControllerRole.Arn
 
   KedaOperatorRole:
-    Condition: ScannerAppEnabled
+    Condition: KedaNeeded
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub KedaOperatorRole-${AWS::StackName}
@@ -1372,23 +1388,39 @@ Resources:
         - PolicyName: KedaSQSMetrics
           PolicyDocument:
             Version: "2012-10-17"
+            # Per-statement !If so the policy is valid in every combination:
+            # full-auto (stack queues) and/or BYO (external queue). KedaNeeded
+            # guarantees at least one statement is present.
             Statement:
-              - Sid: SQSQueueMetrics
-                Effect: Allow
-                Action:
-                  - sqs:GetQueueAttributes
-                  - sqs:GetQueueUrl
-                Resource: !If
-                  - ReviewEnabled
-                  - - !GetAtt FileScanQueue.Arn
-                    - !GetAtt ReviewScanQueue.Arn
-                  - - !GetAtt FileScanQueue.Arn
+              - !If
+                - ScannerAppEnabled
+                - Sid: StackScanQueues
+                  Effect: Allow
+                  Action:
+                    - sqs:GetQueueAttributes
+                    - sqs:GetQueueUrl
+                  Resource: !If
+                    - ReviewEnabled
+                    - - !GetAtt FileScanQueue.Arn
+                      - !GetAtt ReviewScanQueue.Arn
+                    - - !GetAtt FileScanQueue.Arn
+                - !Ref AWS::NoValue
+              - !If
+                - HasExternalScanQueue
+                - Sid: ExternalScanQueue
+                  Effect: Allow
+                  Action:
+                    - sqs:GetQueueAttributes
+                    - sqs:GetQueueUrl
+                  Resource:
+                    - !Ref ExternalScanQueueArn
+                - !Ref AWS::NoValue
       Tags:
         - Key: Name
           Value: !Sub KedaOperatorRole-${AWS::StackName}
 
   KedaOperatorPodIdentity:
-    Condition: ScannerAppEnabled
+    Condition: KedaNeeded
     DependsOn: PodIdentityAgentAddon
     Type: AWS::EKS::PodIdentityAssociation
     Properties:
@@ -1808,6 +1840,7 @@ Resources:
             # ---- Deployment modes ----
             export DEPLOY_SCANNER_APP="${DeployScannerApp}"
             export DEPLOY_REVIEW="${DeployReviewPipeline}"
+            export EXTERNAL_SCAN_QUEUE_ARN="${ExternalScanQueueArn}"
             export ENDPOINT_MODE="${ScannerEndpointMode}"
             export ACM_CERT_ARN="${ACMCertificateArn}"
             export SELF_SIGNED_CERT="${SelfSignedScannerCert}"
