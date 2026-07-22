@@ -22,9 +22,13 @@ for arg in "$@"; do
   esac
 done
 
-# If any resource env var is missing, fall back to reading stack Outputs.
-# S3_REVIEW_BUCKET is optional (empty when the review pipeline is not deployed).
-if [ -z "${SQS_QUEUE_URL:-}" ] || [ -z "${S3_INGEST_BUCKET:-}" ] || \
+# If any REQUIRED resource env var is missing, fall back to reading stack
+# Outputs. S3_INGEST_BUCKET is intentionally NOT in this list: it is optional
+# (the scanner reads the source bucket from each message) and is legitimately
+# empty in external-queue mode — treating it as "missing" would trigger an
+# Outputs fetch that fails during CREATE_IN_PROGRESS (Outputs not yet set).
+# S3_REVIEW_BUCKET is likewise optional (empty without the review pipeline).
+if [ -z "${SQS_QUEUE_URL:-}" ] || \
    [ -z "${S3_QUARANTINE_BUCKET:-}" ] || \
    [ -z "${V1FS_API_KEY_SECRET_ARN:-}" ] || [ -z "${ECR_REPO_URL:-}" ] || \
    [ -z "${AUDIT_LOG_GROUP:-}" ]; then
@@ -40,7 +44,7 @@ if [ -z "${SQS_QUEUE_URL:-}" ] || [ -z "${S3_INGEST_BUCKET:-}" ] || \
   get_output() {
     echo "$OUTPUTS" | python3 -c "
 import json, sys
-outputs = json.load(sys.stdin)
+outputs = json.load(sys.stdin) or []
 for o in outputs:
     if o['OutputKey'] == sys.argv[1]:
         print(o['OutputValue'])
