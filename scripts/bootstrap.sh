@@ -21,13 +21,13 @@ export HOME=/root
 export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$PATH
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-# Resolve the 'auto' endpoint mode: always ALB (L7, per-request gRPC balancing),
-# for both full-auto and BYO, so the scanner endpoint is identical in both.
-# nlb is only used when explicitly requested (future ICAP use case).
-# Mirrors the ExposeALB/ExposeNLB Conditions in the CloudFormation template.
+# Resolve the 'auto' endpoint mode: NLB (L4) for both full-auto and BYO. The
+# NLB is VPC-reachable AND doubles as the pod-discovery registry (target-type=ip
+# target group) for client-side dispatchers. alb is explicit opt-in.
+# Mirrors the ExposeNLB/ExposeALB Conditions in the CloudFormation template.
 if [ "${ENDPOINT_MODE:-}" = "auto" ]; then
-  ENDPOINT_MODE="alb"
-  echo "Resolved ScannerEndpointMode=auto -> alb"
+  ENDPOINT_MODE="nlb"
+  echo "Resolved ScannerEndpointMode=auto -> nlb"
 fi
 
 # Ensure /usr/local/bin is on PATH and KUBECONFIG is set for SSH sessions
@@ -276,16 +276,29 @@ fi
 # fresh install without it (we don't use ONTAP agents). Pre-create it empty.
 kubectl create configmap ontap-agent-config -n visionone-filesecurity 2>/dev/null || true
 
-# Install with the chart's own HPA (Trend-supported autoscaling) and the
-# repo values file as the single source of truth (no --wait; pods need
-# time to register with Vision One cloud on first startup)
+# Scanner autoscaler selection (this branch):
+#   full-auto (scanner-app + our SQS queue) -> KEDA scales the scanner on queue
+#     depth; the chart HPA stays DISABLED (values-base autoscaling.enabled=false)
+#     and deploy.sh applies k8s/scanner-scaledobject.yaml. Bounds live on the
+#     ScaledObject, so pass nothing here.
+#   BYO (no scanner-app, no queue, KEDA not installed) -> fall back to the
+#     chart's CPU/mem HPA so the scanner still autoscales; re-enable it here.
+if [ "$DEPLOY_SCANNER_APP" = "true" ]; then
+  SCANNER_AUTOSCALE_ARGS=""   # KEDA owns scanner scaling; chart HPA off
+else
+  SCANNER_AUTOSCALE_ARGS="--set scanner.autoscaling.enabled=true \
+    --set scanner.autoscaling.minReplicas=$SCANNER_MIN_REPLICAS \
+    --set scanner.autoscaling.maxReplicas=$SCANNER_MAX_REPLICAS"
+fi
+
+# Install the chart (no --wait; pods need time to register with Vision One
+# cloud on first startup). values-base is the single source of truth.
 # shellcheck disable=SC2086
 helm install my-release visionone-filesecurity/visionone-filesecurity \
   -n visionone-filesecurity \
   --version "$V1FS_CHART_VERSION" \
   -f "$REPO_DIR/helm/values-base.yaml" \
-  --set scanner.autoscaling.minReplicas="$SCANNER_MIN_REPLICAS" \
-  --set scanner.autoscaling.maxReplicas="$SCANNER_MAX_REPLICAS" \
+  $SCANNER_AUTOSCALE_ARGS \
   $ENDPOINT_ARGS
 
 # ---- Configure V1FS scan policy via CLISH ----

@@ -155,11 +155,22 @@ sed -e "s|<ECR_REPO_URL>|$(sed_escape "$ECR_REPO_URL")|g" \
 echo "Applying PodDisruptionBudgets..."
 kubectl apply -f "$K8S_DIR/pdb.yaml"
 
-echo "Applying KEDA ScaledObject..."
+echo "Applying KEDA ScaledObject (scanner-app)..."
 sed -e "s|<SQS_QUEUE_URL>|$(sed_escape "$SQS_QUEUE_URL")|g" \
     -e "s|<AWS_REGION>|$(sed_escape "$AWS_REGION")|g" \
     -e "s|<MAX_REPLICAS>|$(sed_escape "$SCANNER_APP_MAX_REPLICAS")|g" \
     "$K8S_DIR/scaledobject.yaml" | kubectl apply -f -
+
+# KEDA scales the V1FS scanner on queue depth (this branch; chart HPA disabled).
+# The scanner fleet tracks the same scan queue's backlog. SCANNER_QUEUE_LENGTH
+# = messages per scanner pod (coarser than the scanner-app threshold).
+echo "Applying KEDA ScaledObject (V1FS scanner, queue-depth scaling)..."
+sed -e "s|<SQS_QUEUE_URL>|$(sed_escape "$SQS_QUEUE_URL")|g" \
+    -e "s|<AWS_REGION>|$(sed_escape "$AWS_REGION")|g" \
+    -e "s|<SCANNER_MIN_REPLICAS>|$(sed_escape "${SCANNER_MIN_REPLICAS:-1}")|g" \
+    -e "s|<SCANNER_MAX_REPLICAS>|$(sed_escape "${SCANNER_MAX_REPLICAS:-10}")|g" \
+    -e "s|<SCANNER_QUEUE_LENGTH>|$(sed_escape "${SCANNER_QUEUE_LENGTH:-50}")|g" \
+    "$K8S_DIR/scanner-scaledobject.yaml" | kubectl apply -f -
 
 echo "Waiting for rollout (Cluster Autoscaler may need to provision a node first)..."
 if kubectl rollout status deployment/scanner-app -n visionone-filesecurity --timeout=300s; then

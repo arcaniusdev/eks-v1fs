@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+import sys
 import time
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -115,8 +116,23 @@ def capture_release_values(release, namespace):
     return path
 
 
-def get_live_hpa_bounds(namespace):
-    """Read min/max replicas from the chart scanner's live HPA (operator tuning)."""
+SCANNER_SCALEDOBJECT = "v1fs-scanner-sqs-scaler"
+
+
+def scanner_keda_present(namespace):
+    """True if the KEDA ScaledObject scales the V1FS scanner (this branch's mode)."""
+    r = run(f"kubectl get scaledobject {SCANNER_SCALEDOBJECT} -n {namespace} "
+            f"--ignore-not-found -o name", check=False)
+    return r.returncode == 0 and bool(r.stdout.strip())
+
+
+def chart_hpa_on_scanner(namespace):
+    """Return (min,max) of a CHART-owned (non-KEDA) HPA on the scanner, else None.
+
+    KEDA creates its own HPA for the ScaledObject; that one carries the
+    'scaledobject.keda.sh/name' label. A chart HPA does NOT — its presence
+    alongside the ScaledObject means two autoscalers are fighting the scanner.
+    """
     result = run(f"kubectl get hpa -n {namespace} -o json", check=False)
     if result.returncode != 0 or not result.stdout.strip():
         return None
@@ -126,21 +142,32 @@ def get_live_hpa_bounds(namespace):
         return None
     for hpa in items:
         target = hpa.get("spec", {}).get("scaleTargetRef", {}).get("name", "")
-        if "visionone-filesecurity-scanner" in target:
+        labels = hpa.get("metadata", {}).get("labels", {}) or {}
+        if "visionone-filesecurity-scanner" in target and "scaledobject.keda.sh/name" not in labels:
             spec = hpa["spec"]
             return spec.get("minReplicas", 1), spec.get("maxReplicas")
     return None
 
 
-def build_upgrade_cmd(release, namespace, values_file, hpa_bounds, version=None):
-    """Build the helm upgrade command: base values + preserved install values + live HPA bounds."""
+def build_upgrade_cmd(release, namespace, values_file, hpa_bounds, keda_scanner, version=None):
+    """Build the helm upgrade command: base values + preserved install values.
+
+    KEDA-scanner mode (this branch's default): the chart HPA stays disabled
+    (values-base scanner.autoscaling.enabled=false) and the KEDA ScaledObject —
+    untouched by helm — owns scaling, so pass NO autoscaling bounds. BYO/chart-
+    HPA fallback: preserve the live HPA bounds as before.
+    """
     cmd = (
         f"helm upgrade {release} visionone-filesecurity/visionone-filesecurity "
         f"-n {namespace} -f {VALUES_BASE} -f {values_file}"
     )
     if version:
         cmd += f" --version {version}"
-    if hpa_bounds:
+    if keda_scanner:
+        # Belt-and-suspenders: re-assert the chart HPA stays off so a chart
+        # default flip can't resurrect it to fight KEDA.
+        cmd += " --set scanner.autoscaling.enabled=false"
+    elif hpa_bounds:
         min_r, max_r = hpa_bounds
         if min_r:
             cmd += f" --set scanner.autoscaling.minReplicas={min_r}"
@@ -220,13 +247,19 @@ def main():
     for release, ns in releases:
         print(f"\n[4/8] Upgrading {release} in {ns}...")
         values_file = capture_release_values(release, ns)
-        hpa_bounds = get_live_hpa_bounds(ns)
-        if hpa_bounds:
-            print(f"  Live HPA bounds: min={hpa_bounds[0]}, max={hpa_bounds[1]}")
+        keda_scanner = scanner_keda_present(ns)
+        hpa_bounds = None
+        if keda_scanner:
+            print("  Scanner scaling: KEDA on queue depth (chart HPA disabled). "
+                  "Bounds live on the ScaledObject; re-asserting autoscaling.enabled=false.")
         else:
-            print("  WARNING: No HPA found for the chart scanner — "
-                  "expected scanner.autoscaling.enabled=true. Proceeding with values-file bounds.")
-        cmd = build_upgrade_cmd(release, ns, values_file, hpa_bounds, args.version)
+            hpa_bounds = chart_hpa_on_scanner(ns)
+            if hpa_bounds:
+                print(f"  Scanner scaling: chart HPA (bounds min={hpa_bounds[0]}, max={hpa_bounds[1]}).")
+            else:
+                print("  WARNING: scanner has neither a KEDA ScaledObject nor a chart HPA — "
+                      "it will not autoscale. Check the deployment mode.")
+        cmd = build_upgrade_cmd(release, ns, values_file, hpa_bounds, keda_scanner, args.version)
         if args.dry_run:
             print(f"  DRY RUN: {cmd}")
         else:
@@ -256,29 +289,32 @@ def main():
             )
     print("  NOTE: rv intentionally has NO scan policy (unlimited decompression).")
 
-    # Step 6: Verify autoscaling state — the chart's HPA MUST exist, and KEDA
-    # must scale only our scanner-app (never the chart-owned scanner).
-    print("\n[6/8] Verifying autoscaling state...")
+    # Step 6: Verify the scanner has EXACTLY ONE autoscaler. This branch scales
+    # the scanner with KEDA on queue depth, so the chart HPA MUST be absent; a
+    # chart HPA coexisting with the KEDA ScaledObject means two controllers are
+    # fighting the replica count — a hard failure (a chart default/schema flip
+    # slipped past the values override). (BYO fallback: chart HPA, no KEDA.)
+    print("\n[6/8] Verifying scanner autoscaling state...")
+    conflict = False
     for release, ns in releases:
-        if get_live_hpa_bounds(ns):
-            print(f"  OK — chart HPA present in {ns}.")
+        keda = scanner_keda_present(ns)
+        chart = chart_hpa_on_scanner(ns) is not None
+        if keda and chart:
+            print(f"  ERROR [{ns}]: BOTH a KEDA ScaledObject AND a chart HPA scale the "
+                  f"scanner — they will thrash the replica count. Ensure "
+                  f"scanner.autoscaling.enabled=false and delete the chart HPA "
+                  f"(check: helm get values {release} -n {ns}).")
+            conflict = True
+        elif keda:
+            print(f"  OK [{ns}] — scanner scaled by KEDA on queue depth; no chart HPA.")
+        elif chart:
+            print(f"  OK [{ns}] — scanner scaled by the chart HPA (BYO/CPU fallback).")
         else:
-            print(f"  WARNING: No HPA for the chart scanner in {ns}! "
-                  f"The chart should manage its own HPA (scanner.autoscaling.enabled=true). "
-                  f"Check: helm get values {release} -n {ns}")
-    result = run("kubectl get scaledobject -A -o json", check=False)
-    if result.returncode == 0 and result.stdout.strip():
-        try:
-            for so in json.loads(result.stdout).get("items", []):
-                target = so.get("spec", {}).get("scaleTargetRef", {}).get("name", "")
-                name = so.get("metadata", {}).get("name", "?")
-                if "visionone-filesecurity-scanner" in target:
-                    print(f"  WARNING: ScaledObject {name} targets the chart-owned scanner "
-                          f"({target}) — this conflicts with the chart HPA. Delete it.")
-                else:
-                    print(f"  OK — ScaledObject {name} targets {target}.")
-        except json.JSONDecodeError:
-            pass
+            print(f"  WARNING [{ns}]: scanner has no autoscaler at all — it will not scale.")
+    if conflict:
+        print("\nUPGRADE GUARD FAILED: chart HPA + KEDA both target the scanner. "
+              "Reconcile before relying on this deployment.")
+        sys.exit(1)
 
     # Step 7: Verify pods
     print("\n[7/8] Verifying infrastructure...")

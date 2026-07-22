@@ -1,0 +1,40 @@
+# KEDA scales the V1FS SCANNER deployment on SQS queue depth so the scanner
+# fleet size tracks the backlog (not CPU). CUSTOMER VARIANT — this replaces the
+# chart's CPU/mem HPA, which is Trend's supported mechanism. The chart HPA MUST
+# stay disabled (helm/values-base.yaml scanner.autoscaling.enabled=false); two
+# autoscalers on one Deployment fight. upgrade.py enforces this invariant.
+#
+# Requires KEDA + an SQS scan queue (full-auto mode). Reference template only —
+# scripts/deploy.sh substitutes the <...> placeholders and applies it.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: scanner-sqs-trigger-auth
+  namespace: visionone-filesecurity
+spec:
+  podIdentity:
+    provider: aws
+    identityOwner: keda
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: v1fs-scanner-sqs-scaler
+  namespace: visionone-filesecurity
+spec:
+  scaleTargetRef:
+    name: my-release-visionone-filesecurity-scanner
+    kind: Deployment
+  minReplicaCount: <SCANNER_MIN_REPLICAS>
+  maxReplicaCount: <SCANNER_MAX_REPLICAS>
+  pollingInterval: 5      # react fast to bursts
+  cooldownPeriod: 300     # keep pods warm through tail processing
+  triggers:
+    - type: aws-sqs-queue
+      metadata:
+        queueURL: "<SQS_QUEUE_URL>"
+        queueLength: "<SCANNER_QUEUE_LENGTH>"   # messages per scanner pod
+        awsRegion: "<AWS_REGION>"
+        scaleOnInFlight: "true"
+      authenticationRef:
+        name: scanner-sqs-trigger-auth

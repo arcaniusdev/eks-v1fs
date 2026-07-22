@@ -10,10 +10,14 @@
 #   endpoint exposure (values-nlb.yaml overlay, or ALB ingress --set values)
 
 scanner:
-  # Chart-native HPA (CPU 80% / memory 80% targets) — the Trend-supported
-  # autoscaling mechanism. KEDA no longer scales the chart-owned scanner.
+  # Chart HPA DISABLED on this branch — the scanner is scaled by KEDA on SQS
+  # queue depth (k8s/scanner-scaledobject.yaml) so the fleet size tracks the
+  # backlog, not CPU. Two autoscalers on one Deployment fight, so this MUST
+  # stay false: upgrade.py re-asserts it every upgrade and fails loudly if a
+  # chart HPA reappears. NOTE: customer variant — NOT Trend's supported
+  # (chart-HPA/CPU) autoscaling path.
   autoscaling:
-    enabled: true
+    enabled: false
   # Shared scratch space across scanner pods on multiple nodes.
   ephemeralVolume:
     enabled: true

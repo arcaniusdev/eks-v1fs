@@ -138,13 +138,15 @@ Parameters:
     Type: String
     Description: >
       How to expose the V1FS scanner gRPC endpoint for external scanning
-      applications. auto (default) = internal ALB with TLS (L7, per-request
-      gRPC balancing) for BOTH full-auto and BYO deployments, so the scanner
-      endpoint looks identical in both. nlb = internal Network Load Balancer
-      (L4) — reserved for a future ICAP use case (ICAP needs L4; ALB is
-      HTTP-only), not used otherwise; alb = same as auto (explicit); none =
-      in-cluster only (no external endpoint). ALB modes need ScannerDomain
-      (defaulted) plus a cert (SelfSignedScannerCert defaults true).
+      applications. auto (default) = internal NLB (L4) for BOTH full-auto and
+      BYO. The NLB is VPC-reachable (gRPC :50051, ICAP :1344) AND doubles as a
+      pod-discovery registry: with target-type=ip its target group tracks the
+      live scanner pod IPs, which a client-side dispatcher reads via the ELB
+      DescribeTargetHealth API to connect directly to pods (pull/semaphore
+      balancing, NLB out of the scan path). nlb = same as auto (explicit);
+      alb = ALB Ingress with TLS (L7, per-request gRPC balancing) — opt-in,
+      needs ScannerDomain (defaulted) plus a cert (SelfSignedScannerCert
+      defaults true); none = in-cluster only.
     Default: "auto"
     AllowedValues:
       - "auto"
@@ -260,10 +262,8 @@ Rules:
       - Assert: !Equals [!Ref DeployScannerApp, "true"]
         AssertDescription: DeployReviewPipeline=true requires DeployScannerApp=true
   AlbRequiresCertAndDomain:
-    # Fires whenever the ALB is exposed (explicit alb, or auto which -> ALB).
-    RuleCondition: !Or
-      - !Equals [!Ref ScannerEndpointMode, "alb"]
-      - !Equals [!Ref ScannerEndpointMode, "auto"]
+    # Fires only for explicit alb (auto -> NLB, which needs no cert/domain).
+    RuleCondition: !Equals [!Ref ScannerEndpointMode, "alb"]
     Assertions:
       - Assert: !Or
           - !Not [!Equals [!Ref ACMCertificateArn, ""]]
@@ -296,12 +296,12 @@ Conditions:
   UseExistingBucket: !And
     - !Condition ScannerAppEnabled
     - !Not [!Equals [!Ref ExistingIngestBucket, ""]]
-  # auto -> ALB for both full-auto and BYO (identical endpoint shape).
-  # nlb is only ever created when explicitly requested (future ICAP use case).
-  ExposeNLB: !Equals [!Ref ScannerEndpointMode, "nlb"]
-  ExposeALB: !Or
-    - !Equals [!Ref ScannerEndpointMode, "alb"]
+  # auto -> NLB for both full-auto and BYO (identical endpoint; also the pod
+  # discovery registry for client-side dispatchers). alb is explicit opt-in.
+  ExposeNLB: !Or
+    - !Equals [!Ref ScannerEndpointMode, "nlb"]
     - !Equals [!Ref ScannerEndpointMode, "auto"]
+  ExposeALB: !Equals [!Ref ScannerEndpointMode, "alb"]
   ExposeEndpoint: !Or
     - !Condition ExposeNLB
     - !Condition ExposeALB
