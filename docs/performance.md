@@ -33,7 +33,7 @@ Either way, KEDA scales our scanner-app (full-auto) on queue depth, and nodes sc
 - Helm chart `autoscaler/cluster-autoscaler` in `kube-system`, IAM via Pod Identity (`ClusterAutoscalerRole`)
 - ASG auto-discovery via the `k8s.io/cluster-autoscaler/*` tags EKS applies to managed node group ASGs automatically
 - `expander=least-waste`, `balance-similar-node-groups=true`, `scale-down-unneeded-time=2m`
-- Single managed node group: `NodeInstanceType` (default r7i.xlarge), min 2 / desired 2 / max 8
+- Single managed node group: `NodeInstanceType` (default r8g.xlarge, Graviton ARM; x86 r7i/r7a/r6i optional), min 2 / desired 2 / max 8
 - **PodDisruptionBudgets are retained** (`k8s/pdb.yaml`) — they now protect scanner-app (maxUnavailable 25%) and the V1FS scanner (minAvailable 1) from Cluster Autoscaler node drains during scale-down
 
 ## Scaling Limits

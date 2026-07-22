@@ -19,7 +19,6 @@ import json
 import os
 import subprocess
 import sys
-import sys
 import time
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))

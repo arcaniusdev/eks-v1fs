@@ -493,16 +493,22 @@ class ScannerApp:
                     bucket, key, dest_bucket, key, decompression_errors,
                 )
             else:
-                dest_bucket = self.config.s3_clean_bucket
+                dest_bucket = None            # clean files are left in place
                 verdict = "clean"
                 tags["ScanResult"] = "S3-Clean"
-                logger.info(
-                    "CLEAN: s3://%s/%s → s3://%s/%s",
-                    bucket, key, dest_bucket, key,
-                )
+                logger.info("CLEAN: s3://%s/%s (tagged in place)", bucket, key)
 
-            await self._upload(dest_bucket, key, file_bytes, tags)
-            await self._finalize_source(bucket, key, tags)
+            if dest_bucket is None:
+                # Clean: leave the file where it is; just tag the source with
+                # the verdict. Nothing is moved, copied, or deleted.
+                await self._tag_source(bucket, key, tags)
+            else:
+                # Not fully clean (malicious / decompression-limit / review):
+                # move to the verdict bucket, then finalize the source (deleted
+                # when it's the stack-owned ingest bucket, tagged-in-place when
+                # it's a user's own bucket — DELETE_SOURCE_ENABLED).
+                await self._upload(dest_bucket, key, file_bytes, tags)
+                await self._finalize_source(bucket, key, tags)
             self._enqueue_audit(key, size, verdict, result, scan_duration_ms, message_id)
         finally:
             del file_bytes  # Explicit cleanup of large buffer
@@ -572,8 +578,16 @@ class ScannerApp:
     async def _delete_object(self, bucket: str, key: str) -> None:
         await self.s3_client.delete_object(Bucket=bucket, Key=key)
 
+    async def _tag_source(self, bucket: str, key: str, tags: dict) -> None:
+        """Tag the source object in place with the verdict (no move, no delete)."""
+        await self.s3_client.put_object_tagging(
+            Bucket=bucket,
+            Key=key,
+            Tagging={"TagSet": [{"Key": k, "Value": self._safe_tag(v)} for k, v in tags.items()]},
+        )
+
     async def _finalize_source(self, bucket: str, key: str, tags: dict) -> None:
-        """Finalize the source object after routing.
+        """Finalize the source of a MOVED (not-clean) file.
 
         Default (stack-owned ingest bucket): delete the source — the verdict
         bucket now holds the file. Existing-user-bucket mode
@@ -583,11 +597,7 @@ class ScannerApp:
         if self.config.delete_source_enabled:
             await self._delete_object(bucket, key)
         else:
-            await self.s3_client.put_object_tagging(
-                Bucket=bucket,
-                Key=key,
-                Tagging={"TagSet": [{"Key": k, "Value": v} for k, v in tags.items()]},
-            )
+            await self._tag_source(bucket, key, tags)
 
     # --- Health Server ---
 

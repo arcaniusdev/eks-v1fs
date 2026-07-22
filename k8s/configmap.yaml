@@ -10,7 +10,6 @@ data:
   SQS_QUEUE_URL: "<from FileScanQueueUrl output>"
   S3_INGEST_BUCKET: "<from IngestBucketName output>"
   S3_QUARANTINE_BUCKET: "<from QuarantineBucketName output>"
-  S3_CLEAN_BUCKET: "<from CleanBucketName output>"
   S3_REVIEW_BUCKET: "<from ReviewBucketName output>"
   V1FS_SERVER_ADDR: "<V1FS_RELEASE_NAME>-visionone-filesecurity-scanner:50051"
   # TLS to the scanner. Defaults below are the in-cluster plaintext path.

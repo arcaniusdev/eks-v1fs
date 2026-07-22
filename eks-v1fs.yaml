@@ -125,11 +125,25 @@ Parameters:
   ExternalScanQueueArn:
     Type: String
     Description: >
-      BYO + ScannerScalingMode=keda: ARN of YOUR existing SQS queue that feeds
-      scan work; KEDA scales the V1FS scanner on its depth. Leave empty in
-      full-auto (the stack's own scan queue is used). Cross-account queue: your
-      queue's resource policy must allow the KedaOperatorRole principal
-      sqs:GetQueueAttributes.
+      ARN of YOUR existing SQS queue for the scanner-app to drain, INSTEAD of
+      the queue this stack would otherwise build. Requires DeployScannerApp=true
+      and at least one ExternalScanSourceBucketArns entry; ExistingIngestBucket
+      must be empty (mutually exclusive). Messages must be S3-event-shaped. When
+      set, the stack builds no ingest bucket, scan queue, DLQ, S3 notification
+      wiring, or dashboard. With ScannerScalingMode=keda the fleet scales on this
+      queue's depth. Cross-account queue: its resource policy must allow the
+      scanner-app and KedaOperatorRole principals sqs:ReceiveMessage/DeleteMessage/
+      GetQueueAttributes/ChangeMessageVisibility.
+    Default: ""
+  ExternalScanSourceBucketArns:
+    Type: String
+    Description: >
+      Comma-separated S3 bucket ARNs the scanner-app may read and tag when
+      draining ExternalScanQueueArn (the buckets your queue's S3 events point
+      at), e.g. arn:aws:s3:::bucket-a,arn:aws:s3:::bucket-b. The scanner-app
+      gets s3:GetObject/PutObjectTagging/ListBucket on these (NO delete — your
+      objects are tagged in place, never removed). Required when
+      ExternalScanQueueArn is set; ignored otherwise.
     Default: ""
   ScannerAppMaxReplicas:
     Type: Number
@@ -212,16 +226,17 @@ Parameters:
       EC2 instance type for the managed node group. A single node group hosts
       both system components and scanner workloads; memory-optimized xlarge
       (4 vCPU / 32 GiB) fits four 800m/2Gi V1FS scanner pods per node.
-      Graviton (r8g/r7g) types switch the node AMI to ARM64 and the
-      scanner-app image build to linux/arm64 automatically.
-    Default: r7i.xlarge
+      Default is Graviton (r8g.xlarge, ARM64) — cheaper and faster than the
+      x86 equivalents; the node AMI and the scanner-app image build switch to
+      arm64 automatically. Select an r7i/r7a/r6i type for x86 instead.
+    Default: r8g.xlarge
     AllowedValues:
+      - r8g.xlarge
+      - r7g.xlarge
       - r7i.xlarge
       - r7a.xlarge
       - r6i.xlarge
       - r7i.2xlarge
-      - r8g.xlarge
-      - r7g.xlarge
   MaxDecompressionLayer:
     Type: Number
     Description: >
@@ -293,6 +308,17 @@ Rules:
         AssertDescription: ALB scanner endpoint requires either ACMCertificateArn or SelfSignedScannerCert=true
       - Assert: !Not [!Equals [!Ref ScannerDomain, ""]]
         AssertDescription: ALB scanner endpoint requires ScannerDomain
+  ExternalScanQueueRequirements:
+    # BYO scan queue for the scanner-app to drain: needs the scanner-app, at
+    # least one source bucket for S3 IAM, and no conflicting ExistingIngestBucket.
+    RuleCondition: !Not [!Equals [!Ref ExternalScanQueueArn, ""]]
+    Assertions:
+      - Assert: !Equals [!Ref DeployScannerApp, "true"]
+        AssertDescription: ExternalScanQueueArn requires DeployScannerApp=true
+      - Assert: !Not [!Equals [!Ref ExternalScanSourceBucketArns, ""]]
+        AssertDescription: ExternalScanQueueArn requires ExternalScanSourceBucketArns (the bucket(s) its events reference)
+      - Assert: !Equals [!Ref ExistingIngestBucket, ""]
+        AssertDescription: ExternalScanQueueArn and ExistingIngestBucket are mutually exclusive
   ExistingVpcRequiresAllParts:
     RuleCondition: !Not [!Equals [!Ref ExistingVpcId, ""]]
     Assertions:
@@ -310,7 +336,6 @@ Conditions:
   CreateNetwork: !Equals [!Ref ExistingVpcId, ""]
   ScannerAppEnabled: !Equals [!Ref DeployScannerApp, "true"]
   HasExternalScanQueue: !Not [!Equals [!Ref ExternalScanQueueArn, ""]]
-  ScannerKeda: !Equals [!Ref ScannerScalingMode, "keda"]
   # KEDA is installed (and its operator role created) exactly when there is a
   # queue for it to watch: the scanner-app queue (full-auto) or an external
   # queue (BYO). keda mode without either falls back to the chart HPA, so it
@@ -321,9 +346,15 @@ Conditions:
   ReviewEnabled: !And
     - !Condition ScannerAppEnabled
     - !Equals [!Ref DeployReviewPipeline, "true"]
+  # The stack builds its own ingest bucket + scan queue + S3 wiring only when
+  # the scanner-app is on and the user did NOT bring their own scan queue.
+  BuildScanQueue: !And
+    - !Condition ScannerAppEnabled
+    - !Not [!Condition HasExternalScanQueue]
   CreateIngestBucket: !And
     - !Condition ScannerAppEnabled
     - !Equals [!Ref ExistingIngestBucket, ""]
+    - !Not [!Condition HasExternalScanQueue]
   UseExistingBucket: !And
     - !Condition ScannerAppEnabled
     - !Not [!Equals [!Ref ExistingIngestBucket, ""]]
@@ -1408,17 +1439,24 @@ Resources:
             # guarantees at least one statement is present.
             Statement:
               - !If
-                - ScannerAppEnabled
-                - Sid: StackScanQueues
+                - BuildScanQueue
+                - Sid: StackScanQueue
                   Effect: Allow
                   Action:
                     - sqs:GetQueueAttributes
                     - sqs:GetQueueUrl
-                  Resource: !If
-                    - ReviewEnabled
-                    - - !GetAtt FileScanQueue.Arn
-                      - !GetAtt ReviewScanQueue.Arn
-                    - - !GetAtt FileScanQueue.Arn
+                  Resource:
+                    - !GetAtt FileScanQueue.Arn
+                - !Ref AWS::NoValue
+              - !If
+                - ReviewEnabled
+                - Sid: ReviewScanQueue
+                  Effect: Allow
+                  Action:
+                    - sqs:GetQueueAttributes
+                    - sqs:GetQueueUrl
+                  Resource:
+                    - !GetAtt ReviewScanQueue.Arn
                 - !Ref AWS::NoValue
               - !If
                 - HasExternalScanQueue
@@ -1856,6 +1894,7 @@ Resources:
             export DEPLOY_SCANNER_APP="${DeployScannerApp}"
             export DEPLOY_REVIEW="${DeployReviewPipeline}"
             export EXTERNAL_SCAN_QUEUE_ARN="${ExternalScanQueueArn}"
+            export EXTERNAL_SCAN_SOURCE_BUCKET_ARNS="${ExternalScanSourceBucketArns}"
             export SCANNER_SCALING_MODE="${ScannerScalingMode}"
             export ENDPOINT_MODE="${ScannerEndpointMode}"
             export ACM_CERT_ARN="${ACMCertificateArn}"
@@ -1883,7 +1922,6 @@ Resources:
             export ECR_REPO_URL="${EcrRepoUrlValue}"
             export SQS_QUEUE_URL="${FileScanQueueValue}"
             export S3_INGEST_BUCKET="${IngestBucketValue}"
-            export S3_CLEAN_BUCKET="${CleanBucketValue}"
             export S3_QUARANTINE_BUCKET="${QuarantineBucketValue}"
             export S3_REVIEW_BUCKET="${ReviewBucketValue}"
             export AUDIT_LOG_GROUP="${AuditLogGroupValue}"
@@ -1908,12 +1946,13 @@ Resources:
             NodeArchValue: !FindInMap [NodeArchMap, !Ref NodeInstanceType, arch]
             VpcIdValue: !If [CreateNetwork, !Ref BaseVPC, !Ref ExistingVpcId]
             EcrRepoUrlValue: !If [ScannerAppEnabled, !GetAtt ScannerAppECRRepo.RepositoryUri, ""]
-            FileScanQueueValue: !If [ScannerAppEnabled, !Ref FileScanQueue, ""]
+            # Built-queue URL when the stack owns the queue; empty in external
+            # mode (bootstrap derives SQS_QUEUE_URL from EXTERNAL_SCAN_QUEUE_ARN).
+            FileScanQueueValue: !If [BuildScanQueue, !Ref FileScanQueue, ""]
             IngestBucketValue: !If
-              - ScannerAppEnabled
+              - BuildScanQueue
               - !If [CreateIngestBucket, !Ref IngestBucket, !Ref ExistingIngestBucket]
               - ""
-            CleanBucketValue: !If [ScannerAppEnabled, !Ref CleanBucket, ""]
             QuarantineBucketValue: !If [ScannerAppEnabled, !Ref QuarantineBucket, ""]
             ReviewBucketValue: !If [ReviewEnabled, !Ref ReviewBucket, ""]
             AuditLogGroupValue: !If [ScannerAppEnabled, !Sub "scan-audit-${AWS::StackName}", ""]
@@ -1995,27 +2034,6 @@ Resources:
           Value: !Sub IngestBucket-${AWS::StackName}
         - Key: Purpose
           Value: file-scan-ingest
-
-  CleanBucket:
-    Condition: ScannerAppEnabled
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      Tags:
-        - Key: Name
-          Value: !Sub CleanBucket-${AWS::StackName}
-        - Key: Purpose
-          Value: file-scan-clean
 
   QuarantineBucket:
     Condition: ScannerAppEnabled
@@ -2134,25 +2152,6 @@ Resources:
               Bool:
                 aws:SecureTransport: "false"
 
-  CleanBucketTLSPolicy:
-    Condition: ScannerAppEnabled
-    Type: AWS::S3::BucketPolicy
-    Properties:
-      Bucket: !Ref CleanBucket
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Sid: DenyInsecureTransport
-            Effect: Deny
-            Principal: "*"
-            Action: "s3:*"
-            Resource:
-              - !GetAtt CleanBucket.Arn
-              - !Sub ${CleanBucket.Arn}/*
-            Condition:
-              Bool:
-                aws:SecureTransport: "false"
-
   QuarantineBucketTLSPolicy:
     Condition: ScannerAppEnabled
     Type: AWS::S3::BucketPolicy
@@ -2192,7 +2191,7 @@ Resources:
                 aws:SecureTransport: "false"
 
   FileScanDLQ:
-    Condition: ScannerAppEnabled
+    Condition: BuildScanQueue
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub file-scan-dlq-${AWS::StackName}
@@ -2204,7 +2203,7 @@ Resources:
           Value: !Sub FileScanDLQ-${AWS::StackName}
 
   FileScanQueue:
-    Condition: ScannerAppEnabled
+    Condition: BuildScanQueue
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub file-scan-queue-${AWS::StackName}
@@ -2220,7 +2219,7 @@ Resources:
           Value: !Sub FileScanQueue-${AWS::StackName}
 
   SQSQueuePolicy:
-    Condition: ScannerAppEnabled
+    Condition: BuildScanQueue
     Type: AWS::SQS::QueuePolicy
     Properties:
       Queues:
@@ -2373,6 +2372,8 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
+              # Poll the queue we drain: the stack's own (BuildScanQueue) or
+              # the user's external queue (ExternalScanQueueArn).
               - Sid: SQSPoll
                 Effect: Allow
                 Action:
@@ -2380,40 +2381,62 @@ Resources:
                   - sqs:DeleteMessage
                   - sqs:GetQueueAttributes
                   - sqs:ChangeMessageVisibility
-                  # SendMessage: reconciliation re-queues orphaned files when
-                  # the review pipeline (which otherwise runs it) is disabled
-                  - sqs:SendMessage
-                Resource: !GetAtt FileScanQueue.Arn
-              # Created-bucket mode: read + delete after routing.
-              # Existing-user-bucket mode: read + tag verdicts, NEVER delete.
+                Resource: !If [BuildScanQueue, !GetAtt FileScanQueue.Arn, !Ref ExternalScanQueueArn]
+              # SendMessage: reconciliation re-queues orphaned files when the
+              # review pipeline (which otherwise runs it) is disabled. Only the
+              # stack-owned queue supports reconciliation (external mode is off).
               - !If
-                - CreateIngestBucket
-                - Sid: S3IngestRead
+                - BuildScanQueue
+                - Sid: SQSReconcileSend
                   Effect: Allow
                   Action:
-                    - s3:GetObject
-                    - s3:DeleteObject
-                  Resource: !Sub ${IngestBucket.Arn}/*
-                - Sid: S3ExistingIngestRead
+                    - sqs:SendMessage
+                  Resource: !GetAtt FileScanQueue.Arn
+                - !Ref AWS::NoValue
+              # Object read + verdict tagging. All modes tag in place (clean
+              # files stay put). Created-bucket mode additionally deletes the
+              # source after a malicious file is copied to quarantine ("move").
+              # Existing-user-bucket AND external-queue modes: read + tag,
+              # NEVER delete (the objects are the user's).
+              - !If
+                - BuildScanQueue
+                - !If
+                  - CreateIngestBucket
+                  - Sid: S3IngestRead
+                    Effect: Allow
+                    Action:
+                      - s3:GetObject
+                      - s3:PutObjectTagging
+                      - s3:DeleteObject
+                    Resource: !Sub ${IngestBucket.Arn}/*
+                  - Sid: S3ExistingIngestRead
+                    Effect: Allow
+                    Action:
+                      - s3:GetObject
+                      - s3:PutObjectTagging
+                    Resource: !Sub arn:aws:s3:::${ExistingIngestBucket}/*
+                - Sid: S3ExternalSourceRead
                   Effect: Allow
                   Action:
                     - s3:GetObject
                     - s3:PutObjectTagging
-                  Resource: !Sub arn:aws:s3:::${ExistingIngestBucket}/*
+                  # Append /* to every bucket ARN in the comma-separated list.
+                  Resource: !Split
+                    - ","
+                    - !Sub
+                      - "${joined}/*"
+                      - joined: !Join ["/*,", !Split [",", !Ref ExternalScanSourceBucketArns]]
               - Sid: S3IngestList
                 Effect: Allow
                 Action:
                   - s3:ListBucket
                 Resource: !If
-                  - CreateIngestBucket
-                  - !GetAtt IngestBucket.Arn
-                  - !Sub arn:aws:s3:::${ExistingIngestBucket}
-              - Sid: S3CleanWrite
-                Effect: Allow
-                Action:
-                  - s3:PutObject
-                  - s3:PutObjectTagging
-                Resource: !Sub ${CleanBucket.Arn}/*
+                  - BuildScanQueue
+                  - !If
+                    - CreateIngestBucket
+                    - !GetAtt IngestBucket.Arn
+                    - !Sub arn:aws:s3:::${ExistingIngestBucket}
+                  - !Split [",", !Ref ExternalScanSourceBucketArns]
               - Sid: S3QuarantineWrite
                 Effect: Allow
                 Action:
@@ -2467,7 +2490,7 @@ Resources:
           Value: !Sub ScanAuditLogGroup-${AWS::StackName}
 
   AlarmSNSTopic:
-    Condition: ScannerAppEnabled
+    Condition: BuildScanQueue
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub scan-alarms-${AWS::StackName}
@@ -2476,7 +2499,7 @@ Resources:
           Value: !Sub AlarmSNSTopic-${AWS::StackName}
 
   DLQAlarm:
-    Condition: ScannerAppEnabled
+    Condition: BuildScanQueue
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub DLQ-Messages-${AWS::StackName}
@@ -2498,7 +2521,7 @@ Resources:
         - !Ref AlarmSNSTopic
 
   QueueAgeAlarm:
-    Condition: ScannerAppEnabled
+    Condition: BuildScanQueue
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub Queue-Age-${AWS::StackName}
@@ -2522,7 +2545,7 @@ Resources:
   # --- DLQ Remediation ---
 
   DLQRemediationRole:
-    Condition: ScannerAppEnabled
+    Condition: BuildScanQueue
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub DLQRemediationRole-${AWS::StackName}
@@ -2554,7 +2577,7 @@ Resources:
                 Resource: !GetAtt FileScanQueue.Arn
 
   DLQRemediationLambda:
-    Condition: ScannerAppEnabled
+    Condition: BuildScanQueue
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub dlq-remediation-${AWS::StackName}
@@ -2615,7 +2638,7 @@ Resources:
                       print(f"ERROR: Failed to re-queue message {msg_id}: {e}")
 
   DLQEventSourceMapping:
-    Condition: ScannerAppEnabled
+    Condition: BuildScanQueue
     Type: AWS::Lambda::EventSourceMapping
     Properties:
       EventSourceArn: !GetAtt FileScanDLQ.Arn
@@ -2656,6 +2679,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:GetObject
+                  - s3:PutObjectTagging
                   - s3:DeleteObject
                 Resource: !Sub ${ReviewBucket.Arn}/*
               - Sid: S3ReviewList
@@ -2663,25 +2687,28 @@ Resources:
                 Action:
                   - s3:ListBucket
                 Resource: !GetAtt ReviewBucket.Arn
-              - Sid: S3IngestListForReconciliation
-                Effect: Allow
-                Action:
-                  - s3:ListBucket
-                Resource: !If
-                  - CreateIngestBucket
-                  - !GetAtt IngestBucket.Arn
-                  - !Sub arn:aws:s3:::${ExistingIngestBucket}
-              - Sid: SQSMainQueueSendForReconciliation
-                Effect: Allow
-                Action:
-                  - sqs:SendMessage
-                Resource: !GetAtt FileScanQueue.Arn
-              - Sid: S3CleanWrite
-                Effect: Allow
-                Action:
-                  - s3:PutObject
-                  - s3:PutObjectTagging
-                Resource: !Sub ${CleanBucket.Arn}/*
+              # Reconciliation re-queues orphaned ingest files to the stack's
+              # main queue. Only meaningful when the stack owns that queue and
+              # bucket; in external-queue mode both are the user's, so skip.
+              - !If
+                - BuildScanQueue
+                - Sid: S3IngestListForReconciliation
+                  Effect: Allow
+                  Action:
+                    - s3:ListBucket
+                  Resource: !If
+                    - CreateIngestBucket
+                    - !GetAtt IngestBucket.Arn
+                    - !Sub arn:aws:s3:::${ExistingIngestBucket}
+                - !Ref AWS::NoValue
+              - !If
+                - BuildScanQueue
+                - Sid: SQSMainQueueSendForReconciliation
+                  Effect: Allow
+                  Action:
+                    - sqs:SendMessage
+                  Resource: !GetAtt FileScanQueue.Arn
+                - !Ref AWS::NoValue
               - Sid: S3QuarantineWrite
                 Effect: Allow
                 Action:
@@ -2826,7 +2853,7 @@ Resources:
   # --- Dashboard ---
 
   ScannerDashboard:
-    Condition: ScannerAppEnabled
+    Condition: BuildScanQueue
     Type: AWS::CloudWatch::Dashboard
     Properties:
       DashboardName: !Sub scanner-${AWS::StackName}
@@ -2976,13 +3003,9 @@ Outputs:
     Description: SSM Parameter Store path for the private key
     Value: !Sub /ec2/keypair/${BastionKeyPair.KeyPairId}
   IngestBucketName:
-    Condition: ScannerAppEnabled
+    Condition: BuildScanQueue
     Description: S3 bucket for incoming files to scan
     Value: !If [CreateIngestBucket, !Ref IngestBucket, !Ref ExistingIngestBucket]
-  CleanBucketName:
-    Condition: ScannerAppEnabled
-    Description: S3 bucket for files that passed scanning
-    Value: !Ref CleanBucket
   QuarantineBucketName:
     Condition: ScannerAppEnabled
     Description: S3 bucket for malicious files
@@ -3004,15 +3027,15 @@ Outputs:
     Description: CloudWatch log group for review scan audit trail
     Value: !Ref ReviewAuditLogGroup
   FileScanQueueUrl:
-    Condition: ScannerAppEnabled
+    Condition: BuildScanQueue
     Description: SQS queue URL for S3 file events
     Value: !Ref FileScanQueue
   FileScanQueueArn:
-    Condition: ScannerAppEnabled
+    Condition: BuildScanQueue
     Description: SQS queue ARN for S3 file events
     Value: !GetAtt FileScanQueue.Arn
   FileScanDLQUrl:
-    Condition: ScannerAppEnabled
+    Condition: BuildScanQueue
     Description: SQS dead letter queue URL for failed processing
     Value: !Ref FileScanDLQ
   ScannerAppRoleArn:
@@ -3038,11 +3061,11 @@ Outputs:
     Description: CloudWatch log group for scan audit trail
     Value: !Ref ScanAuditLogGroup
   AlarmSNSTopicArn:
-    Condition: ScannerAppEnabled
+    Condition: BuildScanQueue
     Description: SNS topic ARN for scan alarms (subscribe for notifications)
     Value: !Ref AlarmSNSTopic
   DashboardUrl:
-    Condition: ScannerAppEnabled
+    Condition: BuildScanQueue
     Description: CloudWatch dashboard URL for the scanner pipeline
     Value: !Sub https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards/dashboard/scanner-${AWS::StackName}
   ScannerEndpointAddress:

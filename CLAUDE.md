@@ -30,15 +30,16 @@ evaluation-friendly EKS deployment of the TrendAI V1FS containerized scanner, al
 
 | Mode | Parameters | What you get |
 |---|---|---|
-| Default full-auto | (defaults) | V1FS scanner + our scanner-app: drop files in the ingest bucket → routed to clean/quarantine |
+| Default full-auto | (defaults) | V1FS scanner + our scanner-app: drop files in the ingest bucket → clean files tagged in place, malicious moved to quarantine |
 | BYO scanning app | `DeployScannerApp=false` | V1FS scanner only + gRPC endpoint (internal NLB by default) published to SSM `/<stack>/scanner-endpoint` |
 | Existing bucket | `ExistingIngestBucket=<name>` | Scans a user-owned bucket via S3→EventBridge→SQS; objects are tagged with verdicts, never deleted |
+| External queue drain | `ExternalScanQueueArn=<arn>` + `ExternalScanSourceBucketArns=<arns>` | scanner-app drains YOUR SQS queue (S3-event-shaped msgs) INSTEAD of a stack-built queue; no ingest bucket/queue/DLQ/dashboard built. Clean tagged in place, malicious copied to quarantine (your objects never deleted). Full-auto only; mutually exclusive with ExistingIngestBucket |
 | Full + review | `DeployReviewPipeline=true` | Adds the second `rv` release (unlimited decompression) for deep archive analysis |
 
 ```
-S3 (Ingest, created or existing) → SQS Queue → scanner-app Pod (gRPC) → Clean or Quarantine Bucket
-                  └→ DLQ (after 3 failures)                (review bucket if review pipeline enabled)
-[optional] S3 (Review) → Review SQS → Review Scanner Pod (no limits) → Clean or Quarantine Bucket
+S3 (Ingest, created or existing) → SQS Queue → scanner-app Pod (gRPC) → clean: tag in place / malicious: move to Quarantine Bucket
+                  └→ DLQ (after 3 failures)                (decompression-limit → review bucket if review pipeline enabled)
+[optional] S3 (Review) → Review SQS → Review Scanner Pod (no limits) → clean: tag in place / malicious: move to Quarantine
                   └→ Review DLQ (after 3 failures)
 [optional] External scanning app → internal NLB (gRPC :50051) or ALB Ingress (TLS :443) → V1FS scanner
 ```
@@ -94,12 +95,12 @@ project/
 |---|---|---|
 | V1FS scanner pods (chart HPA, CPU/mem 80%) | 10 (default) | `ScannerMaxReplicas` CFN parameter |
 | Scanner-app pods (KEDA, SQS-driven) | 20 (default) | `ScannerAppMaxReplicas` CFN parameter |
-| Managed node group (single tier, r7i.xlarge) | 8 (default) | `NodeGroupMaxSize` CFN parameter |
+| Managed node group (single tier, r8g.xlarge default) | 8 (default) | `NodeGroupMaxSize` CFN parameter |
 | MAX_CONCURRENT_SCANS | 50 | `k8s/configmap.yaml` |
 | Review scanner-app pods (KEDA) | 5 | `k8s/review-scaledobject.yaml` |
 | Review V1FS scanner pods (chart HPA) | 3 | `scripts/bootstrap.sh` rv install |
 
-Full-mode peak ≈ 26 vCPU → 8 × r7i.xlarge nodes; fits within the default 64 on-demand vCPU quota (32 vCPU). No quota increase needed at evaluation scale.
+Full-mode peak ≈ 26 vCPU → 8 × xlarge nodes (r8g.xlarge default, 4 vCPU each); fits within the default 64 on-demand vCPU quota. No quota increase needed at evaluation scale.
 Review pipeline keeps 1 pod warm at all times (min replicas = 1) to avoid cold-start gRPC failures.
 Expect 1–3 minutes for HPA + Cluster Autoscaler scale-up under load — normal for the supported configuration. This is an evaluation-sized deployment, not a burst-throughput one.
 
@@ -122,7 +123,7 @@ Expect 1–3 minutes for HPA + Cluster Autoscaler scale-up under load — normal
 - **Test before commit**: validate changes in a live stack before pushing to git. Exception: files the bastion clones from git (k8s manifests, app code) must be pushed before they can be tested
 - **Always run `build-and-push.sh` before `deploy.sh` on live clusters** — the deploy script uses the current git SHA as the image tag. If you push code changes and run only `deploy.sh`, it will try to pull an image tag that doesn't exist in ECR, causing `ImagePullBackOff`
 - **Live cluster patching**: the deploy script substitutes `<SQS_QUEUE_URL>`, `<AWS_REGION>`, and `<MAX_REPLICAS>` placeholders with real values. Applying the template file directly with `kubectl apply` will break KEDA with "invalid input region" errors
-- **NodeInstanceType controls the single managed node group** — one node group (default r7i.xlarge) hosts system components AND scanner workloads. xlarge memory-optimized classes only (fits four 800m/2Gi scanner pods per node). Graviton ARM types (r8g.xlarge, r7g.xlarge) are fully supported: the `NodeArchMap` mapping selects the ARM64 AMI and exports `TARGET_ARCH` so the bastion cross-builds the scanner-app image for ARM (QEMU binfmt when bastion arch ≠ node arch). All V1FS chart images and supporting components are multi-arch
+- **NodeInstanceType controls the single managed node group** — one node group (default r8g.xlarge, Graviton ARM) hosts system components AND scanner workloads. xlarge memory-optimized classes only (fits four 800m/2Gi scanner pods per node). Default is Graviton ARM (r8g.xlarge; r7g.xlarge also ARM); x86 classes (r7i/r7a/r6i xlarge, r7i.2xlarge) optional. The `NodeArchMap` mapping selects the AMI (ARM64 vs x86_64) and exports `TARGET_ARCH` so the bastion builds the scanner-app image for the node arch (QEMU binfmt cross-build when bastion arch ≠ node arch — the default t3.medium bastion is x86, so it QEMU-cross-builds for ARM nodes). All V1FS chart images and supporting components are multi-arch
 - **Deployment-mode parameters**: `DeployScannerApp` (default true), `DeployReviewPipeline` (default false, requires scanner app — CFN Rule enforced), `ExistingIngestBucket` (empty = create), `ScannerEndpointMode` (auto/none/nlb/alb, **default auto → internal NLB** for both full-auto and BYO on this branch; the NLB doubles as the pod-discovery registry for client-side dispatchers. `alb` is explicit opt-in and requires `ScannerDomain` (defaulted) + a cert — `SelfSignedScannerCert` defaults true — Rule enforced), `ExistingVpcId` (empty = create network; when set requires `ExistingVpcCidr` + 2 private subnets + bastion subnet — Rule enforced. User VPC needs DNS enabled, NAT egress, `kubernetes.io/role/internal-elb=1` on private subnets; bastion gets no public IP and the EKSCluster waits on NAT routes via a conditional `network-ready` tag reference since DependsOn can't be conditional)
 - **No in-place migration across major architecture changes** — delete and redeploy rather than stack-updating an older deployment
 
@@ -149,7 +150,7 @@ Expect 1–3 minutes for HPA + Cluster Autoscaler scale-up under load — normal
 ### Review Pipeline (Deep Analysis — OPTIONAL, default OFF)
 - **Enabled via `DeployReviewPipeline=true`** (requires `DeployScannerApp=true`, enforced by a CFN Rule). When disabled, no rv release, review bucket/queue/DLQ/Lambda/log group are created, and decompression-limit files quarantine with explanatory tags
 - **Second Helm release `rv` in `visionone-review` namespace** — installed with no CLISH scan policy applied (unlimited decompression). This allows the review scanner to fully analyze archives that exceeded the main scanner's decompression limits. A separate namespace is required because each V1FS Helm release creates a ServiceAccount named `visionone-filesecurity` — installing both releases in the same namespace causes a ServiceAccount conflict
-- **Review scanner reads from the review bucket** — routes files ONLY to clean or quarantine (never back to review). `REVIEW_ROUTING_ENABLED=false` in the review scanner ConfigMap prevents the application from attempting review routing, and the `ReviewScannerAppRole` IAM policy has no write permission to the review bucket as a defense-in-depth control
+- **Review scanner reads from the review bucket** — clean files are tagged in place, malicious files are moved to quarantine; it NEVER routes back to review. `REVIEW_ROUTING_ENABLED=false` in the review scanner ConfigMap prevents the application from attempting review routing, and the `ReviewScannerAppRole` IAM policy has no write permission to the review bucket as a defense-in-depth control
 - **Always-warm review pipeline** — min 1, max 5 pods, cooldown 300s. Keeps one review scanner-app and one V1FS scanner pod running at all times to avoid cold-start gRPC connection failures when files arrive
 - **Shares the same `token-secret`** — no second V1FS registration token is needed. Both Helm releases use the same token
 - **Separate audit log group** — `review-audit-${StackName}` for review scan results, independent from the main `scan-audit-${StackName}`
@@ -162,7 +163,7 @@ Expect 1–3 minutes for HPA + Cluster Autoscaler scale-up under load — normal
 - **V1FS scanner autoscaling is `ScannerScalingMode`-driven** — `hpa` (default): chart CPU/mem HPA (`scanner.autoscaling.enabled=true` from `values-base.yaml` + min/max from `ScannerMinReplicas`/`ScannerMaxReplicas`), TrendAI-supported. `keda`: KEDA on queue depth (`k8s/scanner-scaledobject.yaml`, `v1fs-scanner-sqs-scaler`, threshold `SCANNER_QUEUE_LENGTH`), chart HPA disabled — a customer variant, NOT Trend-supported. `bootstrap.sh` computes `SCANNER_KEDA` (keda + a queue → true; keda-without-queue falls back to hpa) and sets `autoscaling.enabled` accordingly; `deploy.sh` applies the ScaledObject only when `SCANNER_KEDA=true`. **keda upgrade safety**: `upgrade.py` re-asserts `--set scanner.autoscaling.enabled=false` and its Step-6 guard **fails the upgrade** if a chart HPA reappears alongside the ScaledObject. NEVER bare `helm upgrade` in keda mode.
 - **KEDA scales our scanner-app AND the V1FS scanner** (both on SQS depth: scanner-app threshold 5 msgs/pod, scanner threshold `SCANNER_QUEUE_LENGTH`; polling 5s, cooldown 300s). KEDA is installed only when `DeployScannerApp=true` (full-auto). The scanner ScaledObject uses its own `scanner-sqs-trigger-auth` TriggerAuthentication
 - **Nodes scale via Cluster Autoscaler** — standard `autoscaler/cluster-autoscaler` helm chart, Pod Identity (`ClusterAutoscalerRole`), ASG auto-discovery via the `k8s.io/cluster-autoscaler/*` tags EKS applies to managed node group ASGs automatically. Expander `least-waste`, scale-down after 2 min unneeded
-- **Single managed node group** — r7i.xlarge default, hosts system AND scanner workloads (no nodeAffinity, no separate workload tier). Sizing: min 2 (CoreDNS/AZ redundancy), max 8 (full-mode peak ≈ 26 vCPU at ~3.6 usable vCPU/node)
+- **Single managed node group** — r8g.xlarge (Graviton ARM) default, hosts system AND scanner workloads (no nodeAffinity, no separate workload tier). Sizing: min 2 (CoreDNS/AZ redundancy), max 8 (full-mode peak ≈ 26 vCPU at ~3.6 usable vCPU/node)
 - **PodDisruptionBudgets are required** — `k8s/pdb.yaml` protects scanner-app (maxUnavailable 25%) and V1FS scanner (minAvailable 1) from Cluster Autoscaler node drains during active scanning
 - **metrics-server must be installed before the V1FS chart** — the chart HPA needs CPU/memory metrics; bootstrap.sh installs it early. If HPA shows `<unknown>` targets, check metrics-server
 - **V1FS scan cache affects benchmark results** — the scanner caches results by file hash. Running the same files on the same stack produces artificially fast results (~28ms vs ~4.3s real). Clear the cache without redeploying: `kubectl rollout restart deployment/my-release-visionone-filesecurity-scan-cache -n visionone-filesecurity`

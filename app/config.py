@@ -21,7 +21,6 @@ def _int_env(name: str, default: str, min_val: int = 0, max_val: int = 2**31) ->
 class Config:
     sqs_queue_url: str
     s3_ingest_bucket: str
-    s3_clean_bucket: str
     s3_quarantine_bucket: str
     s3_review_bucket: str
     v1fs_server_addr: str
@@ -50,12 +49,13 @@ class Config:
 def load_config() -> Config:
     required = {
         "SQS_QUEUE_URL": os.environ.get("SQS_QUEUE_URL"),
-        "S3_INGEST_BUCKET": os.environ.get("S3_INGEST_BUCKET"),
-        "S3_CLEAN_BUCKET": os.environ.get("S3_CLEAN_BUCKET"),
         "S3_QUARANTINE_BUCKET": os.environ.get("S3_QUARANTINE_BUCKET"),
         "V1FS_API_KEY_SECRET_ARN": os.environ.get("V1FS_API_KEY_SECRET_ARN"),
         "AWS_REGION": os.environ.get("AWS_REGION"),
     }
+    # Informational only — scanner.py reads the source bucket from each SQS
+    # message, not from this. Empty in external-queue mode (many source buckets).
+    s3_ingest_bucket = os.environ.get("S3_INGEST_BUCKET", "")
 
     missing = [k for k, v in required.items() if not v]
     if missing:
@@ -76,8 +76,7 @@ def load_config() -> Config:
 
     return Config(
         sqs_queue_url=required["SQS_QUEUE_URL"],
-        s3_ingest_bucket=required["S3_INGEST_BUCKET"],
-        s3_clean_bucket=required["S3_CLEAN_BUCKET"],
+        s3_ingest_bucket=s3_ingest_bucket,
         s3_quarantine_bucket=required["S3_QUARANTINE_BUCKET"],
         s3_review_bucket=s3_review_bucket,
         v1fs_server_addr=os.environ.get(

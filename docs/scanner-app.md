@@ -94,18 +94,18 @@ Messages with no processable records (e.g., `s3:TestEvent`, non-Object-Created E
 |---|---|---|
 | Malicious (`scanResult > 0`) | Quarantine (`ScanResult=S3-Malware`) | Quarantine (`ScanResult=S3-Malware`) |
 | Decompression limits exceeded (`scanResult == 0` + `foundErrors`) | Review bucket (`ScanResult=S3-Review`) | Quarantine with `ScanResult=S3-DecompressionLimit` + `ScanErrors=<comma-separated error names>` |
-| Clean (`scanResult == 0`, no errors) | Clean (`ScanResult=S3-Clean`) | Clean (`ScanResult=S3-Clean`) |
+| Clean (`scanResult == 0`, no errors) | Tagged in place in the ingest bucket (`ScanResult=S3-Clean`) | Tagged in place in the ingest bucket (`ScanResult=S3-Clean`) |
 | Oversize (> `MAX_FILE_SIZE_MB`, server-side copy, never downloaded) | Review bucket (`ScanResult=S3-Review-Oversize`) | Quarantine (`ScanResult=S3-Oversize`) |
 
-**Bug fix in the realignment**: previously, with review routing disabled, decompression-limit files were routed to the CLEAN bucket despite never being fully inspected. They now go to QUARANTINE with explanatory tags so the incomplete scan is visible and the file is contained.
+**Bug fix in the realignment**: previously, with review routing disabled, decompression-limit files were copied to the clean bucket despite never being fully inspected. The clean bucket has since been removed entirely — clean files are now left in place in the ingest bucket and tagged `ScanResult=S3-Clean` (nothing copied, moved, or deleted), and decompression-limit files go to QUARANTINE with explanatory tags so the incomplete scan is visible and the file is contained.
 
 `_upload()` takes a tags dict and applies it as a URL-encoded `Tagging` string on `put_object`.
 
 ## Source Object Finalization (Tag vs Delete)
 
-After routing, `_finalize_source()` handles the source object based on `DELETE_SOURCE_ENABLED`:
+Clean files are always tagged in place in the ingest bucket (`ScanResult=S3-Clean`) and never copied, moved, or deleted. For files routed to another bucket (malicious → quarantine, decompression-limit → quarantine or review, oversize → quarantine or review), `_finalize_source()` handles the source object based on `DELETE_SOURCE_ENABLED`:
 
-- **`true` (default — stack-owned ingest bucket)**: delete the source object; the verdict bucket now holds the file
+- **`true` (default — stack-owned ingest bucket)**: delete the source object; the destination bucket now holds the file
 - **`false` (existing-user-bucket mode)**: NEVER delete the user's object — tag it with the verdict via `put_object_tagging` so the result is visible in place. The IAM policy enforces this: `ScannerAppRole` has `s3:PutObjectTagging` instead of `s3:DeleteObject` on existing buckets
 
 `bootstrap.sh` sets `DELETE_SOURCE_ENABLED=false` automatically when `ExistingIngestBucket` is configured.
@@ -116,7 +116,7 @@ After routing, `_finalize_source()` handles the source object based on `DELETE_S
 2. **Notification** → SQS message: direct S3 → SQS (created bucket) or S3 → EventBridge rule → SQS (existing bucket)
 3. **Scanner-app** picks up the message, downloads the file, scans via gRPC to the main V1FS scanner (`my-release`)
 4. **Routing decision** per the table above; source object deleted or tagged per `DELETE_SOURCE_ENABLED`
-5. **(Review mode only)** Review bucket S3 event → review queue → **review-scanner-app** scans via `rv` (no decompression limits) → final routing to clean or quarantine only (never back to review; `REVIEW_ROUTING_ENABLED=false` and IAM both enforce this)
+5. **(Review mode only)** Review bucket S3 event → review queue → **review-scanner-app** scans via `rv` (no decompression limits) → clean files tagged in place in the review bucket, malicious files moved to quarantine (never back to review; `REVIEW_ROUTING_ENABLED=false` and IAM both enforce this)
 
 ## Core Application Logic
 
@@ -157,7 +157,6 @@ Notes: `aiobotocore==3.3.0` requires `botocore>=1.42.62,<1.42.71` — keep `boto
 | `SQS_QUEUE_URL` | SQS queue URL | `FileScanQueueUrl` |
 | `S3_INGEST_BUCKET` | Source bucket (stack-created or `ExistingIngestBucket`) | `IngestBucketName` |
 | `S3_QUARANTINE_BUCKET` | Quarantine bucket | `QuarantineBucketName` |
-| `S3_CLEAN_BUCKET` | Clean bucket | `CleanBucketName` |
 | `S3_REVIEW_BUCKET` | Review bucket — OPTIONAL; empty when the review pipeline is not deployed. Required only when `REVIEW_ROUTING_ENABLED=true` (config validation enforces this) | `ReviewBucketName` or empty |
 | `V1FS_SERVER_ADDR` | Scanner gRPC endpoint | `my-release-visionone-filesecurity-scanner:50051` |
 | `V1FS_API_KEY_SECRET_ARN` | Secrets Manager ARN | `ApiKeySecretArn` |
@@ -216,7 +215,7 @@ Deployed only when `DeployReviewPipeline=true` (which requires `DeployScannerApp
 - **`SQS_QUEUE_URL`**: the review SQS queue (`ReviewScanQueueUrl`)
 - **`S3_INGEST_BUCKET`**: the review bucket (reads files from review, not ingest)
 - **`V1FS_SERVER_ADDR`**: `rv-visionone-filesecurity-scanner:50051` (the review release, no decompression limits, chart HPA min 1 / max 3)
-- **`REVIEW_ROUTING_ENABLED=false`**: prevents routing files back to the review bucket (infinite loop). Files go only to clean or quarantine
+- **`REVIEW_ROUTING_ENABLED=false`**: prevents routing files back to the review bucket (infinite loop). Clean files are tagged in place in the review bucket; malicious files are moved to quarantine
 - **`AUDIT_LOG_GROUP`**: `review-audit-${StackName}` for a separate audit trail
 - **`RECONCILIATION_ENABLED=true`**: the review scanner hosts the reconciliation loop when the pipeline is deployed
 

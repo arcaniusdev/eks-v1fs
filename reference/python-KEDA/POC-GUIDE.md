@@ -48,7 +48,7 @@
 A single CloudFormation template stands up an EKS cluster running the **TrendAI Vision One File Security scanner**, installed from the official Helm chart. In this deployment the scanner fleet is scaled by **KEDA on SQS queue depth** — the number of scanner pods tracks your scan backlog directly, rather than reacting to CPU. (This is a queue-driven variant tuned for an SQS-fed workload: the chart's own CPU/memory HPA is disabled so the two autoscalers don't conflict — see §17, and note the supportability trade-off there.)
 
 ```text
-[Your files (S3 upload, or your own app)] ──▶ [V1FS Scanner on EKS (official chart · KEDA queue-depth scaling)] ──▶ [Verdicts (clean / quarantine + tags)]
+[Your files (S3 upload, or your own app)] ──▶ [V1FS Scanner on EKS (official chart · KEDA queue-depth scaling)] ──▶ [Verdicts (clean tagged in place / malicious to quarantine)]
 ```
 
 Files are scanned **inside your VPC** — the bytes never leave your account. Scan metadata (verdicts, threat names) reports to your Vision One console. Around the scanner core, optional modules — a complete S3 scanning pipeline, a deep-analysis review pipeline, an external endpoint — turn on and off with template parameters.
@@ -67,7 +67,7 @@ flowchart TB
   classDef existing stroke:#D13212,stroke-width:3px
 
   subgraph REGION["AWS account — region services"]
-    S3A["S3 × 3<br/>ingest · clean · quarantine"]:::app
+    S3A["S3 × 2<br/>ingest · quarantine"]:::app
     S3R["S3 review bucket"]:::review
     SQSA["SQS + DLQ<br/>scan queue pair"]:::app
     SQSR["Review SQS + DLQ"]:::review
@@ -89,7 +89,7 @@ flowchart TB
     EFS["EFS + 2 mount targets<br/>scanner scratch space"]:::core
     LB["Internal NLB or ALB<br/>gRPC :50051 / TLS :443"]:::endpoint
 
-    subgraph EKS["EKS cluster — managed node group r7i.xlarge × 2–8, Cluster Autoscaler"]
+    subgraph EKS["EKS cluster — managed node group r8g.xlarge × 2–8, Cluster Autoscaler"]
       V1FS["V1FS scanner<br/>KEDA 1–10 on queue depth"]:::core
       SUP["V1FS support pods<br/>management · database · cache · communicator"]:::core
       RV["V1FS rv release<br/>no decompression limits · HPA 1–3"]:::review
@@ -136,7 +136,7 @@ Four parameter combinations cover the common evaluation goals. Everything else d
 
 | Your goal | Parameters | What you get |
 |---|---|---|
-| **See the full pipeline work** (recommended first run) | *all defaults* | New ingest bucket → SQS → scanning app → clean/quarantine buckets. Drop a file in, watch the verdict land. |
+| **See the full pipeline work** (recommended first run) | *all defaults* | New ingest bucket → SQS → scanning app → clean files tagged in place, malicious moved to quarantine. Drop a file in, watch the verdict land. |
 | **I have my own scanning app** | `DeployScannerApp=false` | Just the scanner plus a gRPC endpoint address. No buckets, queues, or pipeline. Connect via the SDK — that's Part II. |
 | **Scan a bucket I already own** | `ExistingIngestBucket=` | Your bucket is wired via EventBridge — its existing notification configuration is preserved, and your objects are *tagged* with verdicts, never deleted or moved. |
 | **Deep archive analysis** | `DeployReviewPipeline=true` | Adds a second scanner with no decompression limits that re-scans archives too deep/large for the main policy before the final verdict. |
@@ -173,7 +173,7 @@ Download `eks-v1fs.yaml` from the [**eks-v1fs repository**](https://github.com/a
    - **Existing bucket**: set `ExistingIngestBucket` to your bucket name.
    - **Review pipeline**: set `DeployReviewPipeline` = `true`.
    - **Non-US tenant**: set `VisionOneApiEndpoint` to your regional API host.
-   - **Node type**: `NodeInstanceType` picks the EC2 instance type for the worker nodes (default `r7i.xlarge`, x86). Graviton ARM types are fully supported — choose `r8g.xlarge` (~11% lower compute cost) or `r7g.xlarge` (~19% lower). The stack handles everything automatically: the node group switches to an ARM64 AMI and the scanning application image is built for ARM. All scanner components ship multi-architecture images, so functionality is identical.
+   - **Node type**: `NodeInstanceType` picks the EC2 instance type for the worker nodes. The default is `r8g.xlarge` (Graviton ARM) — ~11–19% lower compute cost than the x86 equivalents. The stack handles ARM automatically: the node group uses an ARM64 AMI and the scanning application image is built for ARM. All scanner components ship multi-architecture images, so functionality is identical. Prefer x86? Choose `r7i.xlarge`, `r7a.xlarge`, `r6i.xlarge`, or `r7i.2xlarge`.
 5. Click **Next**.
 
 ### Step 4 — Stack options
@@ -194,7 +194,7 @@ If the stack fails, see [Troubleshooting](#18-troubleshooting) — the bastion l
 
 ### Step 7 — Collect the outputs
 
-Open the **Outputs** tab. Depending on mode you'll find the ingest / clean / quarantine bucket names, the CloudWatch dashboard URL, and the scanner endpoint SSM parameter. You'll use these in §5 and Part II.
+Open the **Outputs** tab. Depending on mode you'll find the ingest and quarantine bucket names, the CloudWatch dashboard URL, and the scanner endpoint SSM parameter. You'll use these in §5 and Part II.
 
 ### CLI alternative
 
@@ -238,18 +238,18 @@ printf 'X5O!P%%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-''ANTIVIRUS-TEST-FILE!$H+H*
   | aws s3 cp - s3://$INGEST/eicar.txt
 ```
 
-Within seconds, each file disappears from the ingest bucket and lands in a verdict bucket:
+Within seconds, each file gets a verdict — clean files stay in the ingest bucket, tagged in place; malicious and unscannable files move to quarantine:
 
-| File | Lands in | Tagged |
+| File | Ends up | Tagged |
 |---|---|---|
-| `hello.txt` | Clean bucket | **S3-Clean** |
+| `hello.txt` | Ingest bucket (tagged in place) | **S3-Clean** |
 | `eicar.txt` | Quarantine bucket | **S3-Malware** |
 | A too-deep archive | Quarantine bucket | **S3-DecompressionLimit** plus which limit was hit |
 
-Three other places to see results: object **tags** (on every verdict copy), the **CloudWatch dashboard** (`scanner-` — throughput, latency, detections, recent verdicts), and your **Vision One console**, where detections appear with their scan tags.
+Three other places to see results: object **tags** (on every scanned object), the **CloudWatch dashboard** (`scanner-` — throughput, latency, detections, recent verdicts), and your **Vision One console**, where detections appear with their scan tags.
 
 > [!NOTE]
-> **Scanning an existing bucket instead?** Same test — upload to *your* bucket. The difference: your original objects stay put and receive the verdict *tag*; the verdict *copy* still lands in the clean/quarantine bucket. Nothing in your bucket is ever deleted.
+> **Scanning an existing bucket instead?** Same test — upload to *your* bucket. Your objects always stay put and receive the verdict *tag* in place; clean objects simply stay tagged, and for malicious objects a *copy* also lands in the quarantine bucket. Nothing in your bucket is ever deleted.
 
 
 ## 6. Inside the scanning app
@@ -262,7 +262,7 @@ The pipeline you just watched is driven by a deliberately small application: **o
 One async event loop runs the whole show. S3 announces each new object on an SQS queue; the app pulls from that queue and pushes each file through six steps:
 
 ```text
-[Poll (SQS long-poll)] ▶ [Parse (bucket/key?)] ▶ [Download (into memory)] ▶ [Scan (gRPC → V1FS)] ▶ [Route (clean / quarantine / review)] ▶ [Finalize (ack + tag + audit)]
+[Poll (SQS long-poll)] ▶ [Parse (bucket/key?)] ▶ [Download (into memory)] ▶ [Scan (gRPC → V1FS)] ▶ [Route (tag clean in place / quarantine / review)] ▶ [Finalize (ack + tag + audit)]
 ```
 
 A semaphore caps how many scans run at once per pod (`MAX_CONCURRENT_SCANS`, default 50). Three small background loops support the main flow: a health server for Kubernetes probes, an audit writer that batches every verdict to CloudWatch Logs, and a reconciliation sweep that catches any file that somehow never got scanned.
@@ -276,7 +276,7 @@ A semaphore caps how many scans run at once per pod (`MAX_CONCURRENT_SCANS`, def
 | **Python + asyncio** | The app is a traffic director, not a compute engine — nearly all of its time is spent *waiting* on network I/O (S3, SQS, the scanner). Async lets one small pod hold 50 scans in flight. A compiled language would not speed this up: the scanner backend is the bottleneck, deliberately. |
 | **Files scanned from memory** | `scanBuffer`-style scanning means no temp files — which is what allows the container to run with a read-only filesystem, and leaves nothing to clean up. Files over `MAX_FILE_SIZE_MB` (default 500) are routed by server-side S3 copy instead, so a huge file can never blow out pod memory. |
 | **Visibility heartbeat + fast retry** | While a long scan runs, the app keeps extending the SQS message's invisibility so no other pod grabs it. On failure it does the opposite — shortens the timer to ~30s so the retry happens quickly instead of waiting out a long timeout. |
-| **Never mark the unscanned clean** | The routing rule you saw in §5: an archive the scanner couldn't fully open (decompression limits) goes to *quarantine with explanatory tags* — or to the review pipeline if enabled — never to the clean bucket. A clean verdict means a completed scan. |
+| **Never mark the unscanned clean** | The routing rule you saw in §5: an archive the scanner couldn't fully open (decompression limits) goes to *quarantine with explanatory tags* — or to the review pipeline if enabled — never tagged clean. A clean verdict means a completed scan. |
 | **Tag, don't delete, on your buckets** | In existing-bucket mode the app writes a verdict tag on your object instead of removing it — and its IAM role simply has no delete permission there. The safety property is enforced by AWS, not by good intentions in code. |
 | **Hardened container** | Non-root user, read-only root filesystem, all Linux capabilities dropped, dependencies pinned to exact versions, images tagged by git commit — the app that handles potentially-malicious bytes is the one you most want locked down. |
 
@@ -510,7 +510,35 @@ The scanner fleet is scaled by **KEDA on the scan queue's depth** (1–10 pods b
 
 Raise the ceilings with the `ScannerMaxReplicas`, `ScannerAppMaxReplicas`, and `NodeGroupMaxSize` parameters if your evaluation needs more sustained throughput.
 
-**Node instance type.** `NodeInstanceType` accepts memory-optimized xlarge classes — x86 (`r7i.xlarge` default, `r7a.xlarge`, `r6i.xlarge`, `r7i.2xlarge`) and **Graviton ARM** (`r8g.xlarge`, `r7g.xlarge`). ARM types cost 11–19% less per node-hour with identical functionality; the template selects the matching ARM64 node image and builds the scanning application for ARM automatically.
+**Node instance type.** `NodeInstanceType` accepts memory-optimized xlarge classes. The default is **Graviton ARM** (`r8g.xlarge`) — 11–19% cheaper per node-hour than the x86 equivalents with identical functionality; the template selects the matching ARM64 node image and builds the scanning application for ARM automatically. Select an x86 class (`r7i.xlarge`, `r7a.xlarge`, `r6i.xlarge`, `r7i.2xlarge`) if you prefer Intel/AMD.
+
+
+## 17a. Upgrading the V1FS scanner (KEDA mode — read before you upgrade)
+
+The chart version is pinned (currently **1.4.10**). Because this option scales the scanner with **KEDA on queue depth**, the chart's own HPA is turned **off** (`scanner.autoscaling.enabled=false`) — two autoscalers on one Deployment would fight over the replica count. That makes the upgrade path slightly different from the TrendAI-supported chart-HPA build, and there is exactly one rule to internalize: **the chart HPA must never come back.** `scripts/upgrade.py` enforces that for you.
+
+**Always upgrade from the bastion with the script — never a bare `helm upgrade`:**
+
+```bash
+# Preview the exact helm command first (recommended on any chart bump)
+python3 /opt/eks-v1fs/scripts/upgrade.py --version 1.4.11 --dry-run
+
+# Apply
+python3 /opt/eks-v1fs/scripts/upgrade.py --version 1.4.11
+```
+
+What the script guarantees in KEDA mode:
+
+| Step | Guarantee |
+|---|---|
+| Values | Layers `helm/values-base.yaml` (HPA off) over the release's captured install values, and additionally passes `--set scanner.autoscaling.enabled=false` — so a new chart version's default cannot silently re-enable the chart HPA |
+| Bounds | Passes **no** HPA replica bounds — in this mode they live on the KEDA `v1fs-scanner-sqs-scaler` ScaledObject, which Helm never touches |
+| Guard | After upgrading, verifies the scanner has the KEDA ScaledObject and **no** chart HPA. If both are present, the script **fails hard (exit 1)** so you catch the conflict immediately instead of shipping a thrashing deployment |
+| Scan policy | Re-captures and re-applies your CLISH decompression settings (§16) as a safeguard |
+
+**Never use `helm upgrade --reuse-values`** — if a new chart version renames or adds a value, `--reuse-values` can drop `scanner.autoscaling.enabled=false` and resurrect the HPA. Always go through the script.
+
+**To change scanner min/max replicas in this mode,** edit `k8s/scanner-scaledobject.yaml` and re-apply it — do **not** set `scanner.autoscaling.*` (that path is disabled here).
 
 
 ## 18. Troubleshooting
@@ -541,7 +569,7 @@ Before CloudFormation tears down the cluster, a pre-delete cleanup Lambda remove
 
 | Left behind | Why | Remove it |
 |---|---|---|
-| **The verdict buckets** (ingest / clean / quarantine / review) | `DeletionPolicy: Retain` — kept on purpose so scanned files and verdicts survive teardown (forensics). They're versioned. | Empty (including versions) and delete: `aws s3 rb s3://<bucket> --force` |
+| **The verdict buckets** (ingest / quarantine / review) | `DeletionPolicy: Retain` — kept on purpose so scanned files and verdicts survive teardown (forensics). They're versioned. | Empty (including versions) and delete: `aws s3 rb s3://<bucket> --force` |
 | **Secrets Manager secrets** (API key, and registration token if you supplied one) | Deletion enters a 7–30 day recovery window rather than removing immediately; the name stays reserved meanwhile (another reason to increment stack names). | `aws secretsmanager delete-secret --secret-id <name> --force-delete-without-recovery` |
 | **The cleanup Lambda's own log group** (`/aws/lambda/cleanup-<stack>`) | It's still in use while doing the cleanup, so it can't delete itself. | `aws logs delete-log-group --log-group-name /aws/lambda/cleanup-<stack>` (negligible cost otherwise) |
 | **Your existing ingest bucket** (existing-bucket mode) | Never touched on teardown — the bucket, its objects, and its notification configuration are left exactly as found. | Not applicable — intentional |

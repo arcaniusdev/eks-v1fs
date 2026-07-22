@@ -1,6 +1,6 @@
 # EKS Vision One File Security Scanner
 
-Malware scanning on AWS, deployed the way TrendAI supports it. A single CloudFormation template provisions an EKS cluster running [TrendAI Vision One File Security](https://docs.trendmicro.com/en-us/documentation/article/trend-vision-one-file-security-intro-origin) — and, optionally, a complete S3 scanning pipeline where files uploaded to an S3 bucket are automatically scanned and routed to a clean bucket or quarantine bucket based on the verdict.
+Malware scanning on AWS, deployed the way TrendAI supports it. A single CloudFormation template provisions an EKS cluster running [TrendAI Vision One File Security](https://docs.trendmicro.com/en-us/documentation/article/trend-vision-one-file-security-intro-origin) — and, optionally, a complete S3 scanning pipeline where files uploaded to an S3 bucket are automatically scanned, tagged in place with the verdict, and — if malicious — moved to a quarantine bucket.
 
 Everything deploys from one template — the EKS cluster, networking, storage, the scanner itself, and (if enabled) the queues, buckets, IAM, and scanning application.
 
@@ -17,7 +17,9 @@ The same template supports three deployment scenarios, selected by two parameter
 Common to all three: **NLB endpoint by default** (ALB with a self-signed cert is opt-in via `ScannerEndpointMode`), **Graviton/ARM-capable** nodes, and the same CloudFormation template + bootstrap.
 
 - **`ScannerScalingMode=hpa` (default)** — the chart's own CPU/memory HPA scales the scanner. This is TrendAI's supported autoscaling.
-- **`ScannerScalingMode=keda`** — KEDA scales the scanner on SQS queue depth so the fleet size follows the backlog (needs a queue: the stack's own in full-auto, or `ExternalScanQueueArn` in BYO). The chart HPA is disabled; `scripts/upgrade.py` enforces exactly one autoscaler. This is a customer variant, *not* the TrendAI-supported path.
+- **`ScannerScalingMode=keda`** — KEDA scales the scanner on SQS queue depth so the fleet size follows the backlog (needs a queue: the stack's own, or the `ExternalScanQueueArn` you bring). The chart HPA is disabled; `scripts/upgrade.py` enforces exactly one autoscaler. This is a customer variant, *not* the TrendAI-supported path.
+
+You can also point the scanner-app at **your own existing SQS queue** instead of the one the stack builds — set `ExternalScanQueueArn` (the queue, S3-event-shaped messages) plus `ExternalScanSourceBucketArns` (the buckets its events reference, for read/tag IAM). The stack then builds no ingest bucket, scan queue, DLQ, S3 wiring, or dashboard; clean files are tagged in place in your bucket and malicious files are copied to the stack's quarantine bucket (your objects are never deleted). Full-auto only, mutually exclusive with `ExistingIngestBucket`.
 
 The **KEDA** options additionally use the NLB target group as a **pod-discovery registry**: the client-side pull/semaphore dispatcher (in `reference/python-KEDA/` or `reference/java-KEDA/`) reads healthy scanner pod IPs via the ELB `DescribeTargetHealth` API and connects directly to pods — no load balancer in the scan path, no L7 latency. See each option's POC guide (§8a) for the architecture.
 
@@ -50,10 +52,11 @@ Four parameter combinations cover the common cases:
 
 | Mode | DeployScannerApp | DeployReviewPipeline | ExistingIngestBucket | ScannerEndpointMode | What you get |
 |---|---|---|---|---|---|
-| **Default (full auto-scan)** | `true` | `false` | *(empty)* | `nlb` | Complete pipeline: new ingest bucket → SQS → scanner-app → clean/quarantine. Decompression-limit files are quarantined with tags. Scanner endpoint also published for ad-hoc use. |
+| **Default (full auto-scan)** | `true` | `false` | *(empty)* | `nlb` | Complete pipeline: new ingest bucket → SQS → scanner-app. Clean files are tagged in place; malicious files are moved to the quarantine bucket. Decompression-limit files are quarantined with distinct tags. Scanner endpoint also published for ad-hoc use. |
 | **Endpoint-only (bring your own app)** | `false` | `false` | — | `nlb` or `alb` | Just the TrendAI V1FS scanner on EKS plus a gRPC endpoint. No buckets, queues, ECR, scanner-app IAM, DLQ Lambdas, dashboard, or KEDA. Connect your own application via the SDK. |
-| **Existing bucket** | `true` | `false` | *your bucket name* | any | Scans a bucket you already own via S3 → EventBridge → SQS. Source objects are **tagged** with the verdict, never deleted. Verdict copies still land in clean/quarantine. |
-| **Full + review pipeline** | `true` | `true` | *(empty or set)* | any | Adds a second V1FS release with unlimited decompression that re-scans archives exceeding the main scanner's limits before a final clean/quarantine verdict. |
+| **Existing bucket** | `true` | `false` | *your bucket name* | any | Scans a bucket you already own via S3 → EventBridge → SQS. Every object is **tagged in place** with the verdict and never deleted; a malicious file is additionally **copied** to the quarantine bucket (the original stays put). |
+| **External queue drain** | `true` | `false` | *(empty)* | any | Set `ExternalScanQueueArn` + `ExternalScanSourceBucketArns` — the scanner-app drains **your** SQS queue (S3-event-shaped messages) instead of a stack-built one. No ingest bucket, scan queue, DLQ, S3 wiring, or dashboard is created. Clean tagged in place, malicious copied to quarantine; your objects never deleted. Mutually exclusive with `ExistingIngestBucket`. |
+| **Full + review pipeline** | `true` | `true` | *(empty or set)* | any | Adds a second V1FS release with unlimited decompression that re-scans archives exceeding the main scanner's limits before a final verdict (tag in place / quarantine). |
 
 CloudFormation Rules enforce the valid combinations: `DeployReviewPipeline=true` requires `DeployScannerApp=true`, and `ScannerEndpointMode=alb` requires both `ACMCertificateArn` and `ScannerDomain`.
 
@@ -74,7 +77,7 @@ The core of every deployment is the TrendAI V1FS scanner, installed via the offi
                         │  ┌─────────────────────┴──────────────────────┐    │
                         │  │ OPTIONAL: scanner-app module               │    │
   S3 Ingest ──▶ SQS ────┼──┼─▶ scanner-app pods (KEDA, 1–20)            │    │
-  (created or           │  │   route to Clean / Quarantine buckets      │    │
+  (created or           │  │   tag clean in place · move bad→Quarantine │    │
    existing bucket)     │  └────────────────────────────────────────────┘    │
                         │                                                    │
                         │  ┌────────────────────────────────────────────┐    │
@@ -97,8 +100,9 @@ With the scanner-app module enabled (the default), the full pipeline looks like 
 │              DLQ (3 fails)             CLEAN   DECOMP-LIMIT  MALICIOUS   │
 │                    │                     │         │            │        │
 │             Lambda auto-retry            ▼         │            ▼        │
-│            (backoff → discard)     Clean Bucket    │      Quarantine     │
-│                                                    ▼                     │
+│            (backoff → discard)   tag in place      │      Quarantine     │
+│                                  (S3-Clean)        ▼      (move: copy    │
+│                                            review OFF:     + delete src) │
 │              review OFF (default): Quarantine + explanatory tags        │
 │              review ON:            Review Bucket ──▶ review pipeline    │
 ├──────────────────────────────────────────────────────────────────────────┤
@@ -110,7 +114,7 @@ With the scanner-app module enabled (the default), the full pipeline looks like 
 │               Lambda auto-retry                  CLEAN       MALICIOUS   │
 │                                                    │            │        │
 │                                                    ▼            ▼        │
-│                                              Clean Bucket  Quarantine    │
+│                                            tag in place    Quarantine    │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -118,21 +122,21 @@ With the scanner-app module enabled (the default), the full pipeline looks like 
 |---|---|
 | **Ingest** | A file lands in the ingest bucket (stack-created, or your existing bucket). S3 sends an `ObjectCreated` event to the SQS queue — directly for a stack-created bucket, or via EventBridge for an existing bucket. |
 | **Scan** | A scanner-app pod long-polls the queue, downloads the file into memory, and scans it via the V1FS Python SDK over gRPC to the in-cluster scanner pods. |
-| **Route** | The file is copied to the destination bucket with a `ScanResult` tag. For a stack-created ingest bucket, the source object is then deleted; for an existing bucket, the source object is **tagged with the verdict and left in place**. The SQS message is removed and the result is written to the CloudWatch audit trail. |
-| **Review** *(optional)* | If the review pipeline is deployed, archives the main scanner could not fully analyze are re-scanned by a second V1FS release (`rv`) with no decompression limits, then routed to Clean or Quarantine. |
+| **Route** | A **clean** file is left exactly where it is and tagged `ScanResult=S3-Clean` — nothing is copied, moved, or deleted. A **malicious** file (or one that couldn't be fully scanned) is copied to the quarantine/review bucket with a `ScanResult` tag; the source is then deleted for a stack-created ingest bucket, or **tagged and left in place** for an existing user bucket. The SQS message is removed and the result is written to the CloudWatch audit trail. |
+| **Review** *(optional)* | If the review pipeline is deployed, archives the main scanner could not fully analyze are re-scanned by a second V1FS release (`rv`) with no decompression limits, then given a final verdict (tagged in place if clean, moved to Quarantine if malicious). |
 
 **Routing rules:**
 
 | Verdict | Condition | Destination |
 |---|---|---|
-| **Clean** | `scanResult == 0`, no decompression errors | Clean Bucket (tag `ScanResult=S3-Clean`) |
+| **Clean** | `scanResult == 0`, no decompression errors | **Left in place**, tagged `ScanResult=S3-Clean` (no clean bucket) |
 | **Malicious** | `scanResult > 0` | Quarantine Bucket (tag `ScanResult=S3-Malware`) |
 | **Decompression limit — review OFF (default)** | `scanResult == 0`, decompression limit exceeded | Quarantine Bucket with tags `ScanResult=S3-DecompressionLimit` and `ScanErrors=<error names>` |
 | **Decompression limit — review ON** | `scanResult == 0`, decompression limit exceeded | Review Bucket → re-scanned by review pipeline |
 | **Oversize — review OFF (default)** | File exceeds `MAX_FILE_SIZE_MB` (default 500) | Quarantine Bucket via server-side copy (tag `ScanResult=S3-Oversize`) |
 | **Oversize — review ON** | File exceeds `MAX_FILE_SIZE_MB` | Review Bucket via server-side copy, re-scanned with no size limit |
 
-A file that hit a decompression limit was **not fully inspected** — treating it as clean would be unsafe. Quarantining it with explanatory tags (rather than passing it through) also fixes a bug in the previous architecture where such files could land in the clean bucket when the review pipeline was unavailable. The `ScanErrors` tag records exactly which limit was hit (`ATSE_ZIP_RATIO_ERR`, `ATSE_MAXDECOM_ERR`, `ATSE_ZIP_FILE_COUNT_ERR`, or `ATSE_EXTRACT_TOO_BIG_ERR`) so an operator can decide whether to raise the limits or deploy the review pipeline.
+A file that hit a decompression limit was **not fully inspected** — treating it as clean would be unsafe, so it is quarantined with explanatory tags rather than tagged clean in place. The `ScanErrors` tag records exactly which limit was hit (`ATSE_ZIP_RATIO_ERR`, `ATSE_MAXDECOM_ERR`, `ATSE_ZIP_FILE_COUNT_ERR`, or `ATSE_EXTRACT_TOO_BIG_ERR`) so an operator can decide whether to raise the limits or deploy the review pipeline.
 
 ### Scanner Application (optional module)
 
@@ -164,7 +168,7 @@ The database configuration is immutable after initial deployment — changing st
 
 ### Compute
 
-The cluster uses a **single managed node group** for everything — system components and scanner workloads. The default instance type is `r7i.xlarge` (4 vCPU, 32 GiB); memory-optimized instances give the V1FS scanner headroom for signature databases and in-memory file analysis, and each xlarge node fits four scanner pods (800m CPU / 2Gi memory each — the chart default) alongside scanner-app and system pods. **Graviton ARM instance types** (`r8g.xlarge`, `r7g.xlarge`) are fully supported at 11–19% lower node cost — the template switches the node AMI and application image build to ARM64 automatically, and every component ships multi-architecture images.
+The cluster uses a **single managed node group** for everything — system components and scanner workloads. The default instance type is **`r8g.xlarge`** (Graviton ARM, 4 vCPU / 32 GiB) — 11–19% cheaper per node-hour than the x86 equivalents, with the template switching the node AMI and application image build to ARM64 automatically and every component shipping multi-architecture images. Memory-optimized instances give the V1FS scanner headroom for signature databases and in-memory file analysis, and each xlarge node fits four scanner pods (800m CPU / 2Gi memory each — the chart default) alongside scanner-app and system pods. Prefer x86? Select `r7i.xlarge`, `r7a.xlarge`, `r6i.xlarge`, or `r7i.2xlarge` — same sizing, same behavior.
 
 Node group sizing (all configurable via parameters):
 
@@ -174,7 +178,7 @@ Node group sizing (all configurable via parameters):
 | `NodeGroupDesiredSize` | 2 | Starting point — Cluster Autoscaler adjusts from here |
 | `NodeGroupMaxSize` | 8 | Fits full-mode peak load (see math below) |
 
-**Why max 8 nodes:** an `r7i.xlarge` has 4 vCPU, of which roughly **3.6 vCPU is usable** after kubelet/system reservations and per-node DaemonSets. Full-mode peak pod requests total approximately **26.4 vCPU** — 10 V1FS scanner pods × 800m, 20 scanner-app pods × 500m, the review pipeline, and system components (CoreDNS, KEDA, CSI drivers, Cluster Autoscaler, LB controller, metrics server). 26.4 ÷ 3.6 ≈ 7.4, so 8 nodes covers peak with a margin. If you raise the replica maximums, raise `NodeGroupMaxSize` to match.
+**Why max 8 nodes:** an xlarge node (`r8g.xlarge` or the x86 equivalents) has 4 vCPU, of which roughly **3.6 vCPU is usable** after kubelet/system reservations and per-node DaemonSets. Full-mode peak pod requests total approximately **26.4 vCPU** — 10 V1FS scanner pods × 800m, 20 scanner-app pods × 500m, the review pipeline, and system components (CoreDNS, KEDA, CSI drivers, Cluster Autoscaler, LB controller, metrics server). 26.4 ÷ 3.6 ≈ 7.4, so 8 nodes covers peak with a margin. If you raise the replica maximums, raise `NodeGroupMaxSize` to match.
 
 ### Autoscaling
 
@@ -289,7 +293,7 @@ Set `ExistingIngestBucket` to the name of a bucket you already own and the stack
 **Semantics (tag, don't delete):**
 
 - Source objects are **never deleted**. After scanning, the object in your bucket is tagged with the verdict (`ScanResult=S3-Clean`, `S3-Malware`, `S3-DecompressionLimit` + `ScanErrors=...`, or `S3-Oversize`), so results are visible in place.
-- Verdict **copies** still land in the stack's clean/quarantine buckets (and review bucket, if deployed), preserving the routed-output workflow.
+- A **malicious** (or decompression-limit / oversize) object is additionally **copied** to the stack's quarantine bucket (and review bucket, if deployed) so containment doesn't depend on your bucket's tags — but the original is left untouched. Clean objects are only tagged.
 - **Reconciliation is disabled** — objects legitimately remain in the bucket, so age-based re-queueing would loop.
 - Defense in depth: the scanner-app IAM role has **no `s3:DeleteObject`** on your bucket — the pipeline cannot delete your data even if misconfigured.
 
@@ -304,7 +308,7 @@ The `eks-v1fs.yaml` template creates everything. Resources marked *(scanner-app)
 | **VPC** | `10.2.0.0/16` with public and private subnets across 2 AZs |
 | **NAT Gateways** | One per AZ — pods in private subnets reach the internet for threat intelligence updates |
 | **EKS Cluster** | Private API endpoint, full audit logging, managed addons (vpc-cni, CoreDNS, kube-proxy, Pod Identity Agent, EBS CSI Driver, EFS CSI Driver) |
-| **Managed Node Group** | Single node group of `r7i.xlarge` (default) instances in private subnets, min 2 / max 8 — hosts system components and scanner workloads, scaled by the Cluster Autoscaler |
+| **Managed Node Group** | Single node group of `r8g.xlarge` (Graviton ARM, default) instances in private subnets, min 2 / max 8 — hosts system components and scanner workloads, scaled by the Cluster Autoscaler |
 | **AWS Load Balancer Controller** | Creates the internal NLB or ALB for the scanner endpoint (Helm, Pod Identity) |
 | **Cluster Autoscaler** | Standard Kubernetes node autoscaler (Helm, Pod Identity, ASG auto-discovery via EKS-applied tags) |
 | **EFS Filesystem** | Encrypted shared storage (ReadWriteMany) for the V1FS scanner ephemeral volume across multiple pods |
@@ -330,7 +334,7 @@ The `eks-v1fs.yaml` template creates everything. Resources marked *(scanner-app)
 
 Pods get AWS permissions automatically through EKS Pod Identity. No access keys are configured anywhere.
 
-1. CloudFormation creates IAM roles with permissions scoped to specific resources — `ScannerAppRole` for the main scanner-app (ingest/clean/quarantine buckets, main SQS queue; no `s3:DeleteObject` on an existing user bucket) and, if the review pipeline is deployed, `ReviewScannerAppRole` (review/clean/quarantine buckets, review SQS queue — deliberately no write access to the review bucket)
+1. CloudFormation creates IAM roles with permissions scoped to specific resources — `ScannerAppRole` for the main scanner-app (ingest bucket read + tag, quarantine bucket write, main SQS queue; no `s3:DeleteObject` on an existing user bucket) and, if the review pipeline is deployed, `ReviewScannerAppRole` (review + quarantine buckets, review SQS queue — deliberately no write access to the review bucket)
 2. Pod Identity Associations bind each role to its Kubernetes service account (`scanner-app` in `visionone-filesecurity`, `review-scanner-app` in `visionone-review`, plus the Cluster Autoscaler, LB controller, and KEDA service accounts in their namespaces)
 3. The Pod Identity Agent (a DaemonSet on each node) intercepts credential requests from pods and injects temporary credentials
 4. Each scanner app retrieves the V1FS API key from Secrets Manager at startup using these credentials
@@ -364,7 +368,7 @@ Optional parameters:
 | **NodeInstanceType** | `r7i.xlarge` | EC2 instance type for the managed node group — x86 (`r7i.xlarge`, `r7a.xlarge`, `r6i.xlarge`, `r7i.2xlarge`) or Graviton ARM (`r8g.xlarge`, `r7g.xlarge`). ARM types select an ARM64 node AMI and ARM image build automatically. One node group hosts both system components and scanner workloads |
 | **NodeGroupMinSize** | `2` | Minimum nodes in the managed node group (min 2 for CoreDNS/AZ redundancy) |
 | **NodeGroupDesiredSize** | `2` | Initial desired nodes — the Cluster Autoscaler adjusts from here |
-| **NodeGroupMaxSize** | `8` | Maximum nodes the Cluster Autoscaler may scale to. The default fits full-mode peak load on r7i.xlarge |
+| **NodeGroupMaxSize** | `8` | Maximum nodes the Cluster Autoscaler may scale to. The default fits full-mode peak load on an xlarge node (4 vCPU) |
 | **ScannerMinReplicas** | `1` | Minimum V1FS scanner pods (chart HPA `minReplicas`) |
 | **ScannerMaxReplicas** | `10` | Maximum V1FS scanner pods (chart HPA `maxReplicas`, CPU/memory 80% targets) |
 | **DeployScannerApp** | `true` | Deploy the S3/SQS scanning application module (buckets, queues, ECR, scanner-app pods). Set to `false` to deploy only the V1FS scanner and its endpoint |
@@ -456,8 +460,7 @@ After creation, the stack exports key resource identifiers. Outputs for the scan
 | `ClusterName` | EKS cluster name |
 | `BastionPublicIP` | Bastion host IP (connect via SSM, not SSH) |
 | `DashboardUrl` | CloudWatch dashboard URL — real-time pipeline monitoring *(scanner-app)* |
-| `IngestBucketName` | S3 bucket for uploading files to scan *(scanner-app; your own bucket in existing-bucket mode)* |
-| `CleanBucketName` | S3 bucket for files that passed scanning *(scanner-app)* |
+| `IngestBucketName` | S3 bucket for uploading files to scan — clean files stay here, tagged `ScanResult=S3-Clean` *(scanner-app; your own bucket in existing-bucket mode)* |
 | `QuarantineBucketName` | S3 bucket for malicious, decompression-limit, and oversize files *(scanner-app)* |
 | `ReviewBucketName` | S3 bucket for files awaiting deep analysis *(review)* |
 | `FileScanQueueUrl` | SQS queue URL for S3 file events *(scanner-app)* |
@@ -511,7 +514,7 @@ Watch the scanner app logs:
 kubectl logs -f deployment/scanner-app -n visionone-filesecurity
 ```
 
-You should see the file scanned and routed to the clean bucket (in existing-bucket mode, the source object is also tagged with `ScanResult=S3-Clean`).
+You should see the file scanned and tagged in place with `ScanResult=S3-Clean` — a clean file stays in the ingest bucket (there is no separate clean bucket).
 
 To test malware detection, upload the [EICAR test file](https://www.eicar.org/download-anti-malware-testfile/):
 
@@ -596,9 +599,11 @@ The script handles everything automatically:
 1. Sets up the environment (KUBECONFIG, Helm repository) and **discovers the installed releases** — `my-release` always; `rv` only if the review pipeline is installed
 2. Captures the current CLISH scan policy before upgrading
 3. Updates the Helm repository, shows available versions, and exits early if already up to date
-4. For each release, **captures its install-time values (`helm get values`) and the live HPA min/max replicas**, then upgrades with `helm/values-base.yaml` + the captured values + the live HPA bounds — so operator tuning (e.g. a raised `maxReplicas`) survives the upgrade
+4. For each release, **captures its install-time values (`helm get values`)** and then upgrades with `helm/values-base.yaml` + the captured values, adapting to the scaling mode it detects on the live cluster:
+   - **HPA mode** — reads the live chart-HPA min/max replicas and re-applies them, so operator tuning (e.g. a raised `maxReplicas`) survives the upgrade
+   - **KEDA mode** — passes **no** HPA bounds (they live on the KEDA ScaledObject, which Helm never touches) and re-asserts `--set scanner.autoscaling.enabled=false`, so a chart-default flip in a new chart version cannot resurrect the chart HPA to fight KEDA
 5. Re-applies the captured CLISH scan policy to `my-release` only (not `rv` — it runs with unlimited decompression)
-6. Verifies the **chart's HPA exists** for each release, and that no KEDA ScaledObject targets the chart-owned scanner (KEDA must scale only our scanner-app)
+6. Verifies the scanner has **exactly one autoscaler** — in HPA mode the chart HPA exists and no ScaledObject targets the scanner; in KEDA mode the `v1fs-scanner-sqs-scaler` ScaledObject exists and no chart HPA does. If **both** are present (two controllers thrashing the replica count), the upgrade **fails hard (exit 1)** rather than leaving a broken deployment
 7. Verifies scanner pods are running
 8. Runs a sanity scan — via the ingest bucket if the scanner-app module is deployed, otherwise it prints the published SSM endpoint and an SDK one-liner for a manual check
 
@@ -607,6 +612,17 @@ To pin a specific version (e.g., rollback or skip a release), use `--version X.Y
 **Do not run `helm upgrade` manually without `-f helm/values-base.yaml`** — a plain `helm upgrade` reverts to chart defaults, losing the EFS ephemeral volume, the database storage class, and the ingress settings. Do not use `--reuse-values` — if the new chart version renames or adds values, it can cause silent misconfiguration.
 
 These resources are **not affected** by `helm upgrade` and do not need re-applying: the KEDA ScaledObject (scanner-app), PodDisruptionBudgets, Pod Identity associations, the scanner-app deployment, and CLISH scan policy settings (the script re-applies the policy anyway as a safeguard).
+
+### Upgrading a KEDA-scaled scanner (`ScannerScalingMode=keda`)
+
+In the **python-KEDA** and **java-KEDA** options the scanner fleet is scaled by KEDA on SQS queue depth, which requires the chart's own HPA to be **off** (`scanner.autoscaling.enabled=false` in `values-base.yaml`) — two autoscalers on one Deployment would fight over the replica count. This is a customer variant, **not** TrendAI's supported chart-HPA mechanism, so its upgrade path needs one extra guarantee: *the chart HPA must never come back*. `scripts/upgrade.py` enforces this for you — there is nothing extra to run — but the contract matters:
+
+- **Always upgrade with `scripts/upgrade.py`.** It layers `values-base.yaml` (HPA off) over the captured install values and additionally passes `--set scanner.autoscaling.enabled=false`. A bare `helm upgrade` — or `helm upgrade --reuse-values` — can let a new chart version's default re-enable the HPA silently.
+- **The guard is a hard failure, not a warning.** After upgrading, the script checks that the scanner has the KEDA ScaledObject and **no** chart HPA. If a chart HPA reappeared alongside KEDA, it exits non-zero so you catch it immediately.
+- **Preview first on a chart bump.** Run `python3 /opt/eks-v1fs/scripts/upgrade.py --version X.Y.Z --dry-run` to see the exact `helm upgrade` command (including the `autoscaling.enabled=false` override) before applying.
+- **Scaling bounds live on the ScaledObject, not the chart.** To change min/max scanner replicas in KEDA mode, edit `k8s/scanner-scaledobject.yaml` and re-apply it — do not set `scanner.autoscaling.*`.
+
+Each KEDA option's POC guide repeats this in its "Upgrading the V1FS scanner" section so an evaluator following that guide sees it in context.
 
 ## Security
 
