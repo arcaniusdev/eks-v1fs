@@ -25,7 +25,7 @@ done
 # If any resource env var is missing, fall back to reading stack Outputs.
 # S3_REVIEW_BUCKET is optional (empty when the review pipeline is not deployed).
 if [ -z "${SQS_QUEUE_URL:-}" ] || [ -z "${S3_INGEST_BUCKET:-}" ] || \
-   [ -z "${S3_CLEAN_BUCKET:-}" ] || [ -z "${S3_QUARANTINE_BUCKET:-}" ] || \
+   [ -z "${S3_QUARANTINE_BUCKET:-}" ] || \
    [ -z "${V1FS_API_KEY_SECRET_ARN:-}" ] || [ -z "${ECR_REPO_URL:-}" ] || \
    [ -z "${AUDIT_LOG_GROUP:-}" ]; then
 
@@ -50,7 +50,6 @@ for o in outputs:
 
   SQS_QUEUE_URL="${SQS_QUEUE_URL:-$(get_output FileScanQueueUrl)}"
   S3_INGEST_BUCKET="${S3_INGEST_BUCKET:-$(get_output IngestBucketName)}"
-  S3_CLEAN_BUCKET="${S3_CLEAN_BUCKET:-$(get_output CleanBucketName)}"
   S3_QUARANTINE_BUCKET="${S3_QUARANTINE_BUCKET:-$(get_output QuarantineBucketName)}"
   S3_REVIEW_BUCKET="${S3_REVIEW_BUCKET:-$(get_output ReviewBucketName || true)}"
   V1FS_API_KEY_SECRET_ARN="${V1FS_API_KEY_SECRET_ARN:-$(get_output ApiKeySecretArn)}"
@@ -89,7 +88,6 @@ fi
 
 echo "SQS Queue: $SQS_QUEUE_URL"
 echo "Ingest:    $S3_INGEST_BUCKET"
-echo "Clean:     $S3_CLEAN_BUCKET"
 echo "Quarantine:$S3_QUARANTINE_BUCKET"
 echo "Review:    $S3_REVIEW_BUCKET"
 echo "ECR:       $ECR_REPO_URL"
@@ -127,7 +125,6 @@ data:
   SQS_QUEUE_URL: "$SQS_QUEUE_URL"
   S3_INGEST_BUCKET: "$S3_INGEST_BUCKET"
   S3_QUARANTINE_BUCKET: "$S3_QUARANTINE_BUCKET"
-  S3_CLEAN_BUCKET: "$S3_CLEAN_BUCKET"
   S3_REVIEW_BUCKET: "$S3_REVIEW_BUCKET"
   V1FS_SERVER_ADDR: "${V1FS_SERVER_ADDR:-${V1FS_RELEASE_NAME}-visionone-filesecurity-scanner:50051}"
   V1FS_TLS_ENABLED: "${V1FS_TLS_ENABLED:-false}"
@@ -209,7 +206,6 @@ metadata:
 data:
   SQS_QUEUE_URL: "$REVIEW_SQS_QUEUE_URL"
   S3_INGEST_BUCKET: "$S3_REVIEW_BUCKET"
-  S3_CLEAN_BUCKET: "$S3_CLEAN_BUCKET"
   S3_QUARANTINE_BUCKET: "$S3_QUARANTINE_BUCKET"
   S3_REVIEW_BUCKET: ""
   V1FS_SERVER_ADDR: "${REVIEW_V1FS_RELEASE_NAME}-visionone-filesecurity-scanner:50051"

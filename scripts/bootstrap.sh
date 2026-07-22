@@ -381,10 +381,24 @@ if [ "$DEPLOY_SCANNER_APP" = "true" ]; then
   systemctl enable docker
   systemctl start docker
 
-  # Existing-user-bucket mode: never delete the user's objects —
-  # tag them with the verdict instead. Also disables reconciliation
-  # (objects legitimately remain in the bucket).
-  if [ -n "$EXISTING_INGEST_BUCKET" ]; then
+  # Object handling per mode (reconciliation auto-disables whenever
+  # DELETE_SOURCE_ENABLED=false, i.e. any bring-your-own source):
+  #  - external-queue mode: drain the user's queue instead of a stack queue;
+  #    never delete their objects (tag in place). Derive the queue URL from the
+  #    ARN and export it so deploy.sh wires the app + scaledobject to it (the
+  #    stack built no FileScanQueue output to fall back to). Same-region queue
+  #    assumed; a cross-region queue needs AWS_REGION adjusted for KEDA polling.
+  #  - existing-user-bucket mode: never delete; tag in place.
+  #  - created-bucket mode: delete source after moving a malicious file to
+  #    quarantine ("move"); clean files are tagged in place regardless.
+  if [ -n "${EXTERNAL_SCAN_QUEUE_ARN:-}" ]; then
+    EXT_REGION=$(echo "$EXTERNAL_SCAN_QUEUE_ARN" | cut -d: -f4)
+    EXT_ACCOUNT=$(echo "$EXTERNAL_SCAN_QUEUE_ARN" | cut -d: -f5)
+    EXT_NAME=$(echo "$EXTERNAL_SCAN_QUEUE_ARN" | cut -d: -f6)
+    export SQS_QUEUE_URL="https://sqs.${EXT_REGION}.amazonaws.com/${EXT_ACCOUNT}/${EXT_NAME}"
+    export DELETE_SOURCE_ENABLED="false"
+    echo "External-queue mode: scanner-app will drain ${SQS_QUEUE_URL}"
+  elif [ -n "$EXISTING_INGEST_BUCKET" ]; then
     export DELETE_SOURCE_ENABLED="false"
   else
     export DELETE_SOURCE_ENABLED="true"
