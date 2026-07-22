@@ -65,6 +65,12 @@ for o in outputs:
   fi
 fi
 
+# Optional buckets: bind to empty if never set (external-queue mode has no
+# stack ingest bucket; no review bucket without the review pipeline). Keeps
+# `set -u` happy when the Outputs-fallback block above was skipped.
+S3_INGEST_BUCKET="${S3_INGEST_BUCKET:-}"
+S3_REVIEW_BUCKET="${S3_REVIEW_BUCKET:-}"
+
 # Review routing: explicit env wins; otherwise route to review only if a
 # review bucket exists (i.e. the review pipeline was deployed).
 if [ -z "${REVIEW_ROUTING_ENABLED:-}" ]; then
