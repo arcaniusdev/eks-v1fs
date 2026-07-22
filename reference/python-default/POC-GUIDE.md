@@ -45,10 +45,10 @@
 
 > **This is the **python-default** option: the V1FS scanner scales on the chart's own CPU/memory HPA — TrendAI's supported autoscaling (`ScannerScalingMode=hpa`, the default). A single reused Python SDK connection is the standard integration.**
 
-A single CloudFormation template stands up an EKS cluster running the **TrendAI Vision One File Security scanner**, installed from the official Helm chart. In this deployment the scanner fleet is scaled by **KEDA on SQS queue depth** — the number of scanner pods tracks your scan backlog directly, rather than reacting to CPU. (This is a queue-driven variant tuned for an SQS-fed workload: the chart's own CPU/memory HPA is disabled so the two autoscalers don't conflict — see §17, and note the supportability trade-off there.)
+A single CloudFormation template stands up an EKS cluster running the **TrendAI Vision One File Security scanner**, installed from the official Helm chart. In this deployment the scanner fleet is scaled by the **chart's own CPU/memory HorizontalPodAutoscaler** (`ScannerScalingMode=hpa`, the default) — TrendAI's supported autoscaling mechanism. (Our optional scanning application scales separately on SQS queue depth via KEDA; that's a different component from the chart-owned scanner — see §17.)
 
 ```text
-[Your files (S3 upload, or your own app)] ──▶ [V1FS Scanner on EKS (official chart · KEDA queue-depth scaling)] ──▶ [Verdicts (clean tagged in place / malicious to quarantine)]
+[Your files (S3 upload, or your own app)] ──▶ [V1FS Scanner on EKS (official chart · chart HPA CPU/mem scaling)] ──▶ [Verdicts (clean tagged in place / malicious to quarantine)]
 ```
 
 Files are scanned **inside your VPC** — the bytes never leave your account. Scan metadata (verdicts, threat names) reports to your Vision One console. Around the scanner core, optional modules — a complete S3 scanning pipeline, a deep-analysis review pipeline, an external endpoint — turn on and off with template parameters.
@@ -90,7 +90,7 @@ flowchart TB
     LB["Internal NLB or ALB<br/>gRPC :50051 / TLS :443"]:::endpoint
 
     subgraph EKS["EKS cluster — managed node group r8g.xlarge × 2–8, Cluster Autoscaler"]
-      V1FS["V1FS scanner<br/>KEDA 1–10 on queue depth"]:::core
+      V1FS["V1FS scanner<br/>chart HPA 1–10 · CPU/mem"]:::core
       SUP["V1FS support pods<br/>management · database · cache · communicator"]:::core
       RV["V1FS rv release<br/>no decompression limits · HPA 1–3"]:::review
       APP["scanner-app<br/>KEDA 1–20 on queue depth"]:::app
@@ -353,7 +353,7 @@ Every step below is something you would otherwise type yourself, in this order. 
 | Command | What it does | Reference |
 |---|---|---|
 | `helm repo add visionone-filesecurity …` + `gpg --import` + `helm pull --verify` | Adds TrendAI's chart repository and cryptographically verifies the chart signature before installing anything | [Helm provenance](https://helm.sh/docs/topics/provenance/) |
-| `helm install my-release … --version 1.4.10 -f values-base.yaml` | The scanner itself — pinned version, chart HPA **disabled** (KEDA scales the scanner on queue depth instead), storage wired to the classes above, endpoint mode applied | [V1FS Helm chart](https://trendmicro.github.io/visionone-file-security-helm/) |
+| `helm install my-release … --version 1.4.10 -f values-base.yaml` | The scanner itself — pinned version, chart **HPA enabled** (CPU/memory, TrendAI's supported autoscaling), storage wired to the classes above, endpoint mode applied | [V1FS Helm chart](https://trendmicro.github.io/visionone-file-security-helm/) |
 | `kubectl exec … clish scanner scan-policy modify …` | Applies the four decompression limits from your stack parameters — the scanner ships with no limits (see [§16](#16-tune-the-scan-policy)) | [Containerized Scanner](https://docs.trendmicro.com/en-us/documentation/article/trend-vision-one-file-security-containerized-scanner) |
 | `helm install rv …` *(review module)* | The second, no-limits scanner release in its own namespace | [V1FS Helm chart](https://trendmicro.github.io/visionone-file-security-helm/) |
 
@@ -592,7 +592,7 @@ Public documentation germane to this deployment, grouped by what you're trying t
 |---|---|
 | [Cluster Autoscaler on AWS](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler/cloudprovider/aws) | Node scaling — configuration flags, ASG auto-discovery |
 | [AWS Load Balancer Controller](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/) | Creates the scanner's NLB (or ALB) — service annotations, ingress annotations, IAM policy |
-| [KEDA — AWS SQS scaler](https://keda.sh/docs/latest/scalers/aws-sqs/) | Queue-depth scaling — for both the bundled scanning app AND the V1FS scanner fleet on this branch (the chart's own HPA is disabled) |
+| [KEDA — AWS SQS scaler](https://keda.sh/docs/latest/scalers/aws-sqs/) | Queue-depth scaling for the bundled scanning app (the V1FS scanner itself uses the chart's own CPU/memory HPA in this option) |
 
 
 ### Testing
