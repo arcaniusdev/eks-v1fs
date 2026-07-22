@@ -17,6 +17,7 @@
 **Part II — Integrate**
 
 8. [Find your endpoint](#8-find-your-endpoint)
+    - [8a. Scaling a high-volume client — pull / semaphore dispatcher](#8a-scaling-a-high-volume-client--the-pull--semaphore-dispatcher)
 9. [Java: add the SDK](#9-java-add-the-sdk)
 10. [Java: open the connection](#10-java-open-the-connection)
 11. [Java: reuse the connection](#11-java-reuse-the-connection)
@@ -404,14 +405,45 @@ aws ssm get-parameter --name /v1fs-eval-1/scanner-endpoint \
 > [!IMPORTANT]
 > **The plaintext NLB endpoint does not check your API key.** Network access *is* the access control — that's why it's VPC-internal only. Still pass a real API key in your code: the same code then works unchanged against TLS endpoints and Trend's cloud service, which do enforce it.
 
-### Scaling a high-volume client across the scanner fleet
+The sections below use **Java** for the basic single-connection client. For a high-volume, queue-fed client, read **§8a** first — a single connection alone will hot-spot one scanner pod.
 
-The NLB is Layer 4: it balances whole *connections*, not individual scans. A single gRPC client reuses one connection, so all its scans pin to **one** scanner pod — fine at low volume, but a hot-spot for a busy, queue-fed client. On this deployment the NLB does double duty as a **pod-discovery registry**: its target group (`target-type=ip`) tracks the live scanner pod IPs, and a client can read them with the ELB `DescribeTargetHealth` API and connect **directly** to pods — spreading scans across the whole fleet with no L7 hop.
+## 8a. Scaling a high-volume client — the pull / semaphore dispatcher
 
-A worked reference for exactly this — SQS drain + target-group pod discovery + a per-pod client pool that hands each scan to the least-busy pod (with backpressure and redelivery) — is in [`reference/java-consumer/`](../reference/java-consumer/). The design rationale (why L4 hot-spots, why not L7, and the pull/competing-consumers pattern) is written up in `temp/scanner-load-balancing.html`.
+If your workload is a queue feeding a busy service (an SQS-fed API gateway, for example), how the client spreads scans across the scanner fleet matters as much as the scanner's own autoscaling. This section explains the architecture this deployment is built for.
 
-The sections below use **Java**. Equivalent SDKs exist for Python, Go, and Node.js with the same concepts: one client, a reused connection, JSON verdicts.
+### Why a single connection hot-spots
 
+gRPC opens **one** connection and reuses it for every scan (§11) — the efficient, recommended pattern. But the NLB is **Layer 4**: it balances whole *connections*, choosing a backend pod once at connect time and pinning every packet on that connection to it. So one reused client connection sends **all** its scans to **one** scanner pod — the other pods sit idle, no matter how far KEDA scales the fleet. And an L7 ALB would fix the balancing but add a termination hop of latency. Neither is ideal for a latency-sensitive, high-volume client.
+
+### The answer: pull the work, discover the pods, balance in the client
+
+Move the balancing into the client and let it flow by demand — the *competing-consumers* pattern, with no load balancer in the scan path:
+
+```text
+                 ┌─ worker ─┐   acquire least-busy pod slot
+ SQS queue ──▶   │  pool    │ ─────────────────────────────▶  scanner pod A  [■■□]  (2/3 busy)
+ (your work) ◀── │ (compete │ ◀── verdict ── direct gRPC ───  scanner pod B  [■□□]  ← picked (most free)
+     ack/redeliver│ for msgs)│                                 scanner pod C  [■■■]  (full, skipped)
+                 └──────────┘        ▲
+                 pod roster + health ─┘  ELB DescribeTargetHealth on the NLB target group (every ~20s)
+```
+
+Three moving parts:
+
+1. **Pod discovery via the NLB target group.** The NLB does double duty as a **registry**: with `target-type=ip` its target group tracks the live scanner pod IPs and health-checks each one. The client reads them with the ELB `DescribeTargetHealth` API (no Kubernetes access needed) and connects **directly** to pods — the NLB is never in the scan path (no L4 pinning, no L7 latency). A background refresh picks up pods as KEDA scales the fleet and drains them on scale-down.
+2. **A per-pod client pool with capacity semaphores.** One `AMaasClient` (one reused connection) per scanner pod, each guarded by a semaphore = its free scan "slots."
+3. **Least-busy dispatch + backpressure.** Each scan goes to the pod with the **most free slots**. If every pod is full, the worker blocks until one frees — that backpressure ripples out to the queue, which simply holds the backlog (nothing is dropped). A pod stuck on a slow file naturally receives less, so load self-levels without anyone computing it.
+
+### Reliability — two independent safety nets
+
+- **The queue** — a message is deleted only after a successful scan + action; any failure leaves it to **redeliver** to another worker. Nothing is lost if a worker or pod dies mid-scan.
+- **The dispatcher** — a pod-level gRPC error is retried on a **different** pod; a pod that goes unhealthy/draining is dropped from rotation on the next refresh.
+
+### Use the worked reference
+
+A complete, adapt-me implementation is in [`reference/java-consumer/`](../reference/java-consumer/) — SQS drain, target-group discovery, the per-pod pool, least-busy dispatch, and both reliability nets. The full design rationale (L4 vs L7, why pull beats push, the SDK channel constraints) is in `temp/scanner-load-balancing.html`.
+
+> The V1FS SDK builds a bare gRPC channel (no client-side `round_robin`/`least_request` and no channel injection), so this client-side dispatcher — not SDK config — is how you distribute a single client's scans across the fleet.
 
 ## 9. Java: add the SDK
 
