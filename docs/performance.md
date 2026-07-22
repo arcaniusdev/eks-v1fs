@@ -1,16 +1,20 @@
 # Performance and Scaling
 
-## Autoscaling Architecture (July 2026 realignment)
+## Autoscaling Architecture (keda-scanner-queue-depth branch)
 
-The V1FS scanner scales via the **Helm chart's own HPA** — the TrendAI-supported autoscaling mechanism — and KEDA scales **only our scanner-app**. Nodes scale via the standard Cluster Autoscaler on a single managed node group that hosts all workloads.
+On this branch the V1FS scanner is scaled by **KEDA on SQS queue depth** so the scanner fleet tracks the backlog directly (a queue-driven variant, for an SQS-fed workload). KEDA also scales our scanner-app. The chart's own CPU/memory HPA is **disabled** so the two don't conflict. Nodes scale via the standard Cluster Autoscaler on a single managed node group.
 
-### Chart HPA (V1FS scanner pods)
-- `scanner.autoscaling.enabled=true` in `helm/values-base.yaml` (single source of truth for chart values)
-- Targets: CPU 80% / memory 80% (chart defaults)
-- Range: `ScannerMinReplicas` (default 1) to `ScannerMaxReplicas` (default 10) — CloudFormation parameters, applied via `--set` at install/upgrade time
-- Requires Metrics Server (installed by bootstrap)
-- The review release `rv` has its own chart HPA: min 1 / max 3
-- Do NOT create KEDA ScaledObjects targeting the chart-owned scanner — the old `v1fs-scanner-sqs-scaler` and `review-v1fs-scanner-sqs-scaler` ScaledObjects are deleted
+> This differs from TrendAI's *supported* autoscaling (the chart's CPU/mem HPA). It is a deliberate customer choice; `scripts/upgrade.py` enforces the invariant and fails an upgrade if a chart HPA reappears alongside KEDA.
+
+### KEDA — V1FS scanner pods (queue depth)
+- ScaledObject: `v1fs-scanner-sqs-scaler` (`k8s/scanner-scaledobject.yaml`), TriggerAuthentication `scanner-sqs-trigger-auth`
+- Trigger: `aws-sqs-queue` on `ApproximateNumberOfMessages`, `scaleOnInFlight: true`
+- Queue length target: `SCANNER_QUEUE_LENGTH` (default 50 messages per pod)
+- Range: `ScannerMinReplicas` (1) to `ScannerMaxReplicas` (10)
+- Chart HPA DISABLED: `scanner.autoscaling.enabled=false` in `helm/values-base.yaml`; polling 5s, cooldown 300s
+- **BYO mode**: set `ExternalScanQueueArn` to scale the scanner on your own SQS queue (KEDA is installed and the ScaledObject points at it; cross-account queues need a matching resource policy)
+- Fallback: in BYO with NO queue, `bootstrap.sh` re-enables the chart CPU/mem HPA so the scanner still autoscales
+- Review release `rv`: not queue-scaled on this branch (chart HPA off via values-base) — pin its replicas if you enable the review pipeline
 
 ### KEDA (scanner-app pods only)
 - ScaledObject: `scanner-app-sqs-scaler`
@@ -33,10 +37,10 @@ The V1FS scanner scales via the **Helm chart's own HPA** — the TrendAI-support
 
 | Component | Min | Max | Mechanism | Config |
 |---|---|---|---|---|
-| V1FS scanner pods | 1 | 10 | Chart HPA (CPU/mem 80%) | `ScannerMinReplicas`/`ScannerMaxReplicas` CFN params |
+| V1FS scanner pods | 1 | 10 | **KEDA (queue depth, 50 msgs/pod)** | `ScannerMinReplicas`/`ScannerMaxReplicas` CFN params |
 | Scanner-app pods | 1 | 20 | KEDA (5 msgs/pod) | `ScannerAppMaxReplicas` CFN param → `<MAX_REPLICAS>` in `k8s/scaledobject.yaml` |
 | Review scanner-app pods | 1 | 5 | KEDA (50 msgs/pod) | `k8s/review-scaledobject.yaml` |
-| Review V1FS scanner pods (`rv`) | 1 | 3 | Chart HPA | `--set` in `scripts/bootstrap.sh` |
+| Review V1FS scanner pods (`rv`) | 1 | 3 | not queue-scaled on this branch (chart HPA off) | `--set` in `scripts/bootstrap.sh` |
 | Managed node group | 2 | 8 | Cluster Autoscaler | `NodeGroupMinSize`/`MaxSize` CFN params |
 
 ## Expected Scale-Up Latency
