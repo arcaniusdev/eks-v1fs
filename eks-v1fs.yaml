@@ -109,15 +109,27 @@ Parameters:
     AllowedValues:
       - "true"
       - "false"
+  ScannerScalingMode:
+    Type: String
+    Description: >
+      How the V1FS scanner fleet autoscales. hpa (default) = the chart's own
+      CPU/memory HPA — TrendAI's supported mechanism (python-default option).
+      keda = KEDA scales the scanner on SQS queue depth so the fleet tracks the
+      backlog (python-KEDA / java-KEDA options); requires a queue — the stack's
+      own in full-auto, or ExternalScanQueueArn in BYO. keda disables the chart
+      HPA; upgrade.py enforces exactly one autoscaler.
+    Default: "hpa"
+    AllowedValues:
+      - "hpa"
+      - "keda"
   ExternalScanQueueArn:
     Type: String
     Description: >
-      BYO mode: ARN of YOUR existing SQS queue that feeds scan work. When set,
-      KEDA is installed and scales the V1FS scanner on this queue's depth (the
-      scanner fleet tracks your backlog), and the chart HPA is disabled. Leave
-      empty in full-auto (the stack's own scan queue is used). Cross-account
-      queue: your queue's resource policy must allow the KedaOperatorRole
-      principal sqs:GetQueueAttributes.
+      BYO + ScannerScalingMode=keda: ARN of YOUR existing SQS queue that feeds
+      scan work; KEDA scales the V1FS scanner on its depth. Leave empty in
+      full-auto (the stack's own scan queue is used). Cross-account queue: your
+      queue's resource policy must allow the KedaOperatorRole principal
+      sqs:GetQueueAttributes.
     Default: ""
   ScannerAppMaxReplicas:
     Type: Number
@@ -298,8 +310,11 @@ Conditions:
   CreateNetwork: !Equals [!Ref ExistingVpcId, ""]
   ScannerAppEnabled: !Equals [!Ref DeployScannerApp, "true"]
   HasExternalScanQueue: !Not [!Equals [!Ref ExternalScanQueueArn, ""]]
-  # KEDA is installed for the scanner-app (full-auto) OR to scale the scanner
-  # on a customer-provided external queue (BYO).
+  ScannerKeda: !Equals [!Ref ScannerScalingMode, "keda"]
+  # KEDA is installed (and its operator role created) exactly when there is a
+  # queue for it to watch: the scanner-app queue (full-auto) or an external
+  # queue (BYO). keda mode without either falls back to the chart HPA, so it
+  # does not by itself require KEDA.
   KedaNeeded: !Or
     - !Equals [!Ref DeployScannerApp, "true"]
     - !Not [!Equals [!Ref ExternalScanQueueArn, ""]]
@@ -1841,6 +1856,7 @@ Resources:
             export DEPLOY_SCANNER_APP="${DeployScannerApp}"
             export DEPLOY_REVIEW="${DeployReviewPipeline}"
             export EXTERNAL_SCAN_QUEUE_ARN="${ExternalScanQueueArn}"
+            export SCANNER_SCALING_MODE="${ScannerScalingMode}"
             export ENDPOINT_MODE="${ScannerEndpointMode}"
             export ACM_CERT_ARN="${ACMCertificateArn}"
             export SELF_SIGNED_CERT="${SelfSignedScannerCert}"

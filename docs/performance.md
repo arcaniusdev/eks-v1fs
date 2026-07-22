@@ -1,12 +1,15 @@
 # Performance and Scaling
 
-## Autoscaling Architecture (keda-scanner-queue-depth branch)
+## Autoscaling Architecture (`ScannerScalingMode`)
 
-On this branch the V1FS scanner is scaled by **KEDA on SQS queue depth** so the scanner fleet tracks the backlog directly (a queue-driven variant, for an SQS-fed workload). KEDA also scales our scanner-app. The chart's own CPU/memory HPA is **disabled** so the two don't conflict. Nodes scale via the standard Cluster Autoscaler on a single managed node group.
+The V1FS scanner autoscales one of two ways, chosen by the `ScannerScalingMode` parameter:
 
-> This differs from TrendAI's *supported* autoscaling (the chart's CPU/mem HPA). It is a deliberate customer choice; `scripts/upgrade.py` enforces the invariant and fails an upgrade if a chart HPA reappears alongside KEDA.
+- **`hpa` (default, TrendAI-supported)** — the chart's own CPU/memory HPA (targets 80%/80%, min/max from `ScannerMinReplicas`/`ScannerMaxReplicas`). Used by the **python-default** option.
+- **`keda`** — KEDA scales the scanner on SQS **queue depth** so the fleet tracks the backlog; the chart HPA is disabled. Used by the **python-KEDA** / **java-KEDA** options. A customer variant, *not* Trend-supported; `scripts/upgrade.py` enforces exactly one autoscaler and fails an upgrade if a chart HPA reappears alongside KEDA.
 
-### KEDA — V1FS scanner pods (queue depth)
+Either way, KEDA scales our scanner-app (full-auto) on queue depth, and nodes scale via the standard Cluster Autoscaler on a single managed node group.
+
+### `keda` mode — V1FS scanner pods (queue depth)
 - ScaledObject: `v1fs-scanner-sqs-scaler` (`k8s/scanner-scaledobject.yaml`), TriggerAuthentication `scanner-sqs-trigger-auth`
 - Trigger: `aws-sqs-queue` on `ApproximateNumberOfMessages`, `scaleOnInFlight: true`
 - Queue length target: `SCANNER_QUEUE_LENGTH` (default 50 messages per pod)
@@ -74,7 +77,7 @@ On this branch the V1FS scanner is scaled by **KEDA on SQS queue depth** so the 
 The review pipeline handles low-volume deep analysis of files that exceeded the main scanner's decompression limits (nesting depth, file count, compression ratio, or total decompressed size). It is optional and OFF by default (`DeployReviewPipeline=false`). When deployed, it re-scans these files using the `rv` V1FS release with no decompression limits. When NOT deployed, the main scanner quarantines decompression-limit files with explanatory tags instead (they are never routed to clean — they were not fully inspected).
 
 - **KEDA ScaledObject**: `review-scanner-app-sqs-scaler` — review-scanner-app pods, min 1 / max 5, threshold 50 messages, polling 5s, cooldown 300s
-- **Chart HPA**: `rv` scanner pods, min 1 / max 3
+- **`rv` scanner pods**: min 1 / max 3, not queue-scaled on this branch (chart HPA off) — pin replicas if you enable review
 - **Always-warm** — one pod of each always running to avoid cold-start gRPC connection failures when files arrive for review
 - **No PDB** — the review pipeline is low-volume
 

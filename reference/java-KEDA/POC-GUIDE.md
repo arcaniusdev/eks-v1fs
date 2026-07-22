@@ -1,4 +1,4 @@
-# The POC Guide
+# V1FS on EKS — POC Guide (java-KEDA: queue-depth scaling + Java pull consumer)
 
 > Everything needed to evaluate Vision One File Security on EKS: deploy the stack, scan your first files, connect your own application in Java, and tear it all down cleanly. One API key and about 30 minutes gets you a running scanner.
 
@@ -42,6 +42,8 @@
 
 
 ## 1. What you're evaluating
+
+> **This is the **java-KEDA** option: the V1FS scanner is scaled by KEDA on SQS queue depth (`ScannerScalingMode=keda`), and a **Java** client-side pull/semaphore dispatcher spreads scans across the fleet.**
 
 A single CloudFormation template stands up an EKS cluster running the **TrendAI Vision One File Security scanner**, installed from the official Helm chart. In this deployment the scanner fleet is scaled by **KEDA on SQS queue depth** — the number of scanner pods tracks your scan backlog directly, rather than reacting to CPU. (This is a queue-driven variant tuned for an SQS-fed workload: the chart's own CPU/memory HPA is disabled so the two autoscalers don't conflict — see §17, and note the supportability trade-off there.)
 

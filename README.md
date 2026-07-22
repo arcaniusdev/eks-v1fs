@@ -4,6 +4,23 @@ Malware scanning on AWS, deployed the way TrendAI supports it. A single CloudFor
 
 Everything deploys from one template — the EKS cluster, networking, storage, the scanner itself, and (if enabled) the queues, buckets, IAM, and scanning application.
 
+## Deployment options
+
+The same template supports three deployment scenarios, selected by two parameters — `ScannerScalingMode` (`hpa` | `keda`) and the language of the client that submits scans. Each scenario has its own worked reference and POC guide under [`reference/`](reference/):
+
+| Option | Scanner autoscaling | Client / pull consumer | Use when | Guide |
+|---|---|---|---|---|
+| **python-default** | Chart **HPA** (CPU/mem) — *TrendAI-supported* | Basic Python SDK client (one reused connection) | You want the supported baseline; moderate/steady volume | [reference/python-default/POC-GUIDE.md](reference/python-default/POC-GUIDE.md) |
+| **python-KEDA** | **KEDA** on SQS **queue depth** | **Python** pull/semaphore dispatcher | The scanner fleet must track a queue backlog; Python client | [reference/python-KEDA/POC-GUIDE.md](reference/python-KEDA/POC-GUIDE.md) |
+| **java-KEDA** | **KEDA** on SQS **queue depth** | **Java** pull/semaphore dispatcher | Same as above; Java client | [reference/java-KEDA/POC-GUIDE.md](reference/java-KEDA/POC-GUIDE.md) |
+
+Common to all three: **NLB endpoint by default** (ALB with a self-signed cert is opt-in via `ScannerEndpointMode`), **Graviton/ARM-capable** nodes, and the same CloudFormation template + bootstrap.
+
+- **`ScannerScalingMode=hpa` (default)** — the chart's own CPU/memory HPA scales the scanner. This is TrendAI's supported autoscaling.
+- **`ScannerScalingMode=keda`** — KEDA scales the scanner on SQS queue depth so the fleet size follows the backlog (needs a queue: the stack's own in full-auto, or `ExternalScanQueueArn` in BYO). The chart HPA is disabled; `scripts/upgrade.py` enforces exactly one autoscaler. This is a customer variant, *not* the TrendAI-supported path.
+
+The **KEDA** options additionally use the NLB target group as a **pod-discovery registry**: the client-side pull/semaphore dispatcher (in `reference/python-KEDA/` or `reference/java-KEDA/`) reads healthy scanner pod IPs via the ELB `DescribeTargetHealth` API and connects directly to pods — no load balancer in the scan path, no L7 latency. See each option's POC guide (§8a) for the architecture.
+
 ## What is Vision One File Security?
 
 Vision One File Security is TrendAI's malware scanning service for files. It uses multiple detection engines — pattern matching, heuristics, and predictive machine learning (PML) — to identify threats in files of any type.

@@ -30,6 +30,25 @@ if [ "${ENDPOINT_MODE:-}" = "auto" ]; then
   echo "Resolved ScannerEndpointMode=auto -> nlb"
 fi
 
+# Resolve the scanner autoscaler:
+#   hpa  -> the chart's CPU/mem HPA (TrendAI-supported; python-default option)
+#   keda -> KEDA scales the scanner on SQS queue depth (python-KEDA/java-KEDA).
+# keda needs a queue: full-auto uses the stack's queue (deploy.sh applies the
+# ScaledObject); BYO uses ExternalScanQueueArn (applied later in this script).
+# keda with no queue available falls back to hpa so the scanner still scales.
+SCANNER_KEDA=false
+if [ "${SCANNER_SCALING_MODE:-hpa}" = "keda" ]; then
+  if [ "${DEPLOY_SCANNER_APP:-}" = "true" ] || [ -n "${EXTERNAL_SCAN_QUEUE_ARN:-}" ]; then
+    SCANNER_KEDA=true
+    echo "Scanner autoscaler: KEDA on queue depth (chart HPA disabled)"
+  else
+    echo "WARNING: ScannerScalingMode=keda but no scan queue (BYO without ExternalScanQueueArn) — falling back to chart HPA."
+  fi
+else
+  echo "Scanner autoscaler: chart CPU/mem HPA (TrendAI-supported)"
+fi
+export SCANNER_KEDA
+
 # Ensure /usr/local/bin is on PATH and KUBECONFIG is set for SSH sessions
 echo 'export PATH=/usr/local/bin:$PATH' > /etc/profile.d/local-bin.sh
 echo 'export KUBECONFIG=/root/.kube/config' >> /etc/profile.d/local-bin.sh
@@ -278,15 +297,12 @@ fi
 # fresh install without it (we don't use ONTAP agents). Pre-create it empty.
 kubectl create configmap ontap-agent-config -n visionone-filesecurity 2>/dev/null || true
 
-# Scanner autoscaler selection (this branch):
-#   full-auto (our SQS queue) OR BYO-with-external-queue -> KEDA scales the
-#     scanner on queue depth; chart HPA stays DISABLED (values-base
-#     autoscaling.enabled=false). The ScaledObject is applied by deploy.sh
-#     (full-auto) or below (BYO+external). Bounds live on it, so pass nothing.
-#   BYO with NO queue (no scanner-app, no external queue) -> fall back to the
-#     chart's CPU/mem HPA so the scanner still autoscales; re-enable it here.
-if [ "$DEPLOY_SCANNER_APP" = "true" ] || [ -n "${EXTERNAL_SCAN_QUEUE_ARN:-}" ]; then
-  SCANNER_AUTOSCALE_ARGS=""   # KEDA owns scanner scaling; chart HPA off
+# Chart HPA args follow the scanner autoscaler resolved at the top:
+#   keda -> disable the chart HPA (KEDA owns scanner scaling; the ScaledObject
+#           is applied by deploy.sh in full-auto or below for BYO+external).
+#   hpa  -> enable the chart HPA with the CFN replica bounds.
+if [ "$SCANNER_KEDA" = "true" ]; then
+  SCANNER_AUTOSCALE_ARGS="--set scanner.autoscaling.enabled=false"
 else
   SCANNER_AUTOSCALE_ARGS="--set scanner.autoscaling.enabled=true \
     --set scanner.autoscaling.minReplicas=$SCANNER_MIN_REPLICAS \
@@ -391,7 +407,7 @@ fi
 # In full-auto, deploy.sh applies this ScaledObject against our queue. In BYO
 # (deploy.sh is not run) with an external queue, apply it here against that
 # queue so the scanner fleet still tracks the backlog. The chart HPA is off.
-if [ "$DEPLOY_SCANNER_APP" != "true" ] && [ -n "${EXTERNAL_SCAN_QUEUE_ARN:-}" ]; then
+if [ "$SCANNER_KEDA" = "true" ] && [ "$DEPLOY_SCANNER_APP" != "true" ]; then
   echo "Applying KEDA scanner ScaledObject for external queue..."
   # arn:aws:sqs:REGION:ACCOUNT:NAME -> URL. Region taken from the ARN so a
   # cross-region queue resolves correctly.

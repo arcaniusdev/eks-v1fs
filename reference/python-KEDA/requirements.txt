@@ -1,0 +1,2 @@
+visionone-filesecurity==1.4.1
+boto3>=1.34
