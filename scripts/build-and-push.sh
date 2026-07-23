@@ -6,7 +6,20 @@ set -euo pipefail
 : "${AWS_REGION:?ERROR: AWS_REGION environment variable is not set}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-APP_DIR="$SCRIPT_DIR/../app"
+
+# Scanner-app flavor: python (app/) or java (app-java/). Both produce an image
+# named scanner-app:latest with an identical Dockerfile contract (non-root,
+# read-only-fs compatible, reads the same env vars), so everything downstream
+# (tag, push, deploy) is flavor-agnostic. The java build is a multi-stage
+# Maven+JRE image; under QEMU cross-build (x86 bastion → ARM node) its Maven
+# stage runs emulated, so expect it to take longer than the Python build.
+SCANNER_APP_FLAVOR="${SCANNER_APP_FLAVOR:-python}"
+case "$SCANNER_APP_FLAVOR" in
+  python) APP_DIR="$SCRIPT_DIR/../app" ;;
+  java)   APP_DIR="$SCRIPT_DIR/../app-java" ;;
+  *) echo "ERROR: unknown SCANNER_APP_FLAVOR=$SCANNER_APP_FLAVOR (want python|java)" >&2; exit 1 ;;
+esac
+echo "Scanner-app flavor: $SCANNER_APP_FLAVOR (build context: $APP_DIR)"
 
 if [ -z "${ECR_REPO_URL:-}" ]; then
   : "${CFN_STACK_NAME:?ERROR: Either ECR_REPO_URL or CFN_STACK_NAME must be set}"
