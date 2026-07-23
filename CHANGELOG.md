@@ -28,6 +28,13 @@ scripts, app code, and Helm values.
   three separate programs; POC guides rewritten to match.
 - Java image builds its Maven stage natively via `$BUILDPLATFORM` (arch-independent
   jar), so cross-building for ARM nodes no longer emulates the whole build.
+### Fixed
+- Pull-mode target-group discovery runs on the bastion; granted the bastion role
+  `elasticloadbalancing:DescribeLoadBalancers`/`DescribeTargetGroups` (without them
+  discovery silently fell back to clusterip).
+- Python ELB client service name corrected to botocore's `elbv2` (was
+  `elasticloadbalancingv2`, which crashed pull mode at startup). The Java SDK's
+  `elasticloadbalancingv2` name is correct and unchanged.
 
 ## [2.1.1]
 ### Fixed

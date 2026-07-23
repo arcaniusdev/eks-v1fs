@@ -10,7 +10,7 @@ Parameters:
       matches this template, so the deployed components always match the template
       you launched. Override with a branch name (e.g. main) only for development.
     Type: String
-    Default: v2.1.1
+    Default: v2.2.0
   PrimaryAZ:
     Description: Availability Zone 1 (ignored when deploying into an existing VPC)
     Type: AWS::EC2::AvailabilityZone::Name
