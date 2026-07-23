@@ -31,3 +31,6 @@ docs/*.html
 
 # Temp working directory (local only)
 temp/
+
+# Java build output
+app-java/target/
