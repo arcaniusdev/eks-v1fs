@@ -996,6 +996,15 @@ Resources:
                 Resource:
                   - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/scanner-endpoint
                   - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/scanner-ca-cert
+              # Pull dispatch: the bastion discovers the scanner NLB target-group
+              # ARN (to hand to the app) via these read-only ELB describes. They
+              # have no resource-level scoping (require *).
+              - Sid: ELBDiscovery
+                Effect: Allow
+                Action:
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - elasticloadbalancing:DescribeTargetGroups
+                Resource: "*"
               - !If
                 - ExposeALB
                 # Self-signed ALB cert: import a freshly-generated cert into ACM
