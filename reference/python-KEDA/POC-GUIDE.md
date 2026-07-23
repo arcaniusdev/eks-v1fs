@@ -1,6 +1,6 @@
 # V1FS on EKS — POC Guide (python-KEDA: queue-depth scaling + Python pull consumer)
 
-> Everything needed to evaluate Vision One File Security on EKS: deploy the stack, scan your first files, connect your own application in Java, and tear it all down cleanly. One API key and about 30 minutes gets you a running scanner.
+> Everything needed to evaluate Vision One File Security on EKS: deploy the stack, scan your first files, connect your own application in Python, and tear it all down cleanly. One API key and about 30 minutes gets you a running scanner.
 
 ## Contents
 
@@ -18,13 +18,7 @@
 
 8. [Find your endpoint](#8-find-your-endpoint)
     - [8a. Scaling a high-volume client — pull / semaphore dispatcher](#8a-scaling-a-high-volume-client--the-pull--semaphore-dispatcher)
-9. [Java: add the SDK](#9-java-add-the-sdk)
-10. [Java: open the connection](#10-java-open-the-connection)
-11. [Java: reuse the connection](#11-java-reuse-the-connection)
-12. [Java: submit scans](#12-java-submit-scans)
-13. [Read the response](#13-read-the-response)
-14. [When things go wrong](#14-when-things-go-wrong)
-15. [Complete working example](#15-complete-working-example)
+9. [Python: connect and scan](#9-python-connect-and-scan)
 
 **Part III — Operate & Wrap Up**
 
@@ -43,9 +37,9 @@
 
 ## 1. What you're evaluating
 
-> **This is the **python-KEDA** option: the V1FS scanner is scaled by KEDA on SQS queue depth (`ScannerScalingMode=keda`), and a **Python** client-side pull/semaphore dispatcher spreads scans across the fleet.**
+> **This is the **python-KEDA** scenario of one unified scanning app: `ScannerAppFlavor=python` + `ScannerDispatchMode=pull` + `ScannerScalingMode=keda`. The V1FS scanner is scaled by KEDA on SQS queue depth, and the Python app runs in **pull** dispatch mode — discovering live scanner pod IPs and spreading scans across the fleet itself (§8a).**
 
-A single CloudFormation template stands up an EKS cluster running the **TrendAI Vision One File Security scanner**, installed from the official Helm chart. In this deployment the scanner fleet is scaled by **KEDA on SQS queue depth** — the number of scanner pods tracks your scan backlog directly, rather than reacting to CPU. (This is a queue-driven variant tuned for an SQS-fed workload: the chart's own CPU/memory HPA is disabled so the two autoscalers don't conflict — see §17, and note the supportability trade-off there.)
+A single CloudFormation template stands up an EKS cluster running the **TrendAI Vision One File Security scanner**, installed from the official Helm chart. The scanning application that drives the S3 pipeline comes in two feature-equivalent language flavors — Python (`app/scanner.py`) and Java (`app-java/`) — selected by `ScannerAppFlavor`; this scenario uses the **Python** flavor (`ScannerAppFlavor=python`) in **pull** dispatch mode (`ScannerDispatchMode=pull`), where the app discovers live scanner pod IPs and dispatches each scan to the least-busy pod directly (§8a). The scanner fleet is scaled by **KEDA on SQS queue depth** (`ScannerScalingMode=keda`) — the number of scanner pods tracks your scan backlog directly, rather than reacting to CPU. (This is a queue-driven variant tuned for an SQS-fed workload: the chart's own CPU/memory HPA is disabled so the two autoscalers don't conflict — see §17, and note the supportability trade-off there.)
 
 ```text
 [Your files (S3 upload, or your own app)] ──▶ [V1FS Scanner on EKS (official chart · KEDA queue-depth scaling)] ──▶ [Verdicts (clean tagged in place / malicious to quarantine)]
@@ -142,6 +136,19 @@ Four parameter combinations cover the common evaluation goals. Everything else d
 | **Deep archive analysis** | `DeployReviewPipeline=true` | Adds a second scanner with no decompression limits that re-scans archives too deep/large for the main policy before the final verdict. |
 
 Modes combine (e.g. existing bucket + review pipeline). Invalid combinations are rejected at stack creation by built-in rules.
+
+
+### App flavor, dispatch, and scaling
+
+Three more parameters select the *shape* of the deployment — which language the scanning app is, how it reaches the scanner, and how the scanner scales. This guide documents one fixed combination; the other combinations have their own guides.
+
+| Parameter | Values | This scenario (python-KEDA) |
+|---|---|---|
+| `ScannerAppFlavor` | `python` (default) · `java` | **`python`** — the app is `app/scanner.py` |
+| `ScannerDispatchMode` | `clusterip` (default) · `pull` | **`pull`** — the app discovers scanner pod IPs from the NLB target group and dispatches to the least-busy pod (§8a) |
+| `ScannerScalingMode` | `hpa` (default) · `keda` | **`keda`** — the scanner scales on SQS queue depth (§17 covers the supportability trade-off) |
+
+Both flavors are feature-equivalent and read the same configuration; the flavor and dispatch modes are described in §6. `pull` mode requires an NLB endpoint — `ScannerEndpointMode=auto` (the default) provides one and doubles as the pod-discovery registry. The supported chart-HPA baseline with simple `clusterip` dispatch is the **python-default** guide.
 
 
 ## 4. Deploy the stack
@@ -254,7 +261,9 @@ Three other places to see results: object **tags** (on every scanned object), th
 
 ## 6. Inside the scanning app
 
-The pipeline you just watched is driven by a deliberately small application: **one Python file** (`app/scanner.py`, ~600 lines), a config loader, and a 22-line Dockerfile with **three pinned dependencies** — the V1FS SDK, an async AWS client, and boto3. Small enough to read in one sitting, which is the point: in an evaluation you should be able to see exactly what touches your files.
+The pipeline you just watched is driven by one small application. It ships in two feature-equivalent language flavors — Python (`app/scanner.py`) and Java (`app-java/`), selected by `ScannerAppFlavor` — and this scenario runs the **Python** flavor: **one Python file** (`app/scanner.py`, ~600 lines), a config loader, and a 22-line Dockerfile with **three pinned dependencies** — the V1FS SDK, an async AWS client, and boto3. Small enough to read in one sitting, which is the point: in an evaluation you should be able to see exactly what touches your files.
+
+The same one app does everything — drains SQS, scans, and routes every verdict (tag clean in place, move malicious to quarantine, send decompression-limited or oversize files to review or quarantine, write the audit trail, reconcile stragglers). How it reaches the scanner pods is a mode, set by `ScannerDispatchMode`. This scenario uses **`pull`**: instead of one connection to the in-cluster Service, the app discovers the live scanner pod IPs from the NLB target group and dispatches each scan to the least-busy pod directly — no load balancer in the scan path. That is the mode that pairs with KEDA queue-depth scanner scaling here; its architecture and rationale are in **§8a**. (The other mode, `clusterip`, is a single reused gRPC connection to the in-cluster Service — the **python-default** scenario.)
 
 
 ### How it works
@@ -292,7 +301,7 @@ A semaphore caps how many scans run at once per pod (`MAX_CONCURRENT_SCANS`, def
 | Delete-vs-tag finalization | `_finalize_source()` |
 | Every knob, with defaults and validation | `app/config.py` |
 
-If your own application will replace this module (`DeployScannerApp=false`), these same patterns — reuse one connection, bound your concurrency, heartbeat long scans, never trust a partial scan — are the ones worth carrying over. Part II shows the connection half in Java.
+If your own application will replace this module (`DeployScannerApp=false`), these same patterns — reuse connections, bound your concurrency, heartbeat long scans, never trust a partial scan — are the ones worth carrying over. Part II shows the connection half in Python.
 
 
 ## 7. What the bastion does
@@ -407,11 +416,11 @@ aws ssm get-parameter --name /v1fs-eval-1/scanner-endpoint \
 > [!IMPORTANT]
 > **The plaintext NLB endpoint does not check your API key.** Network access *is* the access control — that's why it's VPC-internal only. Still pass a real API key in your code: the same code then works unchanged against TLS endpoints and Trend's cloud service, which do enforce it.
 
-The sections below use **Java** for the basic single-connection client. For a high-volume, queue-fed client, read **§8a** first — a single connection alone will hot-spot one scanner pod.
+The section below (§9) uses **Python** for the basic single reused-connection client. But this scenario runs the app in **pull** dispatch mode, so read **§8a** first — a single connection alone will hot-spot one scanner pod.
 
 ## 8a. Scaling a high-volume client — the pull / semaphore dispatcher
 
-If your workload is a queue feeding a busy service (an SQS-fed API gateway, for example), how the client spreads scans across the scanner fleet matters as much as the scanner's own autoscaling. This section explains the architecture this deployment is built for.
+This scenario runs the app in **`DISPATCH_MODE=pull`** (`ScannerDispatchMode=pull`) — the same one app from §6, in its pull dispatch mode rather than a separate program. Instead of one connection to the in-cluster Service, the app spreads scans across the scanner fleet itself; how it does that matters as much as the scanner's own autoscaling for a busy, queue-fed workload. This section explains the architecture.
 
 ### Why a single connection hot-spots
 
@@ -441,11 +450,11 @@ Three moving parts:
 - **The queue** — a message is deleted only after a successful scan + action; any failure leaves it to **redeliver** to another worker. Nothing is lost if a worker or pod dies mid-scan.
 - **The dispatcher** — a pod-level gRPC error is retried on a **different** pod; a pod that goes unhealthy/draining is dropped from rotation on the next refresh.
 
-### Use the worked reference
+### It's the app's pull mode, not a separate program
 
-A complete, adapt-me implementation is in [`reference/java-consumer/`](../reference/java-consumer/) — SQS drain, target-group discovery, the per-pod pool, least-busy dispatch, and both reliability nets. The full design rationale (L4 vs L7, why pull beats push, the SDK channel constraints) is in `temp/scanner-load-balancing.html`.
+Everything above is built into the one app from §6 and is active whenever `ScannerDispatchMode=pull` — you don't build a separate consumer. The Python flavor's pull-mode code (SQS drain, target-group discovery, the per-pod handle pool, least-busy dispatch, and both reliability nets) lives in [`app/`](../../app/). A standalone, adapt-me illustration of the same pattern — useful if you're porting it into your own service — is in [`reference/python-KEDA/`](.) (`consumer.py` + `scanner_pool.py`). The full design rationale (L4 vs L7, why pull beats push, the SDK channel constraints) is in `temp/scanner-load-balancing.html`.
 
-> The V1FS SDK builds a bare gRPC channel (no client-side `round_robin`/`least_request` and no channel injection), so this client-side dispatcher — not SDK config — is how you distribute a single client's scans across the fleet.
+> The V1FS SDK builds a bare gRPC channel (no client-side `round_robin`/`least_request` and no channel injection), so this client-side dispatcher — the app's pull mode, not SDK config — is how a single client distributes its scans across the fleet.
 
 ## 9. Python: connect and scan
 
@@ -470,7 +479,7 @@ finally:
 - **ca_cert** — path to the self-signed cert PEM when using the ALB with `SelfSignedScannerCert=true`; otherwise `None`.
 - **Anti-pattern** — never `init()` per request or per file: you pay full connection setup each time and leak channels. Build the handle once and share it.
 
-A complete, runnable consumer for a queue-fed workload — SQS drain, NLB-target-group pod discovery, per-pod handle pool with least-busy dispatch, and two-layer redelivery reliability — is in [`reference/python-KEDA/`](.) (`consumer.py` + `scanner_pool.py`).
+In this scenario the deployed app already runs in pull mode (`DISPATCH_MODE=pull`, §8a): it drains SQS, discovers scanner pod IPs from the NLB target group, and dispatches across a per-pod handle pool with least-busy balancing and two-layer redelivery reliability — all built into the Python app at [`app/`](../../app/). A standalone, adapt-me illustration of the same pattern, for porting into your own service, is in [`reference/python-KEDA/`](.) (`consumer.py` + `scanner_pool.py`).
 
 ## 16. Tune the scan policy
 

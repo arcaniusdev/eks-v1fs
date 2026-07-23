@@ -1,6 +1,6 @@
 # V1FS on EKS — POC Guide (python-default: Trend-supported chart HPA)
 
-> Everything needed to evaluate Vision One File Security on EKS: deploy the stack, scan your first files, connect your own application in Java, and tear it all down cleanly. One API key and about 30 minutes gets you a running scanner.
+> Everything needed to evaluate Vision One File Security on EKS: deploy the stack, scan your first files, connect your own application in Python, and tear it all down cleanly. One API key and about 30 minutes gets you a running scanner.
 
 ## Contents
 
@@ -17,14 +17,8 @@
 **Part II — Integrate**
 
 8. [Find your endpoint](#8-find-your-endpoint)
-    - [8a. Scaling a high-volume client — pull / semaphore dispatcher](#8a-scaling-a-high-volume-client--the-pull--semaphore-dispatcher)
-9. [Java: add the SDK](#9-java-add-the-sdk)
-10. [Java: open the connection](#10-java-open-the-connection)
-11. [Java: reuse the connection](#11-java-reuse-the-connection)
-12. [Java: submit scans](#12-java-submit-scans)
-13. [Read the response](#13-read-the-response)
-14. [When things go wrong](#14-when-things-go-wrong)
-15. [Complete working example](#15-complete-working-example)
+    - [8a. Client connection model](#8a-client-connection-model)
+9. [Python: connect and scan](#9-python-connect-and-scan)
 
 **Part III — Operate & Wrap Up**
 
@@ -43,9 +37,9 @@
 
 ## 1. What you're evaluating
 
-> **This is the **python-default** option: the V1FS scanner scales on the chart's own CPU/memory HPA — TrendAI's supported autoscaling (`ScannerScalingMode=hpa`, the default). A single reused Python SDK connection is the standard integration.**
+> **This is the **python-default** scenario of one unified scanning app: `ScannerAppFlavor=python` + `ScannerDispatchMode=clusterip` + `ScannerScalingMode=hpa` (all defaults). The V1FS scanner scales on the chart's own CPU/memory HPA — TrendAI's supported autoscaling — and the app reaches it over a single gRPC connection to the in-cluster scanner Service.**
 
-A single CloudFormation template stands up an EKS cluster running the **TrendAI Vision One File Security scanner**, installed from the official Helm chart. In this deployment the scanner fleet is scaled by the **chart's own CPU/memory HorizontalPodAutoscaler** (`ScannerScalingMode=hpa`, the default) — TrendAI's supported autoscaling mechanism. (Our optional scanning application scales separately on SQS queue depth via KEDA; that's a different component from the chart-owned scanner — see §17.)
+A single CloudFormation template stands up an EKS cluster running the **TrendAI Vision One File Security scanner**, installed from the official Helm chart. The scanning application that drives the S3 pipeline comes in two feature-equivalent language flavors — Python (`app/scanner.py`) and Java (`app-java/`) — selected by `ScannerAppFlavor` (default `python`); this scenario uses the **Python** flavor. The app reaches the scanner through an env-toggled dispatch mode (`ScannerDispatchMode`): this scenario uses **`clusterip`**, a single reused gRPC connection to the in-cluster scanner Service. The scanner fleet is scaled by the **chart's own CPU/memory HorizontalPodAutoscaler** (`ScannerScalingMode=hpa`, the default) — TrendAI's supported autoscaling mechanism. (Our scanning application scales separately on SQS queue depth via KEDA; that's a different component from the chart-owned scanner — see §17.)
 
 ```text
 [Your files (S3 upload, or your own app)] ──▶ [V1FS Scanner on EKS (official chart · chart HPA CPU/mem scaling)] ──▶ [Verdicts (clean tagged in place / malicious to quarantine)]
@@ -142,6 +136,19 @@ Four parameter combinations cover the common evaluation goals. Everything else d
 | **Deep archive analysis** | `DeployReviewPipeline=true` | Adds a second scanner with no decompression limits that re-scans archives too deep/large for the main policy before the final verdict. |
 
 Modes combine (e.g. existing bucket + review pipeline). Invalid combinations are rejected at stack creation by built-in rules.
+
+
+### App flavor, dispatch, and scaling
+
+Three more parameters select the *shape* of the deployment — which language the scanning app is, how it reaches the scanner, and how the scanner scales. This guide documents one fixed combination; the other combinations have their own guides.
+
+| Parameter | Values | This scenario (python-default) |
+|---|---|---|
+| `ScannerAppFlavor` | `python` (default) · `java` | **`python`** — the app is `app/scanner.py` |
+| `ScannerDispatchMode` | `clusterip` (default) · `pull` | **`clusterip`** — one gRPC connection to the in-cluster scanner Service |
+| `ScannerScalingMode` | `hpa` (default) · `keda` | **`hpa`** — the chart's CPU/memory HPA (TrendAI-supported) |
+
+Both flavors are feature-equivalent and read the same configuration; the flavor and dispatch modes are described in §6. For queue-depth scanner scaling (`keda`) paired with client-side pull dispatch (`pull`), see the **python-KEDA** and **java-KEDA** guides.
 
 
 ## 4. Deploy the stack
@@ -254,7 +261,9 @@ Three other places to see results: object **tags** (on every scanned object), th
 
 ## 6. Inside the scanning app
 
-The pipeline you just watched is driven by a deliberately small application: **one Python file** (`app/scanner.py`, ~600 lines), a config loader, and a 22-line Dockerfile with **three pinned dependencies** — the V1FS SDK, an async AWS client, and boto3. Small enough to read in one sitting, which is the point: in an evaluation you should be able to see exactly what touches your files.
+The pipeline you just watched is driven by one small application. It ships in two feature-equivalent language flavors — Python (`app/scanner.py`) and Java (`app-java/`), selected by `ScannerAppFlavor` — and this scenario runs the **Python** flavor: **one Python file** (`app/scanner.py`, ~600 lines), a config loader, and a 22-line Dockerfile with **three pinned dependencies** — the V1FS SDK, an async AWS client, and boto3. Small enough to read in one sitting, which is the point: in an evaluation you should be able to see exactly what touches your files.
+
+The same one app does everything — drains SQS, scans, and routes every verdict (tag clean in place, move malicious to quarantine, send decompression-limited or oversize files to review or quarantine, write the audit trail, reconcile stragglers). How it reaches the scanner pods is a mode, set by `ScannerDispatchMode`: this scenario uses **`clusterip`** — a single reused gRPC connection to the in-cluster scanner Service (simple, L4). The other mode, `pull` — where the app discovers live scanner pod IPs and dispatches each scan to the least-busy pod directly — is what the **python-KEDA** / **java-KEDA** scenarios use; those guides' §8a describe it.
 
 
 ### How it works
@@ -292,7 +301,7 @@ A semaphore caps how many scans run at once per pod (`MAX_CONCURRENT_SCANS`, def
 | Delete-vs-tag finalization | `_finalize_source()` |
 | Every knob, with defaults and validation | `app/config.py` |
 
-If your own application will replace this module (`DeployScannerApp=false`), these same patterns — reuse one connection, bound your concurrency, heartbeat long scans, never trust a partial scan — are the ones worth carrying over. Part II shows the connection half in Java.
+If your own application will replace this module (`DeployScannerApp=false`), these same patterns — reuse one connection, bound your concurrency, heartbeat long scans, never trust a partial scan — are the ones worth carrying over. Part II shows the connection half in Python.
 
 
 ## 7. What the bastion does
@@ -407,7 +416,7 @@ aws ssm get-parameter --name /v1fs-eval-1/scanner-endpoint \
 > [!IMPORTANT]
 > **The plaintext NLB endpoint does not check your API key.** Network access *is* the access control — that's why it's VPC-internal only. Still pass a real API key in your code: the same code then works unchanged against TLS endpoints and Trend's cloud service, which do enforce it.
 
-The sections below use **Java** for the basic single-connection client. For a high-volume, queue-fed client, read **§8a** first — a single connection alone will hot-spot one scanner pod.
+The section below (§9) uses **Python** for the basic single reused-connection client. First read **§8a** for the client connection model this build assumes.
 
 ## 8a. Client connection model
 

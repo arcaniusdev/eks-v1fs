@@ -43,9 +43,9 @@
 
 ## 1. What you're evaluating
 
-> **This is the **java-KEDA** option: the V1FS scanner is scaled by KEDA on SQS queue depth (`ScannerScalingMode=keda`), and a **Java** client-side pull/semaphore dispatcher spreads scans across the fleet.**
+> **This is the **java-KEDA** scenario of one unified scanning app: `ScannerAppFlavor=java` + `ScannerDispatchMode=pull` + `ScannerScalingMode=keda`. The V1FS scanner is scaled by KEDA on SQS queue depth, and the Java app runs in **pull** dispatch mode — discovering live scanner pod IPs and spreading scans across the fleet itself (§8a).**
 
-A single CloudFormation template stands up an EKS cluster running the **TrendAI Vision One File Security scanner**, installed from the official Helm chart. In this deployment the scanner fleet is scaled by **KEDA on SQS queue depth** — the number of scanner pods tracks your scan backlog directly, rather than reacting to CPU. (This is a queue-driven variant tuned for an SQS-fed workload: the chart's own CPU/memory HPA is disabled so the two autoscalers don't conflict — see §17, and note the supportability trade-off there.)
+A single CloudFormation template stands up an EKS cluster running the **TrendAI Vision One File Security scanner**, installed from the official Helm chart. The scanning application that drives the S3 pipeline comes in two feature-equivalent language flavors — Python (`app/scanner.py`) and Java (`app-java/`) — selected by `ScannerAppFlavor`; this scenario uses the **Java** flavor (`ScannerAppFlavor=java`) in **pull** dispatch mode (`ScannerDispatchMode=pull`), where the app discovers live scanner pod IPs and dispatches each scan to the least-busy pod directly (§8a). The scanner fleet is scaled by **KEDA on SQS queue depth** (`ScannerScalingMode=keda`) — the number of scanner pods tracks your scan backlog directly, rather than reacting to CPU. (This is a queue-driven variant tuned for an SQS-fed workload: the chart's own CPU/memory HPA is disabled so the two autoscalers don't conflict — see §17, and note the supportability trade-off there.)
 
 ```text
 [Your files (S3 upload, or your own app)] ──▶ [V1FS Scanner on EKS (official chart · KEDA queue-depth scaling)] ──▶ [Verdicts (clean tagged in place / malicious to quarantine)]
@@ -142,6 +142,19 @@ Four parameter combinations cover the common evaluation goals. Everything else d
 | **Deep archive analysis** | `DeployReviewPipeline=true` | Adds a second scanner with no decompression limits that re-scans archives too deep/large for the main policy before the final verdict. |
 
 Modes combine (e.g. existing bucket + review pipeline). Invalid combinations are rejected at stack creation by built-in rules.
+
+
+### App flavor, dispatch, and scaling
+
+Three more parameters select the *shape* of the deployment — which language the scanning app is, how it reaches the scanner, and how the scanner scales. This guide documents one fixed combination; the other combinations have their own guides.
+
+| Parameter | Values | This scenario (java-KEDA) |
+|---|---|---|
+| `ScannerAppFlavor` | `python` (default) · `java` | **`java`** — the app is `app-java/` |
+| `ScannerDispatchMode` | `clusterip` (default) · `pull` | **`pull`** — the app discovers scanner pod IPs from the NLB target group and dispatches to the least-busy pod (§8a) |
+| `ScannerScalingMode` | `hpa` (default) · `keda` | **`keda`** — the scanner scales on SQS queue depth (§17 covers the supportability trade-off) |
+
+Both flavors are feature-equivalent and read the same configuration; the flavor and dispatch modes are described in §6. `pull` mode requires an NLB endpoint — `ScannerEndpointMode=auto` (the default) provides one and doubles as the pod-discovery registry. The supported chart-HPA baseline with the Python flavor and simple `clusterip` dispatch is the **python-default** guide.
 
 
 ## 4. Deploy the stack
@@ -254,18 +267,20 @@ Three other places to see results: object **tags** (on every scanned object), th
 
 ## 6. Inside the scanning app
 
-The pipeline you just watched is driven by a deliberately small application: **one Python file** (`app/scanner.py`, ~600 lines), a config loader, and a 22-line Dockerfile with **three pinned dependencies** — the V1FS SDK, an async AWS client, and boto3. Small enough to read in one sitting, which is the point: in an evaluation you should be able to see exactly what touches your files.
+The pipeline you just watched is driven by one small application. It ships in two feature-equivalent language flavors — Python (`app/scanner.py`) and Java (`app-java/`), selected by `ScannerAppFlavor` — and this scenario runs the **Java** flavor: a compact Maven project under `app-java/` (a handful of classes under `com.trend.v1fs.scanner`) and a Dockerfile that builds a hardened image. It is a faithful port of the Python app — same environment/config contract, same routing behavior — so anything you read about one applies to the other.
+
+The same one app does everything — drains SQS, scans, and routes every verdict (tag clean in place, move malicious to quarantine, send decompression-limited or oversize files to review or quarantine, write the audit trail, reconcile stragglers). How it reaches the scanner pods is a mode, set by `ScannerDispatchMode`. This scenario uses **`pull`**: instead of one connection to the in-cluster Service, the app discovers the live scanner pod IPs from the NLB target group and dispatches each scan to the least-busy pod directly — no load balancer in the scan path. That is the mode that pairs with KEDA queue-depth scanner scaling here; its architecture and rationale are in **§8a**. (The other mode, `clusterip`, is a single reused gRPC connection to the in-cluster Service — the **python-default** scenario.)
 
 
 ### How it works
 
-One async event loop runs the whole show. S3 announces each new object on an SQS queue; the app pulls from that queue and pushes each file through six steps:
+A poll loop runs the whole show. S3 announces each new object on an SQS queue; the app pulls from that queue and pushes each file through six steps:
 
 ```text
 [Poll (SQS long-poll)] ▶ [Parse (bucket/key?)] ▶ [Download (into memory)] ▶ [Scan (gRPC → V1FS)] ▶ [Route (tag clean in place / quarantine / review)] ▶ [Finalize (ack + tag + audit)]
 ```
 
-A semaphore caps how many scans run at once per pod (`MAX_CONCURRENT_SCANS`, default 50). Three small background loops support the main flow: a health server for Kubernetes probes, an audit writer that batches every verdict to CloudWatch Logs, and a reconciliation sweep that catches any file that somehow never got scanned.
+A bounded worker pool caps how many scans run at once per pod (`MAX_CONCURRENT_SCANS`, default 50). Small background helpers support the main flow: a health server for Kubernetes probes, an audit writer that batches every verdict to CloudWatch Logs, and a reconciliation sweep that catches any file that somehow never got scanned.
 
 
 ### Why it's built this way
@@ -273,7 +288,7 @@ A semaphore caps how many scans run at once per pod (`MAX_CONCURRENT_SCANS`, def
 | Choice | Reasoning |
 |---|---|
 | **SQS between S3 and the app** | The queue absorbs bursts (nothing is lost if uploads outpace scanning), gives every file automatic retries, and its depth is the signal that scales the app's pods. After three failed attempts a message moves to a dead-letter queue, where a Lambda retries it with backoff — poison files can't wedge the pipeline. |
-| **Python + asyncio** | The app is a traffic director, not a compute engine — nearly all of its time is spent *waiting* on network I/O (S3, SQS, the scanner). Async lets one small pod hold 50 scans in flight. A compiled language would not speed this up: the scanner backend is the bottleneck, deliberately. |
+| **Bounded concurrency, I/O-bound work** | The app is a traffic director, not a compute engine — nearly all of its time is spent *waiting* on network I/O (S3, SQS, the scanner). A bounded worker pool lets one small pod hold ~50 scans in flight. The JVM buys nothing over Python here: the scanner backend is the bottleneck, deliberately — the two flavors exist for language preference, not speed. |
 | **Files scanned from memory** | `scanBuffer`-style scanning means no temp files — which is what allows the container to run with a read-only filesystem, and leaves nothing to clean up. Files over `MAX_FILE_SIZE_MB` (default 500) are routed by server-side S3 copy instead, so a huge file can never blow out pod memory. |
 | **Visibility heartbeat + fast retry** | While a long scan runs, the app keeps extending the SQS message's invisibility so no other pod grabs it. On failure it does the opposite — shortens the timer to ~30s so the retry happens quickly instead of waiting out a long timeout. |
 | **Never mark the unscanned clean** | The routing rule you saw in §5: an archive the scanner couldn't fully open (decompression limits) goes to *quarantine with explanatory tags* — or to the review pipeline if enabled — never tagged clean. A clean verdict means a completed scan. |
@@ -285,14 +300,14 @@ A semaphore caps how many scans run at once per pod (`MAX_CONCURRENT_SCANS`, def
 
 | You want to see… | Look at |
 |---|---|
-| The whole flow in 20 lines of comments | `app/scanner.py` — module docstring at the top |
-| Poll loop & concurrency cap | `_poll_loop()` / `_guarded_process()` |
-| Event parsing (S3 vs EventBridge shapes) | `_extract_records()` |
-| Scan call & routing decision | `_process_record()` |
-| Delete-vs-tag finalization | `_finalize_source()` |
-| Every knob, with defaults and validation | `app/config.py` |
+| Entrypoint, config load, graceful shutdown | `app-java/src/main/java/com/trend/v1fs/scanner/Main.java` |
+| Poll loop, download, routing & finalization | `ScannerApp.java` |
+| Dispatch abstraction (the two modes) | `Dispatcher.java` — `ClusterIpDispatcher.java` (clusterip) / `ScannerPool.java` (pull) |
+| Event parsing (S3 vs EventBridge shapes) | `S3Records.java` |
+| Audit trail & health server | `AuditTrail.java` / `HealthServer.java` |
+| Every knob, with defaults and validation | `Config.java` |
 
-If your own application will replace this module (`DeployScannerApp=false`), these same patterns — reuse one connection, bound your concurrency, heartbeat long scans, never trust a partial scan — are the ones worth carrying over. Part II shows the connection half in Java.
+If your own application will replace this module (`DeployScannerApp=false`), these same patterns — reuse connections, bound your concurrency, heartbeat long scans, never trust a partial scan — are the ones worth carrying over. Part II shows the connection half in Java.
 
 
 ## 7. What the bastion does
@@ -411,7 +426,7 @@ The sections below use **Java** for the basic single-connection client. For a hi
 
 ## 8a. Scaling a high-volume client — the pull / semaphore dispatcher
 
-If your workload is a queue feeding a busy service (an SQS-fed API gateway, for example), how the client spreads scans across the scanner fleet matters as much as the scanner's own autoscaling. This section explains the architecture this deployment is built for.
+This scenario runs the app in **`DISPATCH_MODE=pull`** (`ScannerDispatchMode=pull`) — the same one app from §6, in its pull dispatch mode rather than a separate program. Instead of one connection to the in-cluster Service, the app spreads scans across the scanner fleet itself; how it does that matters as much as the scanner's own autoscaling for a busy, queue-fed workload. This section explains the architecture.
 
 ### Why a single connection hot-spots
 
@@ -441,11 +456,11 @@ Three moving parts:
 - **The queue** — a message is deleted only after a successful scan + action; any failure leaves it to **redeliver** to another worker. Nothing is lost if a worker or pod dies mid-scan.
 - **The dispatcher** — a pod-level gRPC error is retried on a **different** pod; a pod that goes unhealthy/draining is dropped from rotation on the next refresh.
 
-### Use the worked reference
+### It's the app's pull mode, not a separate program
 
-A complete, adapt-me implementation is in [`reference/java-consumer/`](../reference/java-consumer/) — SQS drain, target-group discovery, the per-pod pool, least-busy dispatch, and both reliability nets. The full design rationale (L4 vs L7, why pull beats push, the SDK channel constraints) is in `temp/scanner-load-balancing.html`.
+Everything above is built into the one app from §6 and is active whenever `ScannerDispatchMode=pull` — you don't build a separate consumer. The Java flavor's pull-mode code (SQS drain, target-group discovery, the per-pod pool, least-busy dispatch, and both reliability nets) lives in [`app-java/`](../../app-java/) — see `ScannerPool.java` for the pull dispatcher itself. A standalone, adapt-me illustration of the same pattern — useful if you're porting it into your own service — is in [`reference/java-KEDA/`](.). The full design rationale (L4 vs L7, why pull beats push, the SDK channel constraints) is in `temp/scanner-load-balancing.html`.
 
-> The V1FS SDK builds a bare gRPC channel (no client-side `round_robin`/`least_request` and no channel injection), so this client-side dispatcher — not SDK config — is how you distribute a single client's scans across the fleet.
+> The V1FS SDK builds a bare gRPC channel (no client-side `round_robin`/`least_request` and no channel injection), so this client-side dispatcher — the app's pull mode, not SDK config — is how a single client distributes its scans across the fleet.
 
 ## 9. Java: add the SDK
 
