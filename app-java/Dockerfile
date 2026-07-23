@@ -5,7 +5,12 @@
 # the JVM makes the image multi-arch (amd64 / arm64) from one Dockerfile.
 
 # --- build stage ---
-FROM maven:3.9-eclipse-temurin-17 AS build
+# Pin the build stage to the BUILDER's native platform ($BUILDPLATFORM), NOT the
+# target: the shaded jar is arch-independent bytecode, so there's no reason to
+# run Maven under QEMU emulation when cross-building (e.g. x86 bastion → arm64
+# node). Only the runtime stage below takes the target arch. This turns a slow
+# emulated Maven build into a fast native one.
+FROM --platform=$BUILDPLATFORM maven:3.9-eclipse-temurin-17 AS build
 WORKDIR /build
 # Cache dependencies first (pom rarely changes relative to source).
 COPY pom.xml .
