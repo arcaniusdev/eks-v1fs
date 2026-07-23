@@ -162,6 +162,156 @@ class DeleteBatcher:
             )
 
 
+class NoCapacity(Exception):
+    """Every scanner pod is saturated — leave the message for SQS redelivery."""
+
+
+class _Pod:
+    """One scanner pod: its async SDK handle and an in-flight counter."""
+
+    __slots__ = ("addr", "handle", "capacity", "inflight", "draining")
+
+    def __init__(self, addr, handle, capacity):
+        self.addr = addr                # "10.2.x.y:50051"
+        self.handle = handle
+        self.capacity = capacity
+        self.inflight = 0
+        self.draining = False
+
+
+class AsyncPodPool:
+    """Client-side pull dispatcher over the V1FS scanner pods (async).
+
+    DISPATCH_MODE=pull: discover the live, HEALTHY scanner pod IPs from the NLB
+    target group (target-type=ip) via the ELB DescribeTargetHealth API, hold one
+    async gRPC handle (== one reused connection) per pod, and hand each scan to
+    the pod with the most free capacity (least-outstanding). The NLB is only a
+    discovery registry — scans connect DIRECTLY to pod IPs, so no load balancer
+    sits in the scan path (no L4 pinning, no L7 latency). A background loop
+    re-reads the target group every POD_REFRESH_SECS so the pool tracks the
+    KEDA-scaled fleet and drains pods on scale-down.
+
+    Single event loop, so no locks: the (inflight < capacity) check and the
+    increment happen without an intervening await, and reconcile mutates the
+    roster only between scans.
+    """
+
+    def __init__(self, config, api_key, session):
+        self._cfg = config
+        self._api_key = api_key
+        self._session = session
+        self._pods: dict[str, _Pod] = {}
+        self._elb = None
+        self._refresh_task = None
+        self._stop = asyncio.Event()
+
+    async def start(self, exit_stack) -> None:
+        self._elb = await exit_stack.enter_async_context(
+            self._session.create_client(
+                "elasticloadbalancingv2", region_name=self._cfg.aws_region
+            )
+        )
+        await self._reconcile()   # seed the roster before serving
+        logger.info(
+            "Pull dispatcher started — %d scanner pod(s) discovered from target group",
+            len(self._pods),
+        )
+        self._refresh_task = asyncio.create_task(self._refresh_loop())
+
+    async def _healthy_addrs(self) -> set[str]:
+        resp = await self._elb.describe_target_health(
+            TargetGroupArn=self._cfg.scanner_target_group_arn
+        )
+        return {
+            f"{d['Target']['Id']}:{d['Target']['Port']}"
+            for d in resp["TargetHealthDescriptions"]
+            if d["TargetHealth"]["State"] == "healthy"
+        }
+
+    async def _reconcile(self) -> None:
+        healthy = await self._healthy_addrs()
+        for addr in healthy:
+            if addr not in self._pods:
+                # init is synchronous — do not await. Pull mode connects to raw
+                # pod IPs, so it is plaintext (a cert SAN can't match a pod IP);
+                # TLS/ALB use clusterip mode instead.
+                handle = amaas.grpc.aio.init(
+                    addr, self._api_key,
+                    self._cfg.v1fs_tls_enabled,
+                    self._cfg.v1fs_ca_cert or None,
+                )
+                self._pods[addr] = _Pod(addr, handle, self._cfg.per_pod_capacity)
+        for addr in list(self._pods):
+            if addr not in healthy:
+                pod = self._pods.pop(addr)
+                pod.draining = True
+                await self._close(pod)
+
+    async def _refresh_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self._cfg.pod_refresh_secs)
+            except asyncio.TimeoutError:
+                pass
+            if self._stop.is_set():
+                break
+            try:
+                await self._reconcile()
+            except Exception:
+                logger.warning("Pod discovery refresh failed; keeping current roster", exc_info=True)
+
+    async def scan(self, data: bytes, uid: str, pml: bool, tags: list) -> str:
+        deadline = asyncio.get_running_loop().time() + 60
+        last_exc = None
+        for _ in range(3):
+            pod = await self._acquire_least_busy(deadline)
+            if pod is None:
+                raise NoCapacity("no scanner pod capacity within 60s")
+            try:
+                return await amaas.grpc.aio.scan_buffer(pod.handle, data, uid, pml=pml, tags=tags)
+            except Exception as exc:               # pod-level failure → try another pod
+                last_exc = exc
+                if pod.draining:
+                    self._pods.pop(pod.addr, None)
+            finally:
+                pod.inflight -= 1
+        raise last_exc or RuntimeError("scan failed after retries")
+
+    async def _acquire_least_busy(self, deadline: float):
+        while True:
+            best = None
+            for pod in self._pods.values():
+                if pod.draining or pod.inflight >= pod.capacity:
+                    continue
+                if best is None or pod.inflight < best.inflight:
+                    best = pod
+            if best is not None:
+                best.inflight += 1            # atomic with the check (no await between)
+                return best
+            if asyncio.get_running_loop().time() >= deadline:
+                return None
+            await asyncio.sleep(0.05)
+
+    @staticmethod
+    async def _close(pod: _Pod) -> None:
+        try:
+            await amaas.grpc.aio.quit(pod.handle)
+        except Exception:
+            pass
+
+    async def close(self) -> None:
+        self._stop.set()
+        if self._refresh_task:
+            self._refresh_task.cancel()
+            try:
+                await self._refresh_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        for pod in list(self._pods.values()):
+            await self._close(pod)
+        self._pods.clear()
+
+
 class ScannerApp:
     def __init__(self, config) -> None:
         self.config = config
@@ -179,6 +329,7 @@ class ScannerApp:
         self.scan_handle = None
         self.session = AioSession()
         self._exit_stack = AsyncExitStack()
+        self._pool = None            # AsyncPodPool when DISPATCH_MODE=pull
         self._consecutive_errors = 0
         self._ready = False
         self._audit_queue: asyncio.Queue = asyncio.Queue(maxsize=config.audit_queue_max_size)
@@ -209,22 +360,30 @@ class ScannerApp:
             )
         api_key = resp["SecretString"]
 
-        logger.info(
-            "Initializing V1FS async gRPC handle at %s (tls=%s, ca_cert=%s)",
-            self.config.v1fs_server_addr,
-            self.config.v1fs_tls_enabled,
-            self.config.v1fs_ca_cert or "system",
-        )
-        # init is synchronous - do not await. The SDK's ca_cert arg is the
-        # "Bring Your Own Certificate" path: pass a PEM to trust (self-signed
-        # ALB cert), or None to use the system trust store. There is no
-        # skip-verify option — a self-signed cert MUST be supplied here.
-        self.scan_handle = amaas.grpc.aio.init(
-            self.config.v1fs_server_addr,
-            api_key,
-            self.config.v1fs_tls_enabled,
-            self.config.v1fs_ca_cert or None,
-        )
+        if self.config.dispatch_mode == "pull":
+            logger.info(
+                "Dispatch mode: pull — discovering scanner pods from target group %s",
+                self.config.scanner_target_group_arn,
+            )
+            self._pool = AsyncPodPool(self.config, api_key, self.session)
+            await self._pool.start(self._exit_stack)
+        else:
+            logger.info(
+                "Dispatch mode: clusterip — initializing V1FS async gRPC handle at %s (tls=%s, ca_cert=%s)",
+                self.config.v1fs_server_addr,
+                self.config.v1fs_tls_enabled,
+                self.config.v1fs_ca_cert or "system",
+            )
+            # init is synchronous - do not await. The SDK's ca_cert arg is the
+            # "Bring Your Own Certificate" path: pass a PEM to trust (self-signed
+            # ALB cert), or None to use the system trust store. There is no
+            # skip-verify option — a self-signed cert MUST be supplied here.
+            self.scan_handle = amaas.grpc.aio.init(
+                self.config.v1fs_server_addr,
+                api_key,
+                self.config.v1fs_tls_enabled,
+                self.config.v1fs_ca_cert or None,
+            )
 
         self._delete_batcher = DeleteBatcher(self.sqs_client, self.config.sqs_queue_url)
         self._delete_batcher.start()
@@ -382,6 +541,22 @@ class ScannerApp:
                 })
         return records
 
+    async def _scan(self, data: bytes, uid: str) -> str:
+        """Scan a buffer, dispatching per DISPATCH_MODE.
+
+        clusterip: one shared handle to the in-cluster Service (the Service
+        spreads connections across pods). pull: hand to the least-busy pod via
+        the discovery pool. Same result JSON either way, so routing is
+        dispatch-agnostic.
+        """
+        if self._pool is not None:
+            return await self._pool.scan(
+                data, uid, pml=self.config.pml_enabled, tags=["S3-Scan"]
+            )
+        return await amaas.grpc.aio.scan_buffer(
+            self.scan_handle, data, uid, pml=self.config.pml_enabled, tags=["S3-Scan"]
+        )
+
     async def _process_record(self, record: dict, message_id: str) -> None:
         bucket = record["bucket"]
         key = record["key"]
@@ -444,13 +619,7 @@ class ScannerApp:
         # Scan
         try:
             scan_start = time.monotonic()
-            result_json = await amaas.grpc.aio.scan_buffer(
-                self.scan_handle,
-                file_bytes,
-                key,
-                pml=self.config.pml_enabled,
-                tags=["S3-Scan"],
-            )
+            result_json = await self._scan(file_bytes, key)
             scan_duration_ms = int((time.monotonic() - scan_start) * 1000)
             result = json.loads(result_json)
             is_malicious = result.get("scanResult", 0) > 0
@@ -783,6 +952,8 @@ class ScannerApp:
         if self._health_server:
             self._health_server.close()
             await self._health_server.wait_closed()
+        if self._pool is not None:
+            await self._pool.close()
         if self.scan_handle:
             await amaas.grpc.aio.quit(self.scan_handle)
         await self._exit_stack.aclose()
