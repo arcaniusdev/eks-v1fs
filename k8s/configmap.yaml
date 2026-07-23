@@ -17,6 +17,13 @@ data:
   # and (self-signed cert) V1FS_CA_CERT=/etc/v1fs-tls/ca.crt.
   V1FS_TLS_ENABLED: "false"
   V1FS_CA_CERT: ""
+  # Dispatch: clusterip (one connection to the in-cluster Service) or pull
+  # (discover scanner pod IPs from the NLB target group + least-busy dispatch).
+  # SCANNER_TARGET_GROUP_ARN is required for pull; deploy.sh discovers it.
+  DISPATCH_MODE: "clusterip"
+  SCANNER_TARGET_GROUP_ARN: ""
+  PER_POD_CAPACITY: "30"
+  POD_REFRESH_SECS: "20"
   V1FS_API_KEY_SECRET_ARN: "<from ApiKeySecretArn output>"
   AWS_REGION: "us-east-1"
   LOG_LEVEL: "INFO"

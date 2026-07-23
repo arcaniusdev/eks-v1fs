@@ -409,6 +409,41 @@ if [ "$DEPLOY_SCANNER_APP" = "true" ]; then
     export REVIEW_ROUTING_ENABLED="false"
   fi
 
+  # Pull dispatch: the app connects directly to scanner pod IPs, which it reads
+  # from the NLB target group. Discover that target group's ARN now (the NLB was
+  # created during the V1FS install and its IP target group tracks the scanner
+  # pods) and hand it to deploy.sh via SCANNER_TARGET_GROUP_ARN. If discovery
+  # fails, fall back to clusterip so the app still comes up.
+  if [ "${SCANNER_DISPATCH_MODE:-clusterip}" = "pull" ]; then
+    echo "Pull dispatch: discovering scanner NLB target group (port 50051, target-type=ip)..."
+    TG_ARN=""
+    for _ in $(seq 1 30); do
+      NLB_HOST=$(kubectl get svc my-release-visionone-filesecurity-scanner-lb \
+        -n visionone-filesecurity \
+        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+      if [ -n "$NLB_HOST" ]; then
+        LB_ARN=$(aws elbv2 describe-load-balancers --region "$AWS_REGION" \
+          --query "LoadBalancers[?DNSName=='${NLB_HOST}'].LoadBalancerArn | [0]" \
+          --output text 2>/dev/null || true)
+        if [ -n "$LB_ARN" ] && [ "$LB_ARN" != "None" ]; then
+          TG_ARN=$(aws elbv2 describe-target-groups --load-balancer-arn "$LB_ARN" \
+            --region "$AWS_REGION" \
+            --query "TargetGroups[?Port==\`50051\`].TargetGroupArn | [0]" \
+            --output text 2>/dev/null || true)
+          [ -n "$TG_ARN" ] && [ "$TG_ARN" != "None" ] && break
+        fi
+      fi
+      sleep 10
+    done
+    if [ -n "$TG_ARN" ] && [ "$TG_ARN" != "None" ]; then
+      export SCANNER_TARGET_GROUP_ARN="$TG_ARN"
+      echo "Scanner target group: $TG_ARN"
+    else
+      echo "WARNING: could not discover scanner target group after ~5min; falling back to clusterip dispatch."
+      export SCANNER_DISPATCH_MODE="clusterip"
+    fi
+  fi
+
   "$REPO_DIR/scripts/build-and-push.sh"
   "$REPO_DIR/scripts/deploy.sh"
 

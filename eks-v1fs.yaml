@@ -145,6 +145,28 @@ Parameters:
       objects are tagged in place, never removed). Required when
       ExternalScanQueueArn is set; ignored otherwise.
     Default: ""
+  ScannerAppFlavor:
+    Type: String
+    Description: >
+      Language flavor of the scanning app the stack builds and deploys. Both
+      flavors are feature-equivalent (drain SQS, scan, full routing); pick the
+      one matching your ecosystem. python builds from app/, java from app-java/.
+    Default: python
+    AllowedValues:
+      - python
+      - java
+  ScannerDispatchMode:
+    Type: String
+    Description: >
+      How the scanning app reaches the scanner pods. clusterip (default) = one
+      gRPC connection to the in-cluster Service (simple, L4). pull = the app
+      discovers live scanner pod IPs from the NLB target group and dispatches
+      each scan to the least-busy pod directly (no load balancer in the scan
+      path). pull requires an NLB endpoint (ScannerEndpointMode nlb or auto).
+    Default: clusterip
+    AllowedValues:
+      - clusterip
+      - pull
   ScannerAppMaxReplicas:
     Type: Number
     Description: Maximum scanner-app pods (KEDA SQS-driven scaling)
@@ -319,6 +341,17 @@ Rules:
         AssertDescription: ExternalScanQueueArn requires ExternalScanSourceBucketArns (the bucket(s) its events reference)
       - Assert: !Equals [!Ref ExistingIngestBucket, ""]
         AssertDescription: ExternalScanQueueArn and ExistingIngestBucket are mutually exclusive
+  PullDispatchRequirements:
+    # Pull dispatch discovers pods via the NLB target group, so it needs the
+    # scanner-app on and an NLB endpoint (auto resolves to NLB; nlb is explicit).
+    RuleCondition: !Equals [!Ref ScannerDispatchMode, "pull"]
+    Assertions:
+      - Assert: !Equals [!Ref DeployScannerApp, "true"]
+        AssertDescription: ScannerDispatchMode=pull requires DeployScannerApp=true
+      - Assert: !Or
+          - !Equals [!Ref ScannerEndpointMode, "auto"]
+          - !Equals [!Ref ScannerEndpointMode, "nlb"]
+        AssertDescription: ScannerDispatchMode=pull requires an NLB endpoint (ScannerEndpointMode auto or nlb)
   ExistingVpcRequiresAllParts:
     RuleCondition: !Not [!Equals [!Ref ExistingVpcId, ""]]
     Assertions:
@@ -336,6 +369,11 @@ Conditions:
   CreateNetwork: !Equals [!Ref ExistingVpcId, ""]
   ScannerAppEnabled: !Equals [!Ref DeployScannerApp, "true"]
   HasExternalScanQueue: !Not [!Equals [!Ref ExternalScanQueueArn, ""]]
+  # Pull dispatch: the scanning app discovers scanner pod IPs from the NLB
+  # target group and connects directly. Needs the scanner-app AND an NLB.
+  PullDispatch: !And
+    - !Condition ScannerAppEnabled
+    - !Equals [!Ref ScannerDispatchMode, "pull"]
   # KEDA is installed (and its operator role created) exactly when there is a
   # queue for it to watch: the scanner-app queue (full-auto) or an external
   # queue (BYO). keda mode without either falls back to the chart HPA, so it
@@ -958,6 +996,15 @@ Resources:
                 Resource:
                   - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/scanner-endpoint
                   - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/scanner-ca-cert
+              # Pull dispatch: the bastion discovers the scanner NLB target-group
+              # ARN (to hand to the app) via these read-only ELB describes. They
+              # have no resource-level scoping (require *).
+              - Sid: ELBDiscovery
+                Effect: Allow
+                Action:
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - elasticloadbalancing:DescribeTargetGroups
+                Resource: "*"
               - !If
                 - ExposeALB
                 # Self-signed ALB cert: import a freshly-generated cert into ACM
@@ -1895,6 +1942,8 @@ Resources:
             export DEPLOY_REVIEW="${DeployReviewPipeline}"
             export EXTERNAL_SCAN_QUEUE_ARN="${ExternalScanQueueArn}"
             export EXTERNAL_SCAN_SOURCE_BUCKET_ARNS="${ExternalScanSourceBucketArns}"
+            export SCANNER_APP_FLAVOR="${ScannerAppFlavor}"
+            export SCANNER_DISPATCH_MODE="${ScannerDispatchMode}"
             export SCANNER_SCALING_MODE="${ScannerScalingMode}"
             export ENDPOINT_MODE="${ScannerEndpointMode}"
             export ACM_CERT_ARN="${ACMCertificateArn}"
@@ -2451,6 +2500,17 @@ Resources:
                     - s3:PutObject
                     - s3:PutObjectTagging
                   Resource: !Sub ${ReviewBucket.Arn}/*
+                - !Ref AWS::NoValue
+              # Pull dispatch reads live scanner pod IPs from the NLB target
+              # group. ELB Describe* have no resource-level scoping (require *).
+              - !If
+                - PullDispatch
+                - Sid: ELBPodDiscovery
+                  Effect: Allow
+                  Action:
+                    - elasticloadbalancing:DescribeTargetHealth
+                    - elasticloadbalancing:DescribeTargetGroups
+                  Resource: "*"
                 - !Ref AWS::NoValue
               - Sid: SecretsManagerApiKey
                 Effect: Allow

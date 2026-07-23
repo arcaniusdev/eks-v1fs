@@ -26,6 +26,10 @@ class Config:
     v1fs_server_addr: str
     v1fs_tls_enabled: bool
     v1fs_ca_cert: str
+    dispatch_mode: str
+    scanner_target_group_arn: str
+    per_pod_capacity: int
+    pod_refresh_secs: int
     v1fs_api_key_secret_arn: str
     aws_region: str
     log_level: str
@@ -66,6 +70,13 @@ def load_config() -> Config:
     if review_routing_enabled and not s3_review_bucket:
         raise ValueError("S3_REVIEW_BUCKET is required when REVIEW_ROUTING_ENABLED is true")
 
+    dispatch_mode = os.environ.get("DISPATCH_MODE", "clusterip").lower()
+    if dispatch_mode not in ("clusterip", "pull"):
+        raise ValueError(f"DISPATCH_MODE must be 'clusterip' or 'pull', got: {dispatch_mode!r}")
+    scanner_target_group_arn = os.environ.get("SCANNER_TARGET_GROUP_ARN", "")
+    if dispatch_mode == "pull" and not scanner_target_group_arn:
+        raise ValueError("SCANNER_TARGET_GROUP_ARN is required when DISPATCH_MODE=pull")
+
     log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
     if log_level not in VALID_LOG_LEVELS:
         raise ValueError(f"Invalid LOG_LEVEL: {log_level!r}. Must be one of {VALID_LOG_LEVELS}")
@@ -89,6 +100,15 @@ def load_config() -> Config:
         # the system trust store (publicly-signed certs).
         v1fs_tls_enabled=os.environ.get("V1FS_TLS_ENABLED", "false").lower() == "true",
         v1fs_ca_cert=os.environ.get("V1FS_CA_CERT", ""),
+        # Dispatch mode: how the app reaches the scanner pods.
+        #   clusterip (default) — one gRPC handle to the in-cluster Service;
+        #     the Service spreads connections across pods (simple, L4).
+        #   pull — discover live pod IPs from the NLB target group and dispatch
+        #     each scan to the least-busy pod directly (no LB in the scan path).
+        dispatch_mode=dispatch_mode,
+        scanner_target_group_arn=scanner_target_group_arn,
+        per_pod_capacity=_int_env("PER_POD_CAPACITY", "30", 1, 1000),
+        pod_refresh_secs=_int_env("POD_REFRESH_SECS", "20", 5, 300),
         v1fs_api_key_secret_arn=required["V1FS_API_KEY_SECRET_ARN"],
         aws_region=required["AWS_REGION"],
         log_level=log_level,
