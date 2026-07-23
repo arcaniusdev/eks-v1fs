@@ -208,7 +208,7 @@ class AsyncPodPool:
     async def start(self, exit_stack) -> None:
         self._elb = await exit_stack.enter_async_context(
             self._session.create_client(
-                "elasticloadbalancingv2", region_name=self._cfg.aws_region
+                "elbv2", region_name=self._cfg.aws_region
             )
         )
         await self._reconcile()   # seed the roster before serving

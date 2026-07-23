@@ -43,7 +43,7 @@ class ScannerPool:
         self._cap = per_pod_capacity
         self._tls = tls
         self._ca = ca_cert
-        self._elb = boto3.client("elasticloadbalancingv2", region_name=region)
+        self._elb = boto3.client("elbv2", region_name=region)
         self._pods = {}                     # addr -> _PodClient
         self._lock = threading.Lock()
         self._reconcile()                   # initial roster before serving
