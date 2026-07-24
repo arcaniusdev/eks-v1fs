@@ -6,22 +6,26 @@ Everything deploys from one template — the EKS cluster, networking, storage, t
 
 ## Deployment options
 
-The same template supports three deployment scenarios, selected by two parameters — `ScannerScalingMode` (`hpa` | `keda`) and the language of the client that submits scans. Each scenario has its own worked reference and POC guide under [`reference/`](reference/):
+There is **one scanning app** — it drains SQS, scans, and routes verdicts — shipped in **two feature-equivalent language flavors** (Python `app/`, Java `app-java/`). Three parameters configure how it runs, and each common combination has a worked reference and POC guide under [`reference/`](reference/):
 
-| Option | Scanner autoscaling | Client / pull consumer | Use when | Guide |
-|---|---|---|---|---|
-| **python-default** | Chart **HPA** (CPU/mem) — *TrendAI-supported* | Basic Python SDK client (one reused connection) | You want the supported baseline; moderate/steady volume | [reference/python-default/POC-GUIDE.md](reference/python-default/POC-GUIDE.md) |
-| **python-KEDA** | **KEDA** on SQS **queue depth** | **Python** pull/semaphore dispatcher | The scanner fleet must track a queue backlog; Python client | [reference/python-KEDA/POC-GUIDE.md](reference/python-KEDA/POC-GUIDE.md) |
-| **java-KEDA** | **KEDA** on SQS **queue depth** | **Java** pull/semaphore dispatcher | Same as above; Java client | [reference/java-KEDA/POC-GUIDE.md](reference/java-KEDA/POC-GUIDE.md) |
+- **`ScannerAppFlavor`** (`python` | `java`, default `python`) — which flavor the stack builds and deploys.
+- **`ScannerDispatchMode`** (`clusterip` | `pull`, default `clusterip`) — how the app reaches the scanner pods: one gRPC connection to the in-cluster Service, or client-side pod discovery + least-busy dispatch.
+- **`ScannerScalingMode`** (`hpa` | `keda`, default `hpa`) — how the V1FS scanner fleet autoscales.
 
-Common to all three: **NLB endpoint by default** (ALB with a self-signed cert is opt-in via `ScannerEndpointMode`), **Graviton/ARM-capable** nodes, and the same CloudFormation template + bootstrap.
+| Option | Flavor | Dispatch | Scanner autoscaling | Use when | Guide |
+|---|---|---|---|---|---|
+| **python-default** | Python | `clusterip` | Chart **HPA** (CPU/mem) — *TrendAI-supported* | You want the supported baseline; moderate/steady volume | [reference/python-default/POC-GUIDE.md](reference/python-default/POC-GUIDE.md) |
+| **python-KEDA** | Python | `pull` | **KEDA** on SQS **queue depth** | The scanner fleet must track a queue backlog; Python shop | [reference/python-KEDA/POC-GUIDE.md](reference/python-KEDA/POC-GUIDE.md) |
+| **java-KEDA** | Java | `pull` | **KEDA** on SQS **queue depth** | Same as above; Java shop | [reference/java-KEDA/POC-GUIDE.md](reference/java-KEDA/POC-GUIDE.md) |
+
+The options are scenarios of the *same* app, not separate programs — you can mix the parameters (e.g. Java flavor with `clusterip`, or Python with `hpa` + `pull`). Common to all: **NLB endpoint by default** (ALB with a self-signed cert is opt-in via `ScannerEndpointMode`), **Graviton/ARM by default** (`r8g.xlarge`), and the same CloudFormation template + bootstrap.
 
 - **`ScannerScalingMode=hpa` (default)** — the chart's own CPU/memory HPA scales the scanner. This is TrendAI's supported autoscaling.
 - **`ScannerScalingMode=keda`** — KEDA scales the scanner on SQS queue depth so the fleet size follows the backlog (needs a queue: the stack's own, or the `ExternalScanQueueArn` you bring). The chart HPA is disabled; `scripts/upgrade.py` enforces exactly one autoscaler. This is a customer variant, *not* the TrendAI-supported path.
 
 You can also point the scanner-app at **your own existing SQS queue** instead of the one the stack builds — set `ExternalScanQueueArn` (the queue, S3-event-shaped messages) plus `ExternalScanSourceBucketArns` (the buckets its events reference, for read/tag IAM). The stack then builds no ingest bucket, scan queue, DLQ, S3 wiring, or dashboard; clean files are tagged in place in your bucket and malicious files are copied to the stack's quarantine bucket (your objects are never deleted). Full-auto only, mutually exclusive with `ExistingIngestBucket`.
 
-The **KEDA** options additionally use the NLB target group as a **pod-discovery registry**: the client-side pull/semaphore dispatcher (in `reference/python-KEDA/` or `reference/java-KEDA/`) reads healthy scanner pod IPs via the ELB `DescribeTargetHealth` API and connects directly to pods — no load balancer in the scan path, no L7 latency. See each option's POC guide (§8a) for the architecture.
+In **`pull` dispatch mode**, the app uses the NLB target group as a **pod-discovery registry**: it reads healthy scanner pod IPs via the ELB `DescribeTargetHealth` API and connects directly to pods, dispatching each scan to the least-busy one — no load balancer in the scan path, no L7 latency. This is built into the app (both flavors), not a separate consumer to run. See each KEDA option's POC guide (§8a) for the architecture.
 
 ## What is Vision One File Security?
 
@@ -140,7 +144,7 @@ A file that hit a decompression limit was **not fully inspected** — treating i
 
 ### Scanner Application (optional module)
 
-A Python asyncio application built for efficiency. Scan requests use **gRPC** — a binary protocol with lower latency, smaller payloads, and native streaming compared to REST. Files are scanned entirely in memory via `scan_buffer()`, eliminating disk I/O from the critical path.
+One application, shipped in **two feature-equivalent flavors** — Python asyncio (`app/`) and Java (`app-java/`), selected by `ScannerAppFlavor`. Scan requests use **gRPC** — a binary protocol with lower latency, smaller payloads, and native streaming compared to REST. Files are scanned entirely in memory (`scan_buffer` / `scanBuffer`), eliminating disk I/O from the critical path. Both flavors reach the scanner via `ScannerDispatchMode` — `clusterip` (one connection to the in-cluster Service) or `pull` (discover pod IPs from the NLB target group and dispatch to the least-busy pod directly). The description below is the Python flavor; the Java flavor mirrors it.
 
 - **gRPC-native scanning** — binary protocol with persistent HTTP/2 connections to in-cluster scanner pods, avoiding the overhead of REST serialization and per-request TCP handshakes
 - **Fully async pipeline** — `aiobotocore` for S3/SQS operations and `amaas.grpc.aio` for scan requests, all running concurrently on a single event loop with zero thread-blocking
@@ -149,7 +153,7 @@ A Python asyncio application built for efficiency. Scan requests use **gRPC** �
 - **Visibility heartbeat** — automatically extends SQS message visibility during long-running scans to prevent duplicate processing. On failure, immediately shortens visibility to 30 seconds for fast retry by another pod
 - **Health probes** — liveness (`/healthz`) and readiness (`/readyz`) endpoints on port 8080. Liveness catches deadlocked event loops (pod is restarted); readiness gates traffic until the gRPC scan handle is initialized
 - **Scan audit trail** — every scan result is written to CloudWatch Logs as structured JSON (file key, size, verdict, malware names, SHA256, scan duration, pod name), batched for efficiency
-- **Pull-based load distribution** — no load balancer needed. All scanner-app pods long-poll the same SQS queue, and SQS delivers each message to exactly one consumer. Pods that are free pull more messages; pods that are busy naturally slow their polling via backpressure (semaphore + 2x in-flight cap). gRPC connections to V1FS scanner pods are distributed by the Kubernetes Service at connection setup time
+- **Queue-driven work distribution** — all scanner-app pods long-poll the same SQS queue, and SQS delivers each message to exactly one consumer. Pods that are free take more messages; busy pods slow their polling via backpressure (semaphore + 2x in-flight cap). How each pod then reaches the V1FS scanner pods depends on `ScannerDispatchMode`: in `clusterip` the Kubernetes Service distributes gRPC connections at connect time; in `pull` the app discovers scanner pod IPs from the NLB target group and dispatches each scan to the least-busy pod directly (no load balancer in the scan path)
 - **Graceful shutdown** — handles SIGTERM to drain in-flight scans and flush audit entries before exiting (5-minute grace period)
 - **Predictive Machine Learning** — PML can be enabled for advanced threat detection (requires account-level PML support)
 
@@ -365,16 +369,21 @@ Optional parameters:
 |---|---|---|
 | **PrimaryAZ** | `us-east-1a` | Availability Zone 1 |
 | **SecondaryAZ** | `us-east-1b` | Availability Zone 2 |
-| **NodeInstanceType** | `r7i.xlarge` | EC2 instance type for the managed node group — x86 (`r7i.xlarge`, `r7a.xlarge`, `r6i.xlarge`, `r7i.2xlarge`) or Graviton ARM (`r8g.xlarge`, `r7g.xlarge`). ARM types select an ARM64 node AMI and ARM image build automatically. One node group hosts both system components and scanner workloads |
+| **NodeInstanceType** | `r8g.xlarge` | EC2 instance type for the managed node group — Graviton ARM (`r8g.xlarge`, `r7g.xlarge`) or x86 (`r7i.xlarge`, `r7a.xlarge`, `r6i.xlarge`, `r7i.2xlarge`). The default is Graviton ARM; the AMI and scanner-app image build switch to arm64 automatically. One node group hosts both system components and scanner workloads |
 | **NodeGroupMinSize** | `2` | Minimum nodes in the managed node group (min 2 for CoreDNS/AZ redundancy) |
 | **NodeGroupDesiredSize** | `2` | Initial desired nodes — the Cluster Autoscaler adjusts from here |
 | **NodeGroupMaxSize** | `8` | Maximum nodes the Cluster Autoscaler may scale to. The default fits full-mode peak load on an xlarge node (4 vCPU) |
 | **ScannerMinReplicas** | `1` | Minimum V1FS scanner pods (chart HPA `minReplicas`) |
 | **ScannerMaxReplicas** | `10` | Maximum V1FS scanner pods (chart HPA `maxReplicas`, CPU/memory 80% targets) |
 | **DeployScannerApp** | `true` | Deploy the S3/SQS scanning application module (buckets, queues, ECR, scanner-app pods). Set to `false` to deploy only the V1FS scanner and its endpoint |
+| **ScannerAppFlavor** | `python` | Language flavor of the scanning app to build and deploy — `python` (`app/`) or `java` (`app-java/`). Feature-equivalent |
+| **ScannerDispatchMode** | `clusterip` | How the app reaches the scanner: `clusterip` (one gRPC connection to the in-cluster Service) or `pull` (discover scanner pod IPs from the NLB target group and dispatch to the least-busy pod). `pull` requires an NLB endpoint (`ScannerEndpointMode` `nlb`/`auto`) |
+| **ScannerScalingMode** | `hpa` | How the V1FS scanner fleet autoscales — `hpa` (chart CPU/memory HPA, TrendAI-supported) or `keda` (KEDA on SQS queue depth; needs a queue; chart HPA disabled) |
 | **ScannerAppMaxReplicas** | `20` | Maximum scanner-app pods (KEDA SQS-driven scaling) |
 | **DeployReviewPipeline** | `false` | Deploy the review pipeline (second V1FS release with unlimited decompression). Requires `DeployScannerApp=true`. When `false`, files exceeding decompression limits are quarantined with explanatory tags |
 | **ExistingIngestBucket** | *(empty)* | Name of an existing S3 bucket to scan. Leave empty to create a new ingest bucket. See [Scanning an Existing S3 Bucket](#scanning-an-existing-s3-bucket) |
+| **ExternalScanQueueArn** | *(empty)* | ARN of your own SQS queue for the scanner-app to drain instead of a stack-built one (S3-event-shaped messages). Requires `ScannerAppFlavor` app + `ExternalScanSourceBucketArns`; mutually exclusive with `ExistingIngestBucket`. When set, no ingest bucket/scan queue/DLQ/S3 wiring/dashboard is created |
+| **ExternalScanSourceBucketArns** | *(empty)* | Comma-separated S3 bucket ARNs the scanner-app may read and tag when draining `ExternalScanQueueArn` (the buckets its events reference). Read + tag only — your objects are never deleted. Required when `ExternalScanQueueArn` is set |
 | **ScannerEndpointMode** | `nlb` | Scanner endpoint exposure: `nlb` (internal NLB), `alb` (TLS ALB Ingress), or `none` |
 | **ACMCertificateArn** | *(empty)* | ACM certificate ARN for the scanner ALB (required when `ScannerEndpointMode=alb`) |
 | **ScannerDomain** | *(empty)* | DNS name for the scanner ALB, e.g. `scanner.example.com` (required when `ScannerEndpointMode=alb`) |
@@ -535,11 +544,15 @@ eks-v1fs.yaml              CloudFormation template (all infrastructure)
 helm/
   values-base.yaml         V1FS Helm values — single source of truth for install and upgrades
   values-nlb.yaml          Overlay: internal NLB endpoint via the chart's externalService
-app/
+app/                       Python flavor (ScannerAppFlavor=python)
   Dockerfile               python:3.11-slim, non-root UID 999
   requirements.txt         Pinned dependencies (visionone-filesecurity, aiobotocore, boto3)
-  scanner.py               Async SQS polling, S3 download, V1FS scan, routing/tagging, health server, audit trail
+  scanner.py               Async SQS polling, S3 download, V1FS scan (clusterip or pull dispatch), routing/tagging, health server, audit trail
   config.py                Environment variable loading and validation
+app-java/                  Java flavor (ScannerAppFlavor=java) — feature-equivalent to app/
+  Dockerfile               Multi-stage: native Maven build ($BUILDPLATFORM) → JRE runtime, non-root UID 999
+  pom.xml                  file-security-java-sdk + AWS SDK v2 (sqs, s3, elbv2, secretsmanager, cloudwatchlogs)
+  src/main/java/com/trend/v1fs/scanner/  Config, ScannerApp, Dispatcher (clusterip/pull), ScannerPool, routing, audit, health
 k8s/
   serviceaccount.yaml      Kubernetes ServiceAccount (Pod Identity, no annotations)
   configmap.yaml           Environment config template (populated by deploy script)
@@ -560,18 +573,19 @@ scripts/
 
 ## Redeploying the Scanner App
 
-To update the custom scanner-app code (Python application in `app/`), connect to the bastion via Session Manager and run:
+To update the custom scanner-app code (Python `app/` or Java `app-java/`), connect to the bastion via Session Manager and run:
 
 ```bash
 cd /opt/eks-v1fs && git pull
 export CFN_STACK_NAME=my-scanner
 export AWS_REGION=us-east-1
-/opt/eks-v1fs/scripts/build-and-push.sh
+export SCANNER_APP_FLAVOR=python           # or java — must match what you deployed
+/opt/eks-v1fs/scripts/build-and-push.sh    # builds app/ (python) or app-java/ (java) accordingly
 /opt/eks-v1fs/scripts/deploy.sh
 /opt/eks-v1fs/scripts/deploy.sh --review   # only if the review pipeline is deployed
 ```
 
-This rebuilds the Docker image, pushes it to ECR, and re-applies the k8s manifests. The main and review scanner apps use the same Docker image — only the environment variables differ. This does **not** update the V1FS scanner — see [Updating the V1FS Scanner](#updating-the-v1fs-scanner) for that.
+This rebuilds the flavor's Docker image, pushes it to ECR, and re-applies the k8s manifests. The main and review scanner apps use the same Docker image — only the environment variables differ. This does **not** update the V1FS scanner — see [Updating the V1FS Scanner](#updating-the-v1fs-scanner) for that.
 
 ## Updating the V1FS Scanner
 

@@ -458,7 +458,7 @@ Three moving parts:
 
 ### It's the app's pull mode, not a separate program
 
-Everything above is built into the one app from §6 and is active whenever `ScannerDispatchMode=pull` — you don't build a separate consumer. The Java flavor's pull-mode code (SQS drain, target-group discovery, the per-pod pool, least-busy dispatch, and both reliability nets) lives in [`app-java/`](../../app-java/) — see `ScannerPool.java` for the pull dispatcher itself. A standalone, adapt-me illustration of the same pattern — useful if you're porting it into your own service — is in [`reference/java-KEDA/`](.). The full design rationale (L4 vs L7, why pull beats push, the SDK channel constraints) is in `temp/scanner-load-balancing.html`.
+Everything above is built into the one app from §6 and is active whenever `ScannerDispatchMode=pull` — you don't build a separate consumer. The Java flavor's pull-mode code (SQS drain, target-group discovery, the per-pod pool, least-busy dispatch, and both reliability nets) lives in [`app-java/`](../../app-java/) — see `ScannerPool.java` for the pull dispatcher itself. A standalone, adapt-me illustration of the same pattern — useful if you're porting it into your own service — is in [`reference/java-KEDA/`](.). The design rationale (L4 vs L7, why pull beats push, the SDK channel constraints) is the subject of this section.
 
 > The V1FS SDK builds a bare gRPC channel (no client-side `round_robin`/`least_request` and no channel injection), so this client-side dispatcher — the app's pull mode, not SDK config — is how a single client distributes its scans across the fleet.
 
