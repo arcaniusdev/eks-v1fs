@@ -17,10 +17,22 @@ spec:
   scaleTargetRef:
     name: scanner-app
     kind: Deployment
-  minReplicaCount: 1
+  minReplicaCount: 2      # keep 2 warm pollers (redundancy + no cold-start on the next burst)
   maxReplicaCount: <MAX_REPLICAS>
   pollingInterval: 5
   cooldownPeriod: 300
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        # Match the scanner's gentle drain so the app fleet doesn't churn
+        # during lulls. scaleUp left at the HPA default (fast) for bursts.
+        scaleDown:
+          stabilizationWindowSeconds: 600
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 60
+          selectPolicy: Min
   triggers:
     - type: aws-sqs-queue
       metadata:

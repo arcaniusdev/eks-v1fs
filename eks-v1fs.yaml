@@ -10,7 +10,7 @@ Parameters:
       matches this template, so the deployed components always match the template
       you launched. Override with a branch name (e.g. main) only for development.
     Type: String
-    Default: v2.2.0
+    Default: v2.3.0
   PrimaryAZ:
     Description: Availability Zone 1 (ignored when deploying into an existing VPC)
     Type: AWS::EC2::AvailabilityZone::Name
@@ -89,8 +89,16 @@ Parameters:
     MaxValue: 30
   ScannerMinReplicas:
     Type: Number
-    Description: Minimum V1FS scanner pods (chart HPA minReplicas)
-    Default: 1
+    Description: >
+      Minimum V1FS scanner pods (warm floor). Default 3 keeps enough warm pods
+      to absorb a burst while the autoscaler catches up: with a min of 1, a
+      single pod takes the whole incoming burst at high concurrency and its
+      per-scan latency inflates badly until KEDA scales the fleet and pull
+      discovers the new pods (measured ~3.5x higher median scan latency and
+      ~55% lower throughput than a warm floor). Raise to cover the sustained
+      baseline busy-pod count + headroom for latency-sensitive workloads; lower
+      to 1 to minimise idle cost on non-latency-sensitive evaluations.
+    Default: 3
     MinValue: 1
     MaxValue: 20
   ScannerMaxReplicas:
@@ -112,13 +120,16 @@ Parameters:
   ScannerScalingMode:
     Type: String
     Description: >
-      How the V1FS scanner fleet autoscales. hpa (default) = the chart's own
-      CPU/memory HPA — TrendAI's supported mechanism (python-default option).
-      keda = KEDA scales the scanner on SQS queue depth so the fleet tracks the
-      backlog (python-KEDA / java-KEDA options); requires a queue — the stack's
-      own in full-auto, or ExternalScanQueueArn in BYO. keda disables the chart
-      HPA; upgrade.py enforces exactly one autoscaler.
-    Default: "hpa"
+      How the V1FS scanner fleet autoscales. keda (default) = KEDA scales the
+      scanner on SQS queue depth so the fleet tracks the backlog; requires a
+      queue — the stack's own in full-auto, or ExternalScanQueueArn in BYO
+      (keda with no queue falls back to hpa automatically). hpa = the chart's
+      own CPU/memory HPA — TrendAI's supported mechanism; note CPU measures
+      per-pod busyness, not backlog, so once pods are ~80% busy a queue of 10
+      and 10,000 look identical, and the memory target sits flat at ~26% and
+      only ever votes to scale down. keda disables the chart HPA; upgrade.py
+      enforces exactly one autoscaler.
+    Default: "keda"
     AllowedValues:
       - "hpa"
       - "keda"
@@ -158,13 +169,22 @@ Parameters:
   ScannerDispatchMode:
     Type: String
     Description: >
-      How the scanning app reaches the scanner pods. clusterip (default) = one
-      gRPC connection to the in-cluster Service (simple, L4). pull = the app
+      How the scanning app reaches the scanner pods. auto (default) = pull when
+      an NLB exists (ScannerEndpointMode auto/nlb), clusterip otherwise (none,
+      alb) — so the default is pull on a default deploy. pull = the app
       discovers live scanner pod IPs from the NLB target group and dispatches
       each scan to the least-busy pod directly (no load balancer in the scan
-      path). pull requires an NLB endpoint (ScannerEndpointMode nlb or auto).
-    Default: clusterip
+      path); requires an NLB endpoint. clusterip = one gRPC connection to the
+      in-cluster Service (L4). WARNING: a ClusterIP Service load-balances per
+      CONNECTION, and gRPC holds one long-lived connection per app pod, so
+      scanner pods added by autoscaling AFTER the app connects receive no
+      traffic (measured: pods 61-91s old idle at 2-5m CPU while an older pod
+      ran 2176m). Safe behind an ALB, which balances per gRPC call, and with a
+      fixed-size fleet. pull re-reads the target group every POD_REFRESH_SECS
+      and so recovers from fleet growth.
+    Default: auto
     AllowedValues:
+      - auto
       - clusterip
       - pull
   ScannerAppMaxReplicas:
@@ -352,6 +372,28 @@ Rules:
           - !Equals [!Ref ScannerEndpointMode, "auto"]
           - !Equals [!Ref ScannerEndpointMode, "nlb"]
         AssertDescription: ScannerDispatchMode=pull requires an NLB endpoint (ScannerEndpointMode auto or nlb)
+  NoClusterIpWithQueueScaling:
+    # clusterip + keda is the one combination that fails while LOOKING healthy:
+    # KEDA drives the replica count to max on queue depth, but each app pod's
+    # gRPC connection is kube-proxy-pinned, so pods added by the scale-up get
+    # no traffic. `kubectl get pods` shows a full fleet while throughput
+    # reflects a fraction of it. Only block it where pull is actually
+    # available (an NLB exists) — behind an ALB clusterip is fine, because the
+    # ALB balances per gRPC call, and with endpoint=none there is no target
+    # group to pull from.
+    RuleCondition: !And
+      - !Equals [!Ref ScannerDispatchMode, "clusterip"]
+      - !Equals [!Ref ScannerScalingMode, "keda"]
+    Assertions:
+      - Assert: !Not
+          - !Or
+            - !Equals [!Ref ScannerEndpointMode, "auto"]
+            - !Equals [!Ref ScannerEndpointMode, "nlb"]
+        AssertDescription: >
+          ScannerDispatchMode=clusterip with ScannerScalingMode=keda is unsafe when an NLB
+          exists: KEDA grows the fleet but pinned gRPC connections never move to the new
+          pods, so they sit idle while the replica count looks healthy. Use
+          ScannerDispatchMode=auto or pull, or switch ScannerEndpointMode to alb/none.
   ExistingVpcRequiresAllParts:
     RuleCondition: !Not [!Equals [!Ref ExistingVpcId, ""]]
     Assertions:
@@ -371,9 +413,15 @@ Conditions:
   HasExternalScanQueue: !Not [!Equals [!Ref ExternalScanQueueArn, ""]]
   # Pull dispatch: the scanning app discovers scanner pod IPs from the NLB
   # target group and connects directly. Needs the scanner-app AND an NLB.
+  # Explicit "pull", or "auto" resolving to pull because an NLB exists — both
+  # need the target-group ARN and the ELB Describe* IAM below.
   PullDispatch: !And
     - !Condition ScannerAppEnabled
-    - !Equals [!Ref ScannerDispatchMode, "pull"]
+    - !Or
+      - !Equals [!Ref ScannerDispatchMode, "pull"]
+      - !And
+        - !Equals [!Ref ScannerDispatchMode, "auto"]
+        - !Condition ExposeNLB
   # KEDA is installed (and its operator role created) exactly when there is a
   # queue for it to watch: the scanner-app queue (full-auto) or an external
   # queue (BYO). keda mode without either falls back to the chart HPA, so it

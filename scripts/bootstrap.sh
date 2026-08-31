@@ -30,6 +30,22 @@ if [ "${ENDPOINT_MODE:-}" = "auto" ]; then
   echo "Resolved ScannerEndpointMode=auto -> nlb"
 fi
 
+# Resolve the 'auto' dispatch mode, AFTER ENDPOINT_MODE above so it can see the
+# resolved value. pull whenever an NLB exists (its target group is the pod
+# registry), clusterip otherwise:
+#   alb  -> the ALB is L7 and balances per gRPC call, so one connection is fine
+#   none -> no load balancer, so no target group to discover pods from
+# Mirrors the PullDispatch Condition in the CloudFormation template.
+if [ "${SCANNER_DISPATCH_MODE:-auto}" = "auto" ]; then
+  if [ "$ENDPOINT_MODE" = "nlb" ]; then
+    SCANNER_DISPATCH_MODE="pull"
+  else
+    SCANNER_DISPATCH_MODE="clusterip"
+  fi
+  echo "Resolved ScannerDispatchMode=auto -> $SCANNER_DISPATCH_MODE (endpoint=$ENDPOINT_MODE)"
+fi
+export SCANNER_DISPATCH_MODE
+
 # Resolve the scanner autoscaler:
 #   hpa  -> the chart's CPU/mem HPA (TrendAI-supported; python-default option)
 #   keda -> KEDA scales the scanner on SQS queue depth (python-KEDA/java-KEDA).
@@ -37,7 +53,7 @@ fi
 # ScaledObject); BYO uses ExternalScanQueueArn (applied later in this script).
 # keda with no queue available falls back to hpa so the scanner still scales.
 SCANNER_KEDA=false
-if [ "${SCANNER_SCALING_MODE:-hpa}" = "keda" ]; then
+if [ "${SCANNER_SCALING_MODE:-keda}" = "keda" ]; then
   if [ "${DEPLOY_SCANNER_APP:-}" = "true" ] || [ -n "${EXTERNAL_SCAN_QUEUE_ARN:-}" ]; then
     SCANNER_KEDA=true
     echo "Scanner autoscaler: KEDA on queue depth (chart HPA disabled)"

@@ -10,6 +10,33 @@ scripts, app code, and Helm values.
 
 ## [Unreleased]
 
+## [2.3.0]
+### Changed
+- **keda + pull are now the shipped defaults.** `ScannerScalingMode` defaults to
+  `keda` (was `hpa`) and `ScannerDispatchMode` to `auto` (was `clusterip`) — `auto`
+  resolves to `pull` when an NLB endpoint exists (the default) and `clusterip`
+  otherwise. Queue-depth scaling with direct per-pod dispatch is now the
+  out-of-the-box behavior for latency-sensitive workloads. `hpa` (the
+  TrendAI-supported mechanism) remains available via `ScannerScalingMode=hpa`.
+- **Warm floor.** `ScannerMinReplicas` default `1 → 3` and the scanner-app KEDA
+  `minReplicaCount` `1 → 2`. Stops the fleet collapsing to a single pod during
+  lulls: a lone pod otherwise absorbs a whole burst at high concurrency and
+  per-scan latency inflates until KEDA re-scales and pull discovers the new pods
+  (measured ~3.5x higher median scan latency and ~55% lower throughput than a
+  warm floor on an identical corpus).
+- **Gentle KEDA scale-down** on both ScaledObjects via the HPA
+  `behavior.scaleDown` (600s stabilization window, at most 1 pod/min,
+  `selectPolicy: Min`); scale-up is left at the fast HPA default. Keeps the fleet
+  warm and spread through traffic lulls instead of collapsing and re-expanding.
+### Added
+- **`auto` value for `ScannerDispatchMode`** — resolves to `pull` behind an NLB
+  and `clusterip` otherwise, resolved identically in `bootstrap.sh` and the
+  `PullDispatch` CloudFormation condition.
+- **`NoClusterIpWithQueueScaling` CFN Rule** — blocks `clusterip` + `keda` when an
+  NLB exists: the fleet grows on queue depth but each app pod's pinned gRPC
+  connection never moves to the new pods, so they idle while the replica count
+  looks healthy.
+
 ## [2.2.0]
 ### Added
 - **Unified scanning app in two language flavors.** One app that does everything
