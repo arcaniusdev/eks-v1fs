@@ -10,6 +10,21 @@ scripts, app code, and Helm values.
 
 ## [Unreleased]
 
+## [2.4.0]
+### Added
+- **Scan-latency attribution audit fields `acquireWaitMs` + `scanCallMs`** (python and
+  java flavors). Additive, non-breaking split of the unchanged `scanDurationMs`:
+  `acquireWaitMs` = client-side wait for a free scanner-pod slot (`_acquire_least_busy`,
+  pull mode; 0 in clusterip), `scanCallMs` = the gRPC `scan_buffer` call. Lets a high
+  `scanDurationMs` be attributed to fan-out queueing vs genuine scan cost.
+### Changed
+- Exposed `ScannerQueueLength`, `ScannerAppPerPodCapacity`, and
+  `ScannerAppMaxConcurrentScans` as CloudFormation parameters (wired via UserData →
+  bootstrap/deploy env); previously runtime-only.
+- Raised parameter ceilings: `ScannerMaxReplicas` MaxValue 50 → 100, `NodeGroupMaxSize`
+  MaxValue 30 → 60 (for high-throughput ~50M/day profiles).
+- `RepoRef` default bumped v2.3.0 → v2.4.0.
+
 ## [2.3.0]
 ### Changed
 - **keda + pull are now the shipped defaults.** `ScannerScalingMode` defaults to
