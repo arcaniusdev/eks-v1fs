@@ -83,10 +83,12 @@ Parameters:
     Description: >
       Maximum nodes the Cluster Autoscaler may scale the managed node group to.
       Default 8 fits full-mode peak (10 V1FS scanners + 20 scanner-app pods +
-      review pipeline + system pods) on r7i.xlarge nodes.
+      review pipeline + system pods) on r7i.xlarge nodes. Raised ceiling (60)
+      accommodates high-throughput profiles (e.g. ~50M files/day needs ~36
+      xlarge or ~18 2xlarge nodes) — mind the account EC2 On-Demand vCPU quota.
     Default: 8
     MinValue: 1
-    MaxValue: 30
+    MaxValue: 60
   ScannerMinReplicas:
     Type: Number
     Description: >
@@ -106,7 +108,7 @@ Parameters:
     Description: Maximum V1FS scanner pods (chart HPA maxReplicas, CPU/memory 80% targets)
     Default: 10
     MinValue: 1
-    MaxValue: 50
+    MaxValue: 100
   DeployScannerApp:
     Type: String
     Description: >
@@ -193,6 +195,35 @@ Parameters:
     Default: 20
     MinValue: 1
     MaxValue: 100
+  ScannerAppMaxConcurrentScans:
+    Type: Number
+    Description: >
+      Max concurrent scans per scanner-app pod (MAX_CONCURRENT_SCANS) — a global
+      per-pod semaphore over in-flight scans. Raising it increases fan-out onto
+      the scanner fleet; tune ScannerAppPerPodCapacity first if pods show contention.
+    Default: 50
+    MinValue: 1
+    MaxValue: 1000
+  ScannerAppPerPodCapacity:
+    Type: Number
+    Description: >
+      Max in-flight scans one scanner-app pod will send to a single V1FS scanner
+      pod (PER_POD_CAPACITY, pull dispatch only). The direct fan-out governor:
+      concurrency on a scanner pod ~= (app pods x this) / scanner pods. ~5 is the
+      healthy per-pod concurrency; lower it if the client sidecar shows scan contention.
+    Default: 30
+    MinValue: 1
+    MaxValue: 1000
+  ScannerQueueLength:
+    Type: Number
+    Description: >
+      KEDA target of SQS messages per V1FS scanner pod (SCANNER_QUEUE_LENGTH).
+      desired scanner pods = ceil((visible + in-flight msgs) / this), clamped to
+      ScannerMinReplicas..ScannerMaxReplicas. Lower it to engage the fleet sooner
+      under sustained load (keeps per-pod concurrency and scan latency down).
+    Default: 50
+    MinValue: 1
+    MaxValue: 10000
   DeployReviewPipeline:
     Type: String
     Description: >
@@ -2003,6 +2034,9 @@ Resources:
             export SCANNER_MIN_REPLICAS="${ScannerMinReplicas}"
             export SCANNER_MAX_REPLICAS="${ScannerMaxReplicas}"
             export SCANNER_APP_MAX_REPLICAS="${ScannerAppMaxReplicas}"
+            export SCANNER_QUEUE_LENGTH="${ScannerQueueLength}"
+            export PER_POD_CAPACITY="${ScannerAppPerPodCapacity}"
+            export MAX_CONCURRENT_SCANS="${ScannerAppMaxConcurrentScans}"
 
             # ---- Scan policy ----
             export MAX_DECOMPRESSION_LAYER="${MaxDecompressionLayer}"
