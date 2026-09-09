@@ -127,20 +127,29 @@ public final class ScannerPool implements Dispatcher {
      * chosen one errors. Returns the V1FS JSON verdict.
      */
     @Override
-    public String scan(byte[] data, String uid) throws Exception {
+    public String scan(byte[] data, String uid, java.util.Map<String, Long> timing) throws Exception {
         AMaasScanOptions options = AMaasScanOptions.builder()
                 .pml(pml)
                 .tagList(new String[]{"S3-Scan"})
                 .build();
         Exception last = null;
+        long acquireMs = 0;                     // slot-wait, accumulated across retries
         for (int attempt = 0; attempt < 3; attempt++) {
+            long acqStart = System.nanoTime();
             PodClient pc = acquireLeastBusy(ACQUIRE_TIMEOUT_MS);
+            acquireMs += (System.nanoTime() - acqStart) / 1_000_000;
             if (pc == null) {
                 throw new NoCapacityException(
                         "no scanner pod capacity within " + ACQUIRE_TIMEOUT_MS + "ms");
             }
             try {
-                return pc.client.scanBuffer(data, uid, true, options);
+                long callStart = System.nanoTime();
+                String result = pc.client.scanBuffer(data, uid, true, options);
+                if (timing != null) {
+                    timing.put("acquireMs", acquireMs);
+                    timing.put("scanCallMs", (System.nanoTime() - callStart) / 1_000_000);
+                }
+                return result;
             } catch (Exception e) {
                 last = e;                       // pod-level failure → try another pod
                 if (pc.draining) pods.remove(pc.addr);

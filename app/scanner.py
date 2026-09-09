@@ -260,15 +260,28 @@ class AsyncPodPool:
             except Exception:
                 logger.warning("Pod discovery refresh failed; keeping current roster", exc_info=True)
 
-    async def scan(self, data: bytes, uid: str, pml: bool, tags: list) -> str:
+    async def scan(self, data: bytes, uid: str, pml: bool, tags: list, timing: dict | None = None) -> str:
+        # When `timing` is supplied it is populated (additively, no behavior
+        # change) with acquire_ms — time spent waiting for a free scanner-pod
+        # slot (_acquire_least_busy, accumulated across retries) — and
+        # scan_call_ms — the actual gRPC scan_buffer round-trip. This lets the
+        # audit trail attribute latency to fan-out queueing vs engine time.
         deadline = asyncio.get_running_loop().time() + 60
         last_exc = None
+        acquire_ms = 0.0
         for _ in range(3):
+            acq_start = time.monotonic()
             pod = await self._acquire_least_busy(deadline)
+            acquire_ms += (time.monotonic() - acq_start) * 1000
             if pod is None:
                 raise NoCapacity("no scanner pod capacity within 60s")
             try:
-                return await amaas.grpc.aio.scan_buffer(pod.handle, data, uid, pml=pml, tags=tags)
+                call_start = time.monotonic()
+                result = await amaas.grpc.aio.scan_buffer(pod.handle, data, uid, pml=pml, tags=tags)
+                if timing is not None:
+                    timing["acquire_ms"] = acquire_ms
+                    timing["scan_call_ms"] = (time.monotonic() - call_start) * 1000
+                return result
             except Exception as exc:               # pod-level failure → try another pod
                 last_exc = exc
                 if pod.draining:
@@ -541,21 +554,30 @@ class ScannerApp:
                 })
         return records
 
-    async def _scan(self, data: bytes, uid: str) -> str:
+    async def _scan(self, data: bytes, uid: str, timing: dict | None = None) -> str:
         """Scan a buffer, dispatching per DISPATCH_MODE.
 
         clusterip: one shared handle to the in-cluster Service (the Service
         spreads connections across pods). pull: hand to the least-busy pod via
         the discovery pool. Same result JSON either way, so routing is
         dispatch-agnostic.
+
+        When `timing` is provided it is populated with acquire_ms (slot-wait)
+        and scan_call_ms (gRPC scan). clusterip has no client-side slot-wait, so
+        acquire_ms is 0 there.
         """
         if self._pool is not None:
             return await self._pool.scan(
-                data, uid, pml=self.config.pml_enabled, tags=["S3-Scan"]
+                data, uid, pml=self.config.pml_enabled, tags=["S3-Scan"], timing=timing
             )
-        return await amaas.grpc.aio.scan_buffer(
+        call_start = time.monotonic()
+        result = await amaas.grpc.aio.scan_buffer(
             self.scan_handle, data, uid, pml=self.config.pml_enabled, tags=["S3-Scan"]
         )
+        if timing is not None:
+            timing["acquire_ms"] = 0.0
+            timing["scan_call_ms"] = (time.monotonic() - call_start) * 1000
+        return result
 
     async def _process_record(self, record: dict, message_id: str) -> None:
         bucket = record["bucket"]
@@ -618,8 +640,9 @@ class ScannerApp:
 
         # Scan
         try:
+            timing: dict = {}
             scan_start = time.monotonic()
-            result_json = await self._scan(file_bytes, key)
+            result_json = await self._scan(file_bytes, key, timing=timing)
             scan_duration_ms = int((time.monotonic() - scan_start) * 1000)
             result = json.loads(result_json)
             is_malicious = result.get("scanResult", 0) > 0
@@ -678,7 +701,7 @@ class ScannerApp:
                 # it's a user's own bucket — DELETE_SOURCE_ENABLED).
                 await self._upload(dest_bucket, key, file_bytes, tags)
                 await self._finalize_source(bucket, key, tags)
-            self._enqueue_audit(key, size, verdict, result, scan_duration_ms, message_id)
+            self._enqueue_audit(key, size, verdict, result, scan_duration_ms, message_id, timing)
         finally:
             del file_bytes  # Explicit cleanup of large buffer
             await self._byte_budget.release(reserved)
@@ -806,7 +829,7 @@ class ScannerApp:
 
     # --- Audit Trail ---
 
-    def _enqueue_audit(self, key: str, size: int, verdict: str, result: dict, scan_duration_ms: int, message_id: str) -> None:
+    def _enqueue_audit(self, key: str, size: int, verdict: str, result: dict, scan_duration_ms: int, message_id: str, timing: dict | None = None) -> None:
         if not self.config.audit_log_group:
             return
         entry = {
@@ -822,6 +845,11 @@ class ScannerApp:
             "scannerVersion": result.get("scannerVersion", ""),
             "fileSHA1": result.get("fileSHA1", ""),
             "scanDurationMs": scan_duration_ms,
+            # scanDurationMs is the total measured window (unchanged). These two
+            # split it: acquireWaitMs = client-side wait for a free scanner-pod
+            # slot (pull mode; 0 for clusterip), scanCallMs = the gRPC scan call.
+            "acquireWaitMs": int((timing or {}).get("acquire_ms", 0)),
+            "scanCallMs": int((timing or {}).get("scan_call_ms", 0)),
             "pod": socket.gethostname(),
             "messageId": message_id,
         }

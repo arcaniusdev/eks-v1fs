@@ -350,7 +350,7 @@ public final class ScannerApp {
             }
             copyObject(bucket, key, destBucket, Map.of("ScanResult", tag));
             finalizeSource(bucket, key, Map.of("ScanResult", tag));
-            enqueueAudit(key, size, verdict, null, 0, messageId);
+            enqueueAudit(key, size, verdict, null, 0, messageId, null);
             return;
         }
 
@@ -369,8 +369,9 @@ public final class ScannerApp {
         }
 
         try {
+            java.util.Map<String, Long> timing = new java.util.HashMap<>();
             long scanStart = System.nanoTime();
-            String resultJson = dispatcher.scan(fileBytes, key);
+            String resultJson = dispatcher.scan(fileBytes, key, timing);
             int scanDurationMs = (int) ((System.nanoTime() - scanStart) / 1_000_000);
             JsonNode result = mapper.readTree(resultJson);
 
@@ -418,7 +419,7 @@ public final class ScannerApp {
                 upload(destBucket, key, fileBytes, tags);
                 finalizeSource(bucket, key, tags);
             }
-            enqueueAudit(key, size, verdict, result, scanDurationMs, messageId);
+            enqueueAudit(key, size, verdict, result, scanDurationMs, messageId, timing);
         } finally {
             fileBytes = null;   // help GC release the large buffer promptly
             byteBudget.release(reserved);
@@ -547,7 +548,7 @@ public final class ScannerApp {
     // --- Audit ---------------------------------------------------------------
 
     private void enqueueAudit(String key, long size, String verdict, JsonNode result,
-                              int scanDurationMs, String messageId) {
+                              int scanDurationMs, String messageId, java.util.Map<String, Long> timing) {
         if (auditTrail == null) return;
         Map<String, Object> entry = new LinkedHashMap<>();
         entry.put("timestamp", System.currentTimeMillis() / 1000.0);
@@ -562,6 +563,11 @@ public final class ScannerApp {
         entry.put("scannerVersion", result != null ? result.path("scannerVersion").asText("") : "");
         entry.put("fileSHA1", result != null ? result.path("fileSHA1").asText("") : "");
         entry.put("scanDurationMs", scanDurationMs);
+        // scanDurationMs is the total window (unchanged). These two split it:
+        // acquireWaitMs = wait for a free scanner-pod slot (pull; 0 for clusterip),
+        // scanCallMs = the gRPC scan call.
+        entry.put("acquireWaitMs", timing != null && timing.get("acquireMs") != null ? timing.get("acquireMs") : 0L);
+        entry.put("scanCallMs", timing != null && timing.get("scanCallMs") != null ? timing.get("scanCallMs") : 0L);
         entry.put("pod", hostname);
         entry.put("messageId", messageId);
         auditTrail.enqueue(entry);

@@ -31,14 +31,20 @@ public final class ClusterIpDispatcher implements Dispatcher {
     }
 
     @Override
-    public String scan(byte[] data, String uid) throws Exception {
+    public String scan(byte[] data, String uid, java.util.Map<String, Long> timing) throws Exception {
         AMaasScanOptions options = AMaasScanOptions.builder()
                 .pml(pml)
                 .tagList(new String[]{"S3-Scan"})
                 .build();
         // scanBuffer(data, identifier, digest, options). digest=true so repeat
         // scans of the same content hit the scanner's hash cache.
-        return client.scanBuffer(data, uid, true, options);
+        long callStart = System.nanoTime();
+        String result = client.scanBuffer(data, uid, true, options);
+        if (timing != null) {
+            timing.put("acquireMs", 0L);   // clusterip has no client-side slot-wait
+            timing.put("scanCallMs", (System.nanoTime() - callStart) / 1_000_000);
+        }
+        return result;
     }
 
     @Override
