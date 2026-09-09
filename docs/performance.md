@@ -58,6 +58,7 @@ Either way, KEDA scales our scanner-app (full-auto) on queue depth, and nodes sc
 - Review scanner-app resources: 500m/2Gi requests, 1000m/4Gi limits (higher memory for oversize files)
 - Health probes: liveness `/healthz`, readiness `/readyz` on port 8080
 - Scan audit trail: structured JSON to CloudWatch Logs (`scan-audit-${StackName}`), batched writes
+- Latency attribution per scan: `scanDurationMs` (total, unchanged) splits into `acquireWaitMs` (wait for a free scanner-pod slot; pull mode, 0 for clusterip) + `scanCallMs` (gRPC scan call). A high `scanDurationMs` with a large `acquireWaitMs` is fan-out queueing (scale scanner pods / lower `PER_POD_CAPACITY`), not a slow engine; a large `scanCallMs` is genuine scan cost or server-side contention
 
 ## V1FS Scanner Settings
 - Pod resources: 800m CPU / 2Gi memory — these are now the chart defaults, so no override is set in `values-base.yaml`
