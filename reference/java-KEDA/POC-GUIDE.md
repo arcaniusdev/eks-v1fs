@@ -90,10 +90,10 @@ flowchart TB
     LB["Internal NLB or ALB<br/>gRPC :50051 / TLS :443"]:::endpoint
 
     subgraph EKS["EKS cluster — managed node group r8g.xlarge × 2–8, Cluster Autoscaler"]
-      V1FS["V1FS scanner<br/>KEDA 1–10 on queue depth"]:::core
+      V1FS["V1FS scanner<br/>KEDA 3–10 on queue depth"]:::core
       SUP["V1FS support pods<br/>management · database · cache · communicator"]:::core
       RV["V1FS rv release<br/>no decompression limits · HPA 1–3"]:::review
-      APP["scanner-app<br/>KEDA 1–20 on queue depth"]:::app
+      APP["scanner-app<br/>KEDA 2–20 on queue depth"]:::app
       RAPP["review-scanner-app<br/>KEDA 1–5 always-warm"]:::review
       SYS["System: Cluster Autoscaler · LB controller · metrics-server · Pod Identity agent · EBS/EFS CSI · KEDA operator"]:::core
     end
@@ -151,8 +151,8 @@ Three more parameters select the *shape* of the deployment — which language th
 | Parameter | Values | This scenario (java-KEDA) |
 |---|---|---|
 | `ScannerAppFlavor` | `python` (default) · `java` | **`java`** — the app is `app-java/` |
-| `ScannerDispatchMode` | `clusterip` (default) · `pull` | **`pull`** — the app discovers scanner pod IPs from the NLB target group and dispatches to the least-busy pod (§8a) |
-| `ScannerScalingMode` | `hpa` (default) · `keda` | **`keda`** — the scanner scales on SQS queue depth (§17 covers the supportability trade-off) |
+| `ScannerDispatchMode` | `auto` (default) · `clusterip` · `pull` | **`pull`** — the app discovers scanner pod IPs from the NLB target group and dispatches to the least-busy pod (§8a); `auto` resolves to `pull` here (an NLB endpoint exists) |
+| `ScannerScalingMode` | `keda` (default) · `hpa` | **`keda`** — the scanner scales on SQS queue depth (§17 covers the supportability trade-off) |
 
 Both flavors are feature-equivalent and read the same configuration; the flavor and dispatch modes are described in §6. `pull` mode requires an NLB endpoint — `ScannerEndpointMode=auto` (the default) provides one and doubles as the pod-discovery registry. The supported chart-HPA baseline with the Python flavor and simple `clusterip` dispatch is the **python-default** guide.
 
@@ -165,7 +165,7 @@ Deploy from the **AWS Console** (click-by-click, below) or the **AWS CLI** (auto
 
 ### Step 1 — Get the template
 
-Download `eks-v1fs.yaml` from the [**eks-v1fs repository**](https://github.com/arcaniusdev/eks-v1fs) — ideally from the [latest tagged release](https://github.com/arcaniusdev/eks-v1fs/tags), so the components the bastion pulls at deploy time match the template you launch. That's the only file you need. (Direct link to the current release template: `https://raw.githubusercontent.com/arcaniusdev/eks-v1fs/v1.0.2/eks-v1fs.yaml`.)
+Download `eks-v1fs.yaml` from the [**eks-v1fs repository**](https://github.com/arcaniusdev/eks-v1fs) — ideally from the [latest tagged release](https://github.com/arcaniusdev/eks-v1fs/tags), so the components the bastion pulls at deploy time match the template you launch. That's the only file you need. (Direct link to the current release template: `https://raw.githubusercontent.com/arcaniusdev/eks-v1fs/v2.4.0/eks-v1fs.yaml`.)
 
 ### Step 2 — Start the Create stack wizard
 
@@ -791,7 +791,7 @@ kubectl exec deploy/my-release-visionone-filesecurity-management-service \
 
 ## 17. Scaling expectations
 
-The scanner fleet is scaled by **KEDA on the scan queue's depth** (1–10 pods by default), so it grows and shrinks with your backlog rather than with CPU load; the cluster adds nodes through the standard Kubernetes Cluster Autoscaler.
+The scanner fleet is scaled by **KEDA on the scan queue's depth** (3–10 pods by default), so it grows and shrinks with your backlog rather than with CPU load; the cluster adds nodes through the standard Kubernetes Cluster Autoscaler.
 
 > **Configuration note.** This is a queue-driven variant. The chart's own CPU/memory HPA is **disabled** (`scanner.autoscaling.enabled=false`) so it doesn't fight KEDA — which means scanner scaling here differs from TrendAI's *supported* chart-HPA mechanism. Run Helm upgrades **only** through `scripts/upgrade.py` (never a bare `helm upgrade`): it keeps the chart HPA off and fails the upgrade if one reappears alongside KEDA (two autoscalers would thrash the replica count).
 

@@ -9,8 +9,8 @@ Everything deploys from one template — the EKS cluster, networking, storage, t
 There is **one scanning app** — it drains SQS, scans, and routes verdicts — shipped in **two feature-equivalent language flavors** (Python `app/`, Java `app-java/`). Three parameters configure how it runs, and each common combination has a worked reference and POC guide under [`reference/`](reference/):
 
 - **`ScannerAppFlavor`** (`python` | `java`, default `python`) — which flavor the stack builds and deploys.
-- **`ScannerDispatchMode`** (`clusterip` | `pull`, default `clusterip`) — how the app reaches the scanner pods: one gRPC connection to the in-cluster Service, or client-side pod discovery + least-busy dispatch.
-- **`ScannerScalingMode`** (`hpa` | `keda`, default `hpa`) — how the V1FS scanner fleet autoscales.
+- **`ScannerDispatchMode`** (`auto` | `clusterip` | `pull`, default `auto`) — how the app reaches the scanner pods: `auto` resolves to `pull` when an NLB endpoint exists (the default), otherwise `clusterip`. `pull` is client-side pod discovery + least-busy dispatch; `clusterip` is one gRPC connection to the in-cluster Service.
+- **`ScannerScalingMode`** (`hpa` | `keda`, default `keda`) — how the V1FS scanner fleet autoscales. `keda` (default) scales the scanner fleet on SQS queue depth (chart HPA disabled); `hpa` is the opt-in TrendAI-supported chart CPU/memory HPA.
 
 | Option | Flavor | Dispatch | Scanner autoscaling | Use when | Guide |
 |---|---|---|---|---|---|
@@ -20,8 +20,8 @@ There is **one scanning app** — it drains SQS, scans, and routes verdicts — 
 
 The options are scenarios of the *same* app, not separate programs — you can mix the parameters (e.g. Java flavor with `clusterip`, or Python with `hpa` + `pull`). Common to all: **NLB endpoint by default** (ALB with a self-signed cert is opt-in via `ScannerEndpointMode`), **Graviton/ARM by default** (`r8g.xlarge`), and the same CloudFormation template + bootstrap.
 
-- **`ScannerScalingMode=hpa` (default)** — the chart's own CPU/memory HPA scales the scanner. This is TrendAI's supported autoscaling.
-- **`ScannerScalingMode=keda`** — KEDA scales the scanner on SQS queue depth so the fleet size follows the backlog (needs a queue: the stack's own, or the `ExternalScanQueueArn` you bring). The chart HPA is disabled; `scripts/upgrade.py` enforces exactly one autoscaler. This is a customer variant, *not* the TrendAI-supported path.
+- **`ScannerScalingMode=keda` (default)** — KEDA scales the scanner on SQS queue depth so the fleet size follows the backlog (needs a queue: the stack's own, or the `ExternalScanQueueArn` you bring). The chart HPA is disabled; `scripts/upgrade.py` enforces exactly one autoscaler. This is a customer variant, *not* the TrendAI-supported path.
+- **`ScannerScalingMode=hpa`** — the chart's own CPU/memory HPA scales the scanner. This is TrendAI's supported autoscaling (opt-in).
 
 You can also point the scanner-app at **your own existing SQS queue** instead of the one the stack builds — set `ExternalScanQueueArn` (the queue, S3-event-shaped messages) plus `ExternalScanSourceBucketArns` (the buckets its events reference, for read/tag IAM). The stack then builds no ingest bucket, scan queue, DLQ, S3 wiring, or dashboard; clean files are tagged in place in your bucket and malicious files are copied to the stack's quarantine bucket (your objects are never deleted). Full-auto only, mutually exclusive with `ExistingIngestBucket`.
 
@@ -41,14 +41,14 @@ For more information, see the [Vision One File Security Helm chart repository](h
 
 This stack deploys Vision One File Security the way TrendAI documents and supports. What that means concretely:
 
-- **The V1FS scanner scales with the Helm chart's own HPA** (`scanner.autoscaling.enabled=true`, CPU 80% / memory 80% targets) — TrendAI's supported autoscaling mechanism. Replica bounds come from `ScannerMinReplicas` / `ScannerMaxReplicas` (default 1–10).
+- **The V1FS scanner scales on SQS queue depth via KEDA by default** (`ScannerScalingMode=keda`) so the fleet tracks the backlog; the chart's own CPU/memory HPA (`scanner.autoscaling.enabled=true`, CPU 80% / memory 80% targets) is the opt-in TrendAI-supported mechanism (`ScannerScalingMode=hpa`). Either way, replica bounds come from `ScannerMinReplicas` / `ScannerMaxReplicas` (default 3–10; a warm floor of 3 pods absorbs bursts while the autoscaler catches up).
 - **Nodes scale with the standard Kubernetes Cluster Autoscaler** on a single managed node group.
-- **The S3/SQS scanning application is an optional module** (`DeployScannerApp`, default on). Turn it off and the stack is a clean V1FS deployment plus a scanner endpoint for your own application. When on, the scanning app scales on SQS queue depth via KEDA.
+- **The S3/SQS scanning application is an optional module** (`DeployScannerApp`, default on). Turn it off and the stack is a clean V1FS deployment plus a scanner endpoint for your own application. When on, the scanning app also scales on SQS queue depth via KEDA.
 - **The review pipeline is optional and off by default** (`DeployReviewPipeline`). Without it, files that exceed decompression limits are quarantined with explanatory tags rather than passed as clean.
 - **The Helm chart version is pinned**, with all custom values consolidated in `helm/values-base.yaml` — the single source of truth for install and upgrades.
 - **Deployment options**: scan a new or existing S3 bucket (`ExistingIngestBucket`), expose the scanner endpoint via an internal NLB (default) or a TLS ALB (`ScannerEndpointMode`), and deploy into a new or existing VPC (`ExistingVpcId`).
 
-**Scaling is steady, not bursty.** The chart HPA plus Cluster Autoscaler react in roughly 1–3 minutes (metrics window + node provisioning) — normal for a supported configuration. A burst of files simply queues in SQS and drains as capacity comes online; nothing is lost. This deployment favors supportability over peak throughput.
+**Scaling is steady, not bursty.** KEDA (or the chart HPA in `hpa` mode) plus the Cluster Autoscaler react in roughly 1–3 minutes (queue/metrics window + node provisioning) — normal for a supported configuration. A burst of files simply queues in SQS and drains as capacity comes online; nothing is lost. This deployment favors supportability over peak throughput.
 
 ## Deployment Modes
 
@@ -56,17 +56,17 @@ Four parameter combinations cover the common cases:
 
 | Mode | DeployScannerApp | DeployReviewPipeline | ExistingIngestBucket | ScannerEndpointMode | What you get |
 |---|---|---|---|---|---|
-| **Default (full auto-scan)** | `true` | `false` | *(empty)* | `nlb` | Complete pipeline: new ingest bucket → SQS → scanner-app. Clean files are tagged in place; malicious files are moved to the quarantine bucket. Decompression-limit files are quarantined with distinct tags. Scanner endpoint also published for ad-hoc use. |
+| **Default (full auto-scan)** | `true` | `false` | *(empty)* | `auto` (→ NLB) | Complete pipeline: new ingest bucket → SQS → scanner-app. Clean files are tagged in place; malicious files are moved to the quarantine bucket. Decompression-limit files are quarantined with distinct tags. Scanner endpoint also published for ad-hoc use. |
 | **Endpoint-only (bring your own app)** | `false` | `false` | — | `nlb` or `alb` | Just the TrendAI V1FS scanner on EKS plus a gRPC endpoint. No buckets, queues, ECR, scanner-app IAM, DLQ Lambdas, dashboard, or KEDA. Connect your own application via the SDK. |
 | **Existing bucket** | `true` | `false` | *your bucket name* | any | Scans a bucket you already own via S3 → EventBridge → SQS. Every object is **tagged in place** with the verdict and never deleted; a malicious file is additionally **copied** to the quarantine bucket (the original stays put). |
 | **External queue drain** | `true` | `false` | *(empty)* | any | Set `ExternalScanQueueArn` + `ExternalScanSourceBucketArns` — the scanner-app drains **your** SQS queue (S3-event-shaped messages) instead of a stack-built one. No ingest bucket, scan queue, DLQ, S3 wiring, or dashboard is created. Clean tagged in place, malicious copied to quarantine; your objects never deleted. Mutually exclusive with `ExistingIngestBucket`. |
 | **Full + review pipeline** | `true` | `true` | *(empty or set)* | any | Adds a second V1FS release with unlimited decompression that re-scans archives exceeding the main scanner's limits before a final verdict (tag in place / quarantine). |
 
-CloudFormation Rules enforce the valid combinations: `DeployReviewPipeline=true` requires `DeployScannerApp=true`, and `ScannerEndpointMode=alb` requires both `ACMCertificateArn` and `ScannerDomain`.
+CloudFormation Rules enforce the valid combinations: `DeployReviewPipeline=true` requires `DeployScannerApp=true`, and `alb` requires `ScannerDomain` plus a cert — self-signed by default (`SelfSignedScannerCert=true`), or supply `ACMCertificateArn`.
 
 ## How It Works
 
-The core of every deployment is the TrendAI V1FS scanner, installed via the official Helm chart and scaled by the chart's own HPA. The scanning application and review pipeline are optional modules layered on top:
+The core of every deployment is the TrendAI V1FS scanner, installed via the official Helm chart and scaled by KEDA on SQS queue depth by default (chart HPA in the opt-in `hpa` mode). The scanning application and review pipeline are optional modules layered on top:
 
 ```
                         ┌────────────────────────────────────────────────────┐
@@ -74,8 +74,8 @@ The core of every deployment is the TrendAI V1FS scanner, installed via the offi
                         │                                                    │
   Your own app ─────────┼──▶ NLB / ALB ──▶ TrendAI V1FS Scanner              │
   (SDK over gRPC)       │   (optional        Helm chart 1.4.10               │
-                        │    endpoint)       chart HPA: 1–10 pods            │
-                        │                    (CPU 80% / memory 80%)          │
+                        │    endpoint)       KEDA on SQS depth: 3–10 pods    │
+                        │                    (chart HPA in hpa mode)         │
                         │                        ▲ gRPC :50051               │
                         │                        │                           │
                         │  ┌─────────────────────┴──────────────────────┐    │
@@ -186,9 +186,9 @@ Node group sizing (all configurable via parameters):
 
 ### Autoscaling
 
-Scaling is deliberately conventional — each component scales by the mechanism its vendor supports:
+Scaling is deliberately conventional — the scanner fleet has two selectable modes, and every other component scales by the mechanism its vendor supports:
 
-**V1FS scanner pods — chart-native HPA.** The Helm chart's built-in HorizontalPodAutoscaler (`scanner.autoscaling.enabled=true`) scales scanner pods on **CPU 80% / memory 80%** utilization targets. This is the autoscaling mechanism TrendAI documents and supports. Bounds are set by the `ScannerMinReplicas` / `ScannerMaxReplicas` CloudFormation parameters (default 1–10). The Metrics Server (installed by the bootstrap) provides the utilization metrics. **KEDA never touches the chart-owned scanner.**
+**V1FS scanner pods — KEDA on SQS depth (default) or chart-native HPA (`hpa` mode).** By default (`ScannerScalingMode=keda`), KEDA scales the scanner fleet on **SQS queue depth** so the fleet tracks the backlog — the same signal the scanner-app uses — and the chart's own HPA is disabled. Select `ScannerScalingMode=hpa` for the chart's built-in HorizontalPodAutoscaler (`scanner.autoscaling.enabled=true`, **CPU 80% / memory 80%** targets), which is the autoscaling mechanism TrendAI documents and supports; the Metrics Server (installed by the bootstrap) provides its utilization metrics. Either way, bounds are set by the `ScannerMinReplicas` / `ScannerMaxReplicas` CloudFormation parameters (default 3–10 — a warm floor of 3 pods). `scripts/upgrade.py` enforces exactly one autoscaler on the fleet: **in `hpa` mode KEDA never touches the chart-owned scanner; in the default `keda` mode KEDA drives it and the chart HPA stays off.**
 
 **scanner-app pods — KEDA on SQS depth** *(only when `DeployScannerApp=true`)*. Our scanning application is queue-driven, so it scales on queue depth: KEDA polls the SQS queue every 5 seconds and adds 1 pod per 5 queued messages (in-flight messages included), from 1 up to `ScannerAppMaxReplicas` (default 20), with a 300-second cooldown. KEDA gets its SQS read permissions via Pod Identity — no access keys.
 
@@ -196,7 +196,7 @@ Scaling is deliberately conventional — each component scales by the mechanism 
 
 **Nodes — Cluster Autoscaler.** The standard Kubernetes Cluster Autoscaler (installed via Helm by the bootstrap, IAM via Pod Identity) discovers the managed node group's Auto Scaling Group through the `k8s.io/cluster-autoscaler` tags that EKS applies automatically. When pods can't be scheduled, it grows the ASG (up to `NodeGroupMaxSize`); it scales down nodes unneeded for 2 minutes, preferring the least-waste expander. PodDisruptionBudgets (`k8s/pdb.yaml`) protect active scan workloads during scale-down.
 
-**Expected scale-up latency: 1–3 minutes.** The HPA reacts to its metrics window, and if a new node is needed, the Cluster Autoscaler provisions it through the ASG. This is normal behavior for a supported evaluation configuration. If a burst of files arrives, the SQS queue simply holds the backlog — nothing is lost — and drains as capacity comes online.
+**Expected scale-up latency: 1–3 minutes.** KEDA reacts to the queue-depth poll (or the HPA to its metrics window in `hpa` mode), and if a new node is needed, the Cluster Autoscaler provisions it through the ASG. This is normal behavior for a supported evaluation configuration. If a burst of files arrives, the SQS queue simply holds the backlog — nothing is lost — and drains as capacity comes online.
 
 ```
 Files arrive in S3 → SQS queue depth rises
@@ -205,10 +205,10 @@ Files arrive in S3 → SQS queue depth rises
 KEDA scales scanner-app (1 → up to 20 pods)
          |
          v
-Scan load raises V1FS scanner CPU/memory
+Queue depth also drives the V1FS scanner fleet
          |
          v
-Chart HPA scales V1FS scanner (1 → up to 10 pods)
+KEDA scales V1FS scanner (3 → up to 10 pods)   [hpa mode: chart HPA on CPU/mem]
          |
          v
 Pending pods trigger Cluster Autoscaler → ASG adds nodes (up to 8)
@@ -247,8 +247,8 @@ The `ScannerEndpointMode` parameter controls how the V1FS scanner's gRPC endpoin
 
 | Mode | What it creates | Connection |
 |---|---|---|
-| `nlb` *(default)* | An **internal Network Load Balancer** via the chart's `externalService` (`helm/values-nlb.yaml`), exposing gRPC on `:50051` and ICAP on `:1344`. VPC-internal only — reachable from your VPC or peered networks, never from the internet. | Plaintext gRPC in-VPC |
-| `alb` | An **ALB Ingress** using TrendAI's documented topology — the chart's scanner ingress with `backend-protocol-version: GRPC`, internal scheme, and TLS terminated with your ACM certificate. Requires `ACMCertificateArn` and `ScannerDomain`; after deployment, **you create a DNS CNAME** from `ScannerDomain` to the ALB hostname (the bastion log prints the exact record). | TLS gRPC on `:443` |
+| `auto` *(default)* / `nlb` | An **internal Network Load Balancer** via the chart's `externalService` (`helm/values-nlb.yaml`), exposing gRPC on `:50051` and ICAP on `:1344`. VPC-internal only — reachable from your VPC or peered networks, never from the internet. `auto` resolves to this NLB; `nlb` selects it explicitly. | Plaintext gRPC in-VPC |
+| `alb` | An **ALB Ingress** using TrendAI's documented topology — the chart's scanner ingress with `backend-protocol-version: GRPC`, internal scheme, and TLS terminated at the ALB. Requires `ScannerDomain` plus a cert — self-signed by default (`SelfSignedScannerCert=true`), or supply `ACMCertificateArn`; after deployment, **you create a DNS record** from `ScannerDomain` to the ALB hostname (the bastion log prints the exact record). | TLS gRPC on `:443` |
 | `none` | Nothing — the scanner is reachable only inside the cluster via its ClusterIP service. | In-cluster only |
 
 Both load balancers are created by the AWS Load Balancer Controller (installed by the bootstrap) and cleaned up automatically on stack deletion.
@@ -327,7 +327,7 @@ The `eks-v1fs.yaml` template creates everything. Resources marked *(scanner-app)
 | **CloudWatch Alarms** *(scanner-app)* | DLQ messages (any > 0), queue age (> 20 min for 5 consecutive minutes) via SNS topic |
 | **Scan Audit Log** *(scanner-app)* | CloudWatch log group with structured JSON per scan, 30-day retention; separate `review-audit-${StackName}` group *(review only)* |
 | **CloudWatch Dashboard** *(scanner-app)* | Queue health, scan throughput/latency, malware detection stats, DLQ remediation, recent scan results |
-| **KEDA** *(scanner-app)* | Scales the scanner-app deployment on SQS queue depth — never the chart-owned V1FS scanner |
+| **KEDA** *(scanner-app)* | Scales the scanner-app deployment on SQS queue depth — and, in the default `keda` scaling mode, the V1FS scanner fleet too (in `hpa` mode KEDA leaves the chart-owned scanner to its HPA) |
 | **V1FS Review Release** *(review)* | Second Helm release (`rv`) in `visionone-review` with no CLISH scan policy — unlimited decompression for deep analysis |
 | **IAM Roles** | Least-privilege roles for nodes, bastion, Cluster Autoscaler, LB controller, and (when enabled) scanner app, KEDA operator, and DLQ remediation |
 | **Pod Identity** | Binds IAM roles to Kubernetes service accounts — no access keys needed |
@@ -351,7 +351,7 @@ You need one credential from the TrendAI Vision One console:
 
 The **registration token** (used by scanner pods to register with Vision One) is fetched automatically during deployment via the Vision One API (`POST /beta/fileSecurity/ctr/registration`) using your API key — no manual step needed. If your API key cannot mint registration tokens, generate one manually under **Cloud Security > File Security > Containerized Scanner > Get ready to deploy containerized scanner > Get registration token** and pass it as the `RegistrationToken` parameter. Tenants outside the US region should set `VisionOneApiEndpoint` to their regional API host.
 
-If you choose `ScannerEndpointMode=alb`, you also need an **ACM certificate** covering your chosen scanner domain, and the ability to create a DNS CNAME record for it.
+If you choose `ScannerEndpointMode=alb`, you need a `ScannerDomain` plus a cert — self-signed by default (`SelfSignedScannerCert=true`, no ACM certificate required), or supply your own `ACMCertificateArn` — and the ability to create a DNS record pointing that domain at the ALB.
 
 ## Deployment
 
@@ -367,26 +367,31 @@ Optional parameters:
 
 | Parameter | Default | Description |
 |---|---|---|
+| **RepoRef** | `v2.4.0` | Git ref (release tag or branch) of this repository the bastion clones for app code, k8s manifests, and Helm values. Defaults to the release tag matching this template; override with a branch (e.g. `main`) only for development |
 | **PrimaryAZ** | `us-east-1a` | Availability Zone 1 |
 | **SecondaryAZ** | `us-east-1b` | Availability Zone 2 |
 | **NodeInstanceType** | `r8g.xlarge` | EC2 instance type for the managed node group — Graviton ARM (`r8g.xlarge`, `r7g.xlarge`) or x86 (`r7i.xlarge`, `r7a.xlarge`, `r6i.xlarge`, `r7i.2xlarge`). The default is Graviton ARM; the AMI and scanner-app image build switch to arm64 automatically. One node group hosts both system components and scanner workloads |
 | **NodeGroupMinSize** | `2` | Minimum nodes in the managed node group (min 2 for CoreDNS/AZ redundancy) |
 | **NodeGroupDesiredSize** | `2` | Initial desired nodes — the Cluster Autoscaler adjusts from here |
 | **NodeGroupMaxSize** | `8` | Maximum nodes the Cluster Autoscaler may scale to. The default fits full-mode peak load on an xlarge node (4 vCPU) |
-| **ScannerMinReplicas** | `1` | Minimum V1FS scanner pods (chart HPA `minReplicas`) |
-| **ScannerMaxReplicas** | `10` | Maximum V1FS scanner pods (chart HPA `maxReplicas`, CPU/memory 80% targets) |
+| **ScannerMinReplicas** | `3` | Minimum V1FS scanner pods (warm floor). A floor of 3 absorbs a burst while the autoscaler catches up |
+| **ScannerMaxReplicas** | `10` | Maximum V1FS scanner pods |
 | **DeployScannerApp** | `true` | Deploy the S3/SQS scanning application module (buckets, queues, ECR, scanner-app pods). Set to `false` to deploy only the V1FS scanner and its endpoint |
 | **ScannerAppFlavor** | `python` | Language flavor of the scanning app to build and deploy — `python` (`app/`) or `java` (`app-java/`). Feature-equivalent |
-| **ScannerDispatchMode** | `clusterip` | How the app reaches the scanner: `clusterip` (one gRPC connection to the in-cluster Service) or `pull` (discover scanner pod IPs from the NLB target group and dispatch to the least-busy pod). `pull` requires an NLB endpoint (`ScannerEndpointMode` `nlb`/`auto`) |
-| **ScannerScalingMode** | `hpa` | How the V1FS scanner fleet autoscales — `hpa` (chart CPU/memory HPA, TrendAI-supported) or `keda` (KEDA on SQS queue depth; needs a queue; chart HPA disabled) |
+| **ScannerDispatchMode** | `auto` | How the app reaches the scanner: `auto` (pull when an NLB endpoint exists, else clusterip), `clusterip` (one gRPC connection to the in-cluster Service), or `pull` (discover scanner pod IPs from the NLB target group and dispatch to the least-busy pod). `pull` requires an NLB endpoint (`ScannerEndpointMode` `auto`/`nlb`) |
+| **ScannerScalingMode** | `keda` | How the V1FS scanner fleet autoscales — `keda` (KEDA on SQS queue depth; needs a queue; chart HPA disabled) or `hpa` (chart CPU/memory HPA, TrendAI-supported) |
 | **ScannerAppMaxReplicas** | `20` | Maximum scanner-app pods (KEDA SQS-driven scaling) |
+| **ScannerAppMaxConcurrentScans** | `50` | Max concurrent scans per scanner-app pod (`MAX_CONCURRENT_SCANS`) — a per-pod semaphore over in-flight scans |
+| **ScannerAppPerPodCapacity** | `30` | Max in-flight scans one scanner-app pod sends to a single V1FS scanner pod (`PER_POD_CAPACITY`, pull dispatch only) |
+| **ScannerQueueLength** | `50` | KEDA target of SQS messages per V1FS scanner pod (`SCANNER_QUEUE_LENGTH`) — the scanner-fleet queue-depth threshold in `keda` mode |
 | **DeployReviewPipeline** | `false` | Deploy the review pipeline (second V1FS release with unlimited decompression). Requires `DeployScannerApp=true`. When `false`, files exceeding decompression limits are quarantined with explanatory tags |
 | **ExistingIngestBucket** | *(empty)* | Name of an existing S3 bucket to scan. Leave empty to create a new ingest bucket. See [Scanning an Existing S3 Bucket](#scanning-an-existing-s3-bucket) |
 | **ExternalScanQueueArn** | *(empty)* | ARN of your own SQS queue for the scanner-app to drain instead of a stack-built one (S3-event-shaped messages). Requires `ScannerAppFlavor` app + `ExternalScanSourceBucketArns`; mutually exclusive with `ExistingIngestBucket`. When set, no ingest bucket/scan queue/DLQ/S3 wiring/dashboard is created |
 | **ExternalScanSourceBucketArns** | *(empty)* | Comma-separated S3 bucket ARNs the scanner-app may read and tag when draining `ExternalScanQueueArn` (the buckets its events reference). Read + tag only — your objects are never deleted. Required when `ExternalScanQueueArn` is set |
-| **ScannerEndpointMode** | `nlb` | Scanner endpoint exposure: `nlb` (internal NLB), `alb` (TLS ALB Ingress), or `none` |
-| **ACMCertificateArn** | *(empty)* | ACM certificate ARN for the scanner ALB (required when `ScannerEndpointMode=alb`) |
-| **ScannerDomain** | *(empty)* | DNS name for the scanner ALB, e.g. `scanner.example.com` (required when `ScannerEndpointMode=alb`) |
+| **ScannerEndpointMode** | `auto` | Scanner endpoint exposure: `auto` (internal NLB — the default), `nlb` (internal NLB, explicit), `alb` (TLS ALB Ingress), or `none` |
+| **SelfSignedScannerCert** | `true` | When `ScannerEndpointMode=alb` and no `ACMCertificateArn` is supplied, the bastion generates a self-signed cert for `ScannerDomain`, imports it to ACM for the ALB listener, and stores it so gRPC clients can trust it (SDK `ca_cert`). No publicly-signed certificate needed |
+| **ACMCertificateArn** | *(empty)* | ACM certificate ARN for the scanner ALB. Leave empty to auto-generate one via `SelfSignedScannerCert` |
+| **ScannerDomain** | `scanner.v1fs.internal` | DNS name clients use to reach the scanner ALB and the SAN of the self-signed cert (required when `ScannerEndpointMode=alb`) |
 | **ExistingVpcId** | *(empty)* | Deploy into an existing VPC instead of creating one. When set, `ExistingVpcCidr` and all three subnet parameters are required. See [Deploying into an Existing VPC](#deploying-into-an-existing-vpc) |
 | **ExistingVpcCidr** | *(empty)* | CIDR block of the existing VPC (used for scanner endpoint security group rules) |
 | **ExistingPrivateSubnet1Id** / **ExistingPrivateSubnet2Id** | *(empty)* | Two private subnets in different AZs (EKS nodes, EFS mount targets) |
@@ -395,7 +400,7 @@ Optional parameters:
 | **MaxFileSizeMB** | `500` | Maximum file size in MB the main scanner will download and scan (1–2048). Larger files are routed via server-side S3 copy — to the review bucket if the review pipeline is deployed, otherwise to quarantine with `ScanResult=S3-Oversize` |
 | **ScanTimeoutSeconds** | `600` | gRPC scan timeout; also sets the SQS visibility timeout to match |
 
-CloudFormation Rules validate the combinations at stack creation: `DeployReviewPipeline=true` asserts `DeployScannerApp=true`, `ScannerEndpointMode=alb` asserts both `ACMCertificateArn` and `ScannerDomain` are set, and `ExistingVpcId` asserts the CIDR and all three subnet parameters are set.
+CloudFormation Rules validate the combinations at stack creation: `DeployReviewPipeline=true` asserts `DeployScannerApp=true`, `ScannerEndpointMode=alb` asserts `ScannerDomain` is set and that either `ACMCertificateArn` is supplied or `SelfSignedScannerCert=true` (the default), and `ExistingVpcId` asserts the CIDR and all three subnet parameters are set.
 
 #### Deploying into an Existing VPC
 
@@ -446,7 +451,7 @@ You don't need to clone the repo to deploy. The bastion host's UserData is now m
 3. Installs the AWS Load Balancer Controller, Metrics Server, and Cluster Autoscaler via Helm
 4. Installs KEDA via Helm *(only when the scanner-app module is enabled)*
 5. Creates the `gp3` (EBS) and `efs-sc` (EFS) StorageClasses
-6. Installs the TrendAI Vision One File Security Helm chart — **pinned to version 1.4.10, GPG-verified**, using `helm/values-base.yaml` plus the endpoint overlay (`helm/values-nlb.yaml` or the ALB ingress values), with the chart's own HPA enabled
+6. Installs the TrendAI Vision One File Security Helm chart — **pinned to version 1.4.10, GPG-verified**, using `helm/values-base.yaml` plus the endpoint overlay (`helm/values-nlb.yaml` or the ALB ingress values). In the default `keda` mode the chart HPA is disabled and KEDA scales the scanner fleet; in `hpa` mode the chart's own HPA is enabled
 7. Configures the scan policy decompression limits via CLISH
 8. Installs the second V1FS release (`rv`) with unlimited decompression *(only when the review pipeline is enabled)*
 9. Builds the scanner-app Docker image, pushes it to ECR, and deploys the scanner-app (and review pipeline, if enabled) *(only when the scanner-app module is enabled)*
@@ -500,10 +505,11 @@ Check that everything is running:
 
 ```bash
 kubectl get pods -n visionone-filesecurity
-kubectl get hpa -n visionone-filesecurity     # the chart's scanner HPA
+kubectl get scaledobject -n visionone-filesecurity   # keda mode (default): the scanner ScaledObject
+kubectl get hpa -n visionone-filesecurity            # hpa mode: the chart's scanner HPA
 ```
 
-You should see the V1FS scanner pods (and, if enabled, the `scanner-app` pod) in `Running` state, and one HorizontalPodAutoscaler targeting the chart scanner.
+You should see the V1FS scanner pods (and, if enabled, the `scanner-app` pod) in `Running` state. In the default `keda` mode a `v1fs-scanner-sqs-scaler` ScaledObject drives the fleet; in `hpa` mode you'll instead see one HorizontalPodAutoscaler targeting the chart scanner.
 
 ### Test
 

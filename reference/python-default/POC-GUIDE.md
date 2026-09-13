@@ -37,9 +37,9 @@
 
 ## 1. What you're evaluating
 
-> **This is the **python-default** scenario of one unified scanning app: `ScannerAppFlavor=python` + `ScannerDispatchMode=clusterip` + `ScannerScalingMode=hpa` (all defaults). The V1FS scanner scales on the chart's own CPU/memory HPA — TrendAI's supported autoscaling — and the app reaches it over a single gRPC connection to the in-cluster scanner Service.**
+> **This is the **python-default** scenario of one unified scanning app: `ScannerAppFlavor=python` (the default flavor) + `ScannerDispatchMode=clusterip` + `ScannerScalingMode=hpa`. (The system defaults are `ScannerScalingMode=keda` and `ScannerDispatchMode=auto`; this scenario deliberately selects `clusterip` + `hpa`.) The V1FS scanner scales on the chart's own CPU/memory HPA — TrendAI's supported autoscaling — and the app reaches it over a single gRPC connection to the in-cluster scanner Service.**
 
-A single CloudFormation template stands up an EKS cluster running the **TrendAI Vision One File Security scanner**, installed from the official Helm chart. The scanning application that drives the S3 pipeline comes in two feature-equivalent language flavors — Python (`app/scanner.py`) and Java (`app-java/`) — selected by `ScannerAppFlavor` (default `python`); this scenario uses the **Python** flavor. The app reaches the scanner through an env-toggled dispatch mode (`ScannerDispatchMode`): this scenario uses **`clusterip`**, a single reused gRPC connection to the in-cluster scanner Service. The scanner fleet is scaled by the **chart's own CPU/memory HorizontalPodAutoscaler** (`ScannerScalingMode=hpa`, the default) — TrendAI's supported autoscaling mechanism. (Our scanning application scales separately on SQS queue depth via KEDA; that's a different component from the chart-owned scanner — see §17.)
+A single CloudFormation template stands up an EKS cluster running the **TrendAI Vision One File Security scanner**, installed from the official Helm chart. The scanning application that drives the S3 pipeline comes in two feature-equivalent language flavors — Python (`app/scanner.py`) and Java (`app-java/`) — selected by `ScannerAppFlavor` (default `python`); this scenario uses the **Python** flavor. The app reaches the scanner through an env-toggled dispatch mode (`ScannerDispatchMode`): this scenario uses **`clusterip`**, a single reused gRPC connection to the in-cluster scanner Service. The scanner fleet is scaled by the **chart's own CPU/memory HorizontalPodAutoscaler** (`ScannerScalingMode=hpa`) — TrendAI's supported autoscaling mechanism. (Our scanning application scales separately on SQS queue depth via KEDA; that's a different component from the chart-owned scanner — see §17.)
 
 ```text
 [Your files (S3 upload, or your own app)] ──▶ [V1FS Scanner on EKS (official chart · chart HPA CPU/mem scaling)] ──▶ [Verdicts (clean tagged in place / malicious to quarantine)]
@@ -84,10 +84,10 @@ flowchart TB
     LB["Internal NLB or ALB<br/>gRPC :50051 / TLS :443"]:::endpoint
 
     subgraph EKS["EKS cluster — managed node group r8g.xlarge × 2–8, Cluster Autoscaler"]
-      V1FS["V1FS scanner<br/>chart HPA 1–10 · CPU/mem"]:::core
+      V1FS["V1FS scanner<br/>chart HPA 3–10 · CPU/mem"]:::core
       SUP["V1FS support pods<br/>management · database · cache · communicator"]:::core
       RV["V1FS rv release<br/>no decompression limits · HPA 1–3"]:::review
-      APP["scanner-app<br/>KEDA 1–20 on queue depth"]:::app
+      APP["scanner-app<br/>KEDA 2–20 on queue depth"]:::app
       RAPP["review-scanner-app<br/>KEDA 1–5 always-warm"]:::review
       SYS["System: Cluster Autoscaler · LB controller · metrics-server · Pod Identity agent · EBS/EFS CSI · KEDA operator"]:::core
     end
@@ -145,8 +145,8 @@ Three more parameters select the *shape* of the deployment — which language th
 | Parameter | Values | This scenario (python-default) |
 |---|---|---|
 | `ScannerAppFlavor` | `python` (default) · `java` | **`python`** — the app is `app/scanner.py` |
-| `ScannerDispatchMode` | `clusterip` (default) · `pull` | **`clusterip`** — one gRPC connection to the in-cluster scanner Service |
-| `ScannerScalingMode` | `hpa` (default) · `keda` | **`hpa`** — the chart's CPU/memory HPA (TrendAI-supported) |
+| `ScannerDispatchMode` | `auto` (default) · `clusterip` · `pull` | **`clusterip`** — one gRPC connection to the in-cluster scanner Service |
+| `ScannerScalingMode` | `keda` (default) · `hpa` | **`hpa`** — the chart's CPU/memory HPA (TrendAI-supported) |
 
 Both flavors are feature-equivalent and read the same configuration; the flavor and dispatch modes are described in §6. For queue-depth scanner scaling (`keda`) paired with client-side pull dispatch (`pull`), see the **python-KEDA** and **java-KEDA** guides.
 
@@ -159,7 +159,7 @@ Deploy from the **AWS Console** (click-by-click, below) or the **AWS CLI** (auto
 
 ### Step 1 — Get the template
 
-Download `eks-v1fs.yaml` from the [**eks-v1fs repository**](https://github.com/arcaniusdev/eks-v1fs) — ideally from the [latest tagged release](https://github.com/arcaniusdev/eks-v1fs/tags), so the components the bastion pulls at deploy time match the template you launch. That's the only file you need. (Direct link to the current release template: `https://raw.githubusercontent.com/arcaniusdev/eks-v1fs/v1.0.2/eks-v1fs.yaml`.)
+Download `eks-v1fs.yaml` from the [**eks-v1fs repository**](https://github.com/arcaniusdev/eks-v1fs) — ideally from the [latest tagged release](https://github.com/arcaniusdev/eks-v1fs/tags), so the components the bastion pulls at deploy time match the template you launch. That's the only file you need. (Direct link to the current release template: `https://raw.githubusercontent.com/arcaniusdev/eks-v1fs/v2.4.0/eks-v1fs.yaml`.)
 
 ### Step 2 — Start the Create stack wizard
 
@@ -261,7 +261,7 @@ Three other places to see results: object **tags** (on every scanned object), th
 
 ## 6. Inside the scanning app
 
-The pipeline you just watched is driven by one small application. It ships in two feature-equivalent language flavors — Python (`app/scanner.py`) and Java (`app-java/`), selected by `ScannerAppFlavor` — and this scenario runs the **Python** flavor: **one Python file** (`app/scanner.py`, ~600 lines), a config loader, and a 22-line Dockerfile with **three pinned dependencies** — the V1FS SDK, an async AWS client, and boto3. Small enough to read in one sitting, which is the point: in an evaluation you should be able to see exactly what touches your files.
+The pipeline you just watched is driven by one small application. It ships in two feature-equivalent language flavors — Python (`app/scanner.py`) and Java (`app-java/`), selected by `ScannerAppFlavor` — and this scenario runs the **Python** flavor: **one Python file** (`app/scanner.py`, ~1,000 lines), a config loader, and a 21-line Dockerfile with **three pinned dependencies** — the V1FS SDK, an async AWS client, and boto3. Small enough to read in one sitting, which is the point: in an evaluation you should be able to see exactly what touches your files.
 
 The same one app does everything — drains SQS, scans, and routes every verdict (tag clean in place, move malicious to quarantine, send decompression-limited or oversize files to review or quarantine, write the audit trail, reconcile stragglers). How it reaches the scanner pods is a mode, set by `ScannerDispatchMode`: this scenario uses **`clusterip`** — a single reused gRPC connection to the in-cluster scanner Service (simple, L4). The other mode, `pull` — where the app discovers live scanner pod IPs and dispatches each scan to the least-busy pod directly — is what the **python-KEDA** / **java-KEDA** scenarios use; those guides' §8a describe it.
 
@@ -397,7 +397,7 @@ Every step below is something you would otherwise type yourself, in this order. 
 If your own application will submit the scans, it talks to the scanner through a **load balancer endpoint** using **gRPC** — a fast binary protocol over HTTP/2. Good news up front: *you never write gRPC code.* The SDK's client class wraps all of it. You give it an address, call a scan method, and get back JSON with the verdict.
 
 ```text
-[Your Java app (AMaasClient)] ──gRPC──▶ [Endpoint (NLB :50051 or ALB :443)] ──▶ [V1FS scanner pods (scan & verdict)]
+[Your Python app (amaas SDK)] ──gRPC──▶ [Endpoint (NLB :50051 or ALB :443)] ──▶ [V1FS scanner pods (scan & verdict)]
 ```
 
 The deployment publishes the address to an SSM parameter:
@@ -477,7 +477,7 @@ kubectl exec deploy/my-release-visionone-filesecurity-management-service \
 ## 17. Scaling expectations
 
 The scanner scales on the Helm chart's own autoscaler (CPU and memory targets,
-1–10 pods by default) — TrendAI's supported mechanism — and the cluster adds
+3–10 pods by default) — TrendAI's supported mechanism — and the cluster adds
 nodes through the standard Cluster Autoscaler.
 
 | What you'll observe | Why it's normal |
@@ -542,9 +542,9 @@ Anything returned that carries the stack's name is safe to delete.
 | Deploy (endpoint only) | add `ParameterKey=DeployScannerApp,ParameterValue=false` |
 | Scan via S3 | `aws s3 cp s3:///` |
 | Get the endpoint | `aws ssm get-parameter --name //scanner-endpoint` |
-| Connect (Java, NLB) | `new AMaasClient(null, host, key, 300, false, null)` |
-| Scan (Java) | `client.scanFile(path, true, options)` / `scanBuffer(bytes, name, true, options)` |
-| Concurrency | Share one client across threads; `close()` once at shutdown |
+| Connect (Python, NLB) | `handle = amaas.grpc.init(host, key, False, None)` |
+| Scan (Python) | `amaas.grpc.scan_buffer(handle, buf, name, tags=[])` |
+| Concurrency | Share one handle; `amaas.grpc.quit(handle)` once at shutdown |
 | Clean | `scanResult == 0` and `foundErrors` empty |
 | Malware | `scanResult > 0` — names in `foundMalwares[].malwareName` |
 | Not fully scanned | `scanResult == 0` with `foundErrors` entries (`ATSE_*`) |
@@ -576,8 +576,8 @@ Public documentation germane to this deployment, grouped by what you're trying t
 |---|---|
 | [File Security Helm chart](https://trendmicro.github.io/visionone-file-security-helm/) | The chart this stack installs (pinned version) — values reference, defaults, release index |
 | [File Security Terraform module](https://github.com/trendmicro/visionone-file-security-terraform) | Trend's official Terraform deployment — a useful second reference for supported topologies (EKS with ALB Ingress, autoscaling parameters) |
-| [Java SDK](https://github.com/trendmicro/tm-v1-fs-java-sdk) | The SDK used in Part II — `AMaasClient`, scan methods, thread-safety notes |
-| [Python SDK](https://github.com/trendmicro/tm-v1-fs-python-sdk) | Same concepts in Python (`amaas.grpc`) — what the bundled scanning app uses |
+| [Python SDK](https://github.com/trendmicro/tm-v1-fs-python-sdk) | The SDK used in Part II (`amaas.grpc`) — `init`, `scan_buffer`, `quit`; what the bundled scanning app uses |
+| [Java SDK](https://github.com/trendmicro/tm-v1-fs-java-sdk) | The client used by the **java-KEDA** flavor — `AMaasClient`, scan methods, thread-safety notes |
 | [Go SDK](https://github.com/trendmicro/tm-v1-fs-golang-sdk) | Go client; its README also documents the gRPC port and TLS defaults |
 | [Node.js SDK](https://github.com/trendmicro/tm-v1-fs-nodejs-sdk) | Node client for the same gRPC interface |
 | [Serverless scanning reference (Lambda/SQS)](https://github.com/trendmicro/tm-v1-filesecurity) | Trend's own event-driven S3-scanning architecture — the non-containerized sibling of the pipeline in this stack; good for comparing approaches |

@@ -222,7 +222,7 @@ This deployment is deliberately aligned with TrendAI's supported methodology. Tw
 
 | Layer | Mechanism | Bounds | Why |
 |---|---|---|---|
-| V1FS scanner pods | Chart-native HPA (CPU 80% + memory 80%) | `ScannerMinReplicas`/`ScannerMaxReplicas` (1/10) | TrendAI's supported autoscaling. The scanner is memory-bound, so the memory target tracks load |
+| V1FS scanner pods | `keda` default: KEDA on SQS depth; `hpa`: chart HPA (CPU 80% + memory 80%) | `ScannerMinReplicas`/`ScannerMaxReplicas` (3/10) | keda is the shipped default (warm floor 3); hpa is TrendAI's supported mechanism when selected |
 | scanner-app pods (optional module) | KEDA on SQS depth | 1–`ScannerAppMaxReplicas` (20) | Our own component — queue depth is the natural signal; user-owned territory, invisible to Trend supportability |
 | Nodes | Cluster Autoscaler on the managed node group | `NodeGroupMinSize`–`NodeGroupMaxSize` (2–8) | The standard Kubernetes default; Trend docs leave node scaling to the user |
 
@@ -235,7 +235,7 @@ This deployment is deliberately aligned with TrendAI's supported methodology. Tw
 
 ### Node group sizing
 
-Single node group, r7i.xlarge (4 vCPU / 32 GiB), min 2 for CoreDNS/AZ redundancy. ~3.6 usable vCPU per node after kubelet + daemonsets. Full-mode peak (10 scanners × 800m + 20 scanner-app × 500m + review + system) ≈ 26 vCPU → max 8 nodes. CPU binds before memory on r-class (1:8 ratio vs the scanner's 1:2.5 request ratio).
+Single node group, r8g.xlarge (4 vCPU / 32 GiB, Graviton ARM default), min 2 for CoreDNS/AZ redundancy. ~3.6 usable vCPU per node after kubelet + daemonsets. Full-mode peak (10 scanners × 800m + 20 scanner-app × 500m + review + system) ≈ 26 vCPU → max 8 nodes. CPU binds before memory on r-class (1:8 ratio vs the scanner's 1:2.5 request ratio).
 
 ### Deploy script rollout timeout
 

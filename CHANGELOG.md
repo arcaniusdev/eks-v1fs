@@ -9,6 +9,11 @@ defaults to, so a template downloaded at tag `vX.Y.Z` deploys the matching
 scripts, app code, and Helm values.
 
 ## [Unreleased]
+### Changed
+- **S3 buckets deploy without versioning.** The ingest and quarantine buckets no
+  longer set `VersioningConfiguration: Enabled` (the review bucket was already
+  unversioned), so evaluation stacks tear down cleanly without version/delete-marker
+  purges. Enable versioning yourself if you need object-recovery on these buckets.
 
 ## [2.4.0]
 ### Added
@@ -37,8 +42,8 @@ scripts, app code, and Helm values.
   `minReplicaCount` `1 → 2`. Stops the fleet collapsing to a single pod during
   lulls: a lone pod otherwise absorbs a whole burst at high concurrency and
   per-scan latency inflates until KEDA re-scales and pull discovers the new pods
-  (measured ~3.5x higher median scan latency and ~55% lower throughput than a
-  warm floor on an identical corpus).
+  (a warm floor materially lowers burst latency and raises throughput versus a
+  cold single pod absorbing the spike).
 - **Gentle KEDA scale-down** on both ScaledObjects via the HPA
   `behavior.scaleDown` (600s stabilization window, at most 1 pod/min,
   `selectPolicy: Min`); scale-up is left at the fast HPA default. Keeps the fleet

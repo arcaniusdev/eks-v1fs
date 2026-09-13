@@ -4,8 +4,8 @@
 
 The V1FS scanner autoscales one of two ways, chosen by the `ScannerScalingMode` parameter:
 
-- **`hpa` (default, TrendAI-supported)** — the chart's own CPU/memory HPA (targets 80%/80%, min/max from `ScannerMinReplicas`/`ScannerMaxReplicas`). Used by the **python-default** option.
-- **`keda`** — KEDA scales the scanner on SQS **queue depth** so the fleet tracks the backlog; the chart HPA is disabled. Used by the **python-KEDA** / **java-KEDA** options. A customer variant, *not* Trend-supported; `scripts/upgrade.py` enforces exactly one autoscaler and fails an upgrade if a chart HPA reappears alongside KEDA.
+- **`keda` (default)** — KEDA scales the scanner on SQS **queue depth** so the fleet tracks the backlog; the chart HPA is disabled. Used by the **python-KEDA** / **java-KEDA** options. A customer variant, *not* Trend-supported; `scripts/upgrade.py` enforces exactly one autoscaler and fails an upgrade if a chart HPA reappears alongside KEDA.
+- **`hpa` (opt-in, TrendAI-supported)** — the chart's own CPU/memory HPA (targets 80%/80%, min/max from `ScannerMinReplicas`/`ScannerMaxReplicas`). Used by the **python-default** option.
 
 Either way, KEDA scales our scanner-app (full-auto) on queue depth, and nodes scale via the standard Cluster Autoscaler on a single managed node group.
 
@@ -13,7 +13,7 @@ Either way, KEDA scales our scanner-app (full-auto) on queue depth, and nodes sc
 - ScaledObject: `v1fs-scanner-sqs-scaler` (`k8s/scanner-scaledobject.yaml`), TriggerAuthentication `scanner-sqs-trigger-auth`
 - Trigger: `aws-sqs-queue` on `ApproximateNumberOfMessages`, `scaleOnInFlight: true`
 - Queue length target: `SCANNER_QUEUE_LENGTH` (default 50 messages per pod)
-- Range: `ScannerMinReplicas` (1) to `ScannerMaxReplicas` (10)
+- Range: `ScannerMinReplicas` (3, warm floor) to `ScannerMaxReplicas` (10)
 - Chart HPA DISABLED: `scanner.autoscaling.enabled=false` in `helm/values-base.yaml`; polling 5s, cooldown 300s
 - **BYO mode**: set `ExternalScanQueueArn` to scale the scanner on your own SQS queue (KEDA is installed and the ScaledObject points at it; cross-account queues need a matching resource policy)
 - Fallback: in BYO with NO queue, `bootstrap.sh` re-enables the chart CPU/mem HPA so the scanner still autoscales
@@ -40,7 +40,7 @@ Either way, KEDA scales our scanner-app (full-auto) on queue depth, and nodes sc
 
 | Component | Min | Max | Mechanism | Config |
 |---|---|---|---|---|
-| V1FS scanner pods | 1 | 10 | **KEDA (queue depth, 50 msgs/pod)** | `ScannerMinReplicas`/`ScannerMaxReplicas` CFN params |
+| V1FS scanner pods | 3 | 10 | **KEDA (queue depth, 50 msgs/pod)** | `ScannerMinReplicas`/`ScannerMaxReplicas` CFN params |
 | Scanner-app pods | 1 | 20 | KEDA (5 msgs/pod) | `ScannerAppMaxReplicas` CFN param → `<MAX_REPLICAS>` in `k8s/scaledobject.yaml` |
 | Review scanner-app pods | 1 | 5 | KEDA (50 msgs/pod) | `k8s/review-scaledobject.yaml` |
 | Review V1FS scanner pods (`rv`) | 1 | 3 | not queue-scaled on this branch (chart HPA off) | `--set` in `scripts/bootstrap.sh` |
@@ -48,7 +48,7 @@ Either way, KEDA scales our scanner-app (full-auto) on queue depth, and nodes sc
 
 ## Expected Scale-Up Latency
 
-- **Chart HPA scale-up: 1–3 minutes is normal and expected.** The HPA reacts to Metrics Server samples (15–30s), then new scanner pods must schedule, pull, start, and register with TrendAI cloud. This is slower than the old KEDA queue-depth scaling but is the supported behavior — do not "fix" it by re-adding ScaledObjects for the chart scanner
+- **Scale-up: 1–3 minutes is normal and expected.** In the default `keda` mode the ScaledObject reacts to SQS queue depth (polling ~5s); in the opt-in `hpa` mode the chart HPA reacts to Metrics Server samples (15–30s). Either way, new scanner pods must then schedule, pull the image, start, and register with TrendAI cloud. Expected for an evaluation-sized deployment — not a bug to work around
 - **Node provisioning adds 1–2 minutes** when the Cluster Autoscaler must grow the ASG before pods can schedule
 - **This deployment is evaluation-sized by design** — steady, supported scaling rather than peak burst throughput
 
@@ -68,8 +68,8 @@ Either way, KEDA scales our scanner-app (full-auto) on queue depth, and nodes sc
 
 ## Performance Characteristics
 - **The V1FS scanner is I/O and memory bound, not CPU bound.** The engine loads signature databases into memory and spends most time on network I/O (gRPC) and disk operations; CPU stays low even under heavy load. This is exactly why the chart HPA's **memory target** matters — a CPU-only target would rarely trigger. With CPU 80% / memory 80% dual targets, memory pressure drives most scale-ups
-- **Real malware scan latency** (fresh stack, no cache): p50 = 7.2s, avg = 16.1s, p90 = 43.4s, p95 = 59.5s, p99 = 92.4s, max = 131.6s
-- **Cached scan latency**: p50 = 28ms (cache lookup, not real analysis)
+- **Real malware scan latency** (no cache): typically sub-second to a few seconds median for common files, with the tail stretching into tens of seconds for large or complex archives. Set evaluation throughput expectations accordingly rather than around a single figure
+- **Cached scan latency**: cached repeats return in tens of milliseconds (cache lookup, not real analysis)
 - **Rewriting scanner-app in Go would not improve throughput** — the bottleneck is the V1FS scan engine and network round-trips, not the Python runtime
 - **gRPC scan timeout**: the SDK reads `TM_AM_SCAN_TIMEOUT_SECS` (set to 600s via the `ScanTimeoutSeconds` CFN parameter, which also sets the SQS visibility timeout)
 

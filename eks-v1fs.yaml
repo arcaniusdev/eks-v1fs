@@ -83,7 +83,7 @@ Parameters:
     Description: >
       Maximum nodes the Cluster Autoscaler may scale the managed node group to.
       Default 8 fits full-mode peak (10 V1FS scanners + 20 scanner-app pods +
-      review pipeline + system pods) on r7i.xlarge nodes. Raised ceiling (60)
+      review pipeline + system pods) on r8g.xlarge nodes. Raised ceiling (60)
       accommodates high-throughput profiles (e.g. ~50M files/day needs ~36
       xlarge or ~18 2xlarge nodes) — mind the account EC2 On-Demand vCPU quota.
     Default: 8
@@ -2144,8 +2144,6 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
-      VersioningConfiguration:
-        Status: Enabled
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -2176,8 +2174,6 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
-      VersioningConfiguration:
-        Status: Enabled
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
