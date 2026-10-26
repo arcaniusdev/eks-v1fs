@@ -37,11 +37,11 @@ REVIEW_NAMESPACE = "visionone-review"
 MGMT_DEPLOY = "my-release-visionone-filesecurity-management-service"
 
 
-def run(cmd, check=True, capture=True):
-    """Run a shell command and return output."""
+def run(cmd, check=True, capture=True, quiet=False):
+    """Run a shell command and return output (quiet=True: don't echo stdout)."""
     print(f"  $ {cmd}")
     result = subprocess.run(cmd, shell=True, capture_output=capture, text=True)
-    if capture and result.stdout:
+    if capture and result.stdout and not quiet:
         print(result.stdout.rstrip())
     if capture and result.stderr:
         print(result.stderr.rstrip(), file=sys.stderr)
@@ -128,13 +128,13 @@ def noproxy_values_file(release, namespace):
     with the chart defaults and the live API server IPs. JSON is valid YAML.
     """
     current = ""
-    r = run(f"helm get values {release} -n {namespace} -a -o json", check=False)
+    r = run(f"helm get values {release} -n {namespace} -a -o json", check=False, quiet=True)
     if r.returncode == 0 and r.stdout.strip():
         try:
             current = (json.loads(r.stdout).get("visiononeFilesecurity", {}) or {}).get("noProxy", "") or ""
         except json.JSONDecodeError:
             pass
-    r = run("kubectl get endpointslice kubernetes -n default -o json", check=False)
+    r = run("kubectl get endpointslice kubernetes -n default -o json", check=False, quiet=True)
     api_ips = []
     if r.returncode == 0 and r.stdout.strip():
         for ep in json.loads(r.stdout).get("endpoints", []) or []:
