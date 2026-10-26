@@ -35,7 +35,7 @@
 
 ### V1FS Helm and SDK
 - **Do not run `helm upgrade` without the values files.** Always upgrade via `scripts/upgrade.py`, which layers `-f helm/values-base.yaml` + `-f <captured helm get values>` + live HPA min/max. A plain `helm upgrade` reverts to chart defaults — losing dbEnabled, storage classes, ephemeral volume, and re-enabling the chart's default-on ingresses.
-- **The chart is pinned to 1.4.10** (`V1FS_CHART_VERSION` in `bootstrap.sh`). Use `upgrade.py --version X.Y.Z` to move deliberately.
+- **Chart version comes from the `V1FSChartVersion` CFN parameter** — empty (default) installs the latest published chart at deploy time (resolved once in `bootstrap.sh`, so `my-release` and `rv` match); set e.g. `1.4.10` to pin. Last validated: 1.4.10. Use `upgrade.py --version X.Y.Z` to move a live stack deliberately.
 - **Both chart ingresses default to ENABLED in the chart.** `values-base.yaml` explicitly disables `scanner.ingress` and `managementService.ingress`. Never expose the management service; the scanner ingress is re-enabled only by ALB endpoint mode with its own settings.
 - **Do not install both V1FS Helm releases in the same namespace.** Each release creates a ServiceAccount named `visionone-filesecurity`. `my-release` runs in `visionone-filesecurity`, `rv` in `visionone-review`. Sharing a namespace causes a ServiceAccount ownership conflict that breaks Helm operations.
 - **Do not add `--wait` to V1FS Helm install.** Scanner pods need time to register with TrendAI cloud on first startup.

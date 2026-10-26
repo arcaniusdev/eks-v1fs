@@ -26,7 +26,7 @@ Trend Micro has rebranded to **TrendAI**. Always use "TrendAI" in user-facing te
 
 ## Project Overview
 
-evaluation-friendly EKS deployment of the TrendAI V1FS containerized scanner, aligned with TrendAI's supported deployment methodology (chart-native HPA, standard Cluster Autoscaler, pinned chart 1.4.10). A single CloudFormation template (`eks-v1fs.yaml`) provisions everything; optional modules are toggled by parameters:
+evaluation-friendly EKS deployment of the TrendAI V1FS containerized scanner, aligned with TrendAI's supported deployment methodology (chart-native HPA, standard Cluster Autoscaler, chart version via `V1FSChartVersion` — empty = latest). A single CloudFormation template (`eks-v1fs.yaml`) provisions everything; optional modules are toggled by parameters:
 
 | Mode | Parameters | What you get |
 |---|---|---|
@@ -197,7 +197,7 @@ Expect 1–3 minutes for HPA + Cluster Autoscaler scale-up under load — normal
 ### V1FS Helm Upgrades
 - **Use `upgrade.py` for V1FS Helm upgrades** — `scripts/upgrade.py` upgrades `my-release` (and `rv` only if installed) while preserving values: it layers `helm/values-base.yaml` + the release's captured `helm get values` + live HPA min/max bounds. It also captures/re-applies the CLISH scan policy to `my-release` only, verifies the chart HPA EXISTS (and that no ScaledObject targets the chart scanner), and runs a sanity scan (S3 EICAR flow, or SSM-endpoint instructions when scanner-app is absent). Flags: `--dry-run`, `--version X.Y.Z`, `--skip-sanity`
 - **Do not run `helm upgrade` manually without the values files** — a plain `helm upgrade` reverts to chart defaults: it would re-enable both chart ingresses, reset storage classes, and lose the HPA replica bounds. Always go through `upgrade.py` or pass `-f helm/values-base.yaml` plus the current release values
-- **Chart version is pinned** — `V1FS_CHART_VERSION` in `scripts/bootstrap.sh` (currently 1.4.10). Bump deliberately, not implicitly
+- **Chart version is a CFN parameter** — `V1FSChartVersion` (empty default = latest published chart, resolved once in `bootstrap.sh` so `my-release` and `rv` install the same version; set e.g. `1.4.10` to pin). Last validated: 1.4.10
 
 ### Operational Gotchas
 - **Bastion has S3 ingest write permission** — the bastion role includes `s3:PutObject` and `s3:ListBucket` on the ingest bucket. Use `aws s3 sync` from bastion for fastest file delivery

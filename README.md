@@ -73,7 +73,7 @@ The core of every deployment is the TrendAI V1FS scanner, installed via the offi
                         │ EKS CLUSTER                                        │
                         │                                                    │
   Your own app ─────────┼──▶ NLB / ALB ──▶ TrendAI V1FS Scanner              │
-  (SDK over gRPC)       │   (optional        Helm chart 1.4.10               │
+  (SDK over gRPC)       │   (optional        Helm chart (latest or pinned)   │
                         │    endpoint)       KEDA on SQS depth: 3–10 pods    │
                         │                    (chart HPA in hpa mode)         │
                         │                        ▲ gRPC :50051               │
@@ -451,7 +451,7 @@ You don't need to clone the repo to deploy. The bastion host's UserData is now m
 3. Installs the AWS Load Balancer Controller, Metrics Server, and Cluster Autoscaler via Helm
 4. Installs KEDA via Helm *(only when the scanner-app module is enabled)*
 5. Creates the `gp3` (EBS) and `efs-sc` (EFS) StorageClasses
-6. Installs the TrendAI Vision One File Security Helm chart — **pinned to version 1.4.10, GPG-verified**, using `helm/values-base.yaml` plus the endpoint overlay (`helm/values-nlb.yaml` or the ALB ingress values). In the default `keda` mode the chart HPA is disabled and KEDA scales the scanner fleet; in `hpa` mode the chart's own HPA is enabled
+6. Installs the TrendAI Vision One File Security Helm chart — **the latest published version by default, or the version set in the `V1FSChartVersion` parameter; GPG-verified**, using `helm/values-base.yaml` plus the endpoint overlay (`helm/values-nlb.yaml` or the ALB ingress values). In the default `keda` mode the chart HPA is disabled and KEDA scales the scanner fleet; in `hpa` mode the chart's own HPA is enabled
 7. Configures the scan policy decompression limits via CLISH
 8. Installs the second V1FS release (`rv`) with unlimited decompression *(only when the review pipeline is enabled)*
 9. Builds the scanner-app Docker image, pushes it to ECR, and deploys the scanner-app (and review pipeline, if enabled) *(only when the scanner-app module is enabled)*
@@ -595,7 +595,7 @@ This rebuilds the flavor's Docker image, pushes it to ECR, and re-applies the k8
 
 ## Updating the V1FS Scanner
 
-The TrendAI Vision One File Security scanner is installed via its official Helm chart, pinned to a known-good version (currently **1.4.10**). All custom values live in **`helm/values-base.yaml`** — the single source of truth used by both the initial install (`scripts/bootstrap.sh`) and upgrades (`scripts/upgrade.py`). The deviations from chart defaults are deliberately minimal and all documented chart options, keeping the deployment within TrendAI's supported methodology:
+The TrendAI Vision One File Security scanner is installed via its official Helm chart, at the latest published version by default. Set the `V1FSChartVersion` parameter (e.g. `1.4.10`, the last validated version) to pin new deployments to a specific build. All custom values live in **`helm/values-base.yaml`** — the single source of truth used by both the initial install (`scripts/bootstrap.sh`) and upgrades (`scripts/upgrade.py`). The deviations from chart defaults are deliberately minimal and all documented chart options, keeping the deployment within TrendAI's supported methodology:
 
 | Chart default | Our value (`values-base.yaml`) | Why |
 |---|---|---|

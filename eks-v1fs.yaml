@@ -11,6 +11,15 @@ Parameters:
       you launched. Override with a branch name (e.g. main) only for development.
     Type: String
     Default: v2.4.0
+  V1FSChartVersion:
+    Description: >
+      TrendAI Vision One File Security Helm chart version to install (e.g. 1.4.10).
+      Leave empty (default) to install the latest published chart version at
+      deploy time. Set a specific version to pin new deployments to a known build.
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    ConstraintDescription: Must be empty (latest) or a semantic version such as 1.4.10
   PrimaryAZ:
     Description: Availability Zone 1 (ignored when deploying into an existing VPC)
     Type: AWS::EC2::AvailabilityZone::Name
@@ -2017,6 +2026,7 @@ Resources:
             export V1_API_ENDPOINT="${VisionOneApiEndpoint}"
 
             # ---- Deployment modes ----
+            export V1FS_CHART_VERSION="${V1FSChartVersion}"
             export DEPLOY_SCANNER_APP="${DeployScannerApp}"
             export DEPLOY_REVIEW="${DeployReviewPipeline}"
             export EXTERNAL_SCAN_QUEUE_ARN="${ExternalScanQueueArn}"

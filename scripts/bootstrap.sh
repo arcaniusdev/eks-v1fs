@@ -14,7 +14,9 @@
 # ----------------------------------------------------------------------
 set -e
 
-V1FS_CHART_VERSION="${V1FS_CHART_VERSION:-1.4.10}"
+# V1FS chart version: from the V1FSChartVersion CFN parameter. Empty = install
+# the latest published chart (resolved after `helm repo update` below).
+V1FS_CHART_VERSION="${V1FS_CHART_VERSION:-}"
 
 export DEBIAN_FRONTEND=noninteractive
 export HOME=/root
@@ -233,6 +235,18 @@ EOFSC
 # ---- Install Vision One File Security via Helm (GPG-verified) ----
 helm repo add visionone-filesecurity https://trendmicro.github.io/visionone-file-security-helm/
 helm repo update
+if [ -z "$V1FS_CHART_VERSION" ]; then
+  # Resolve "latest" to a concrete version once, so the signature check and
+  # every release (my-release, rv) install the exact same chart.
+  V1FS_CHART_VERSION=$(helm search repo visionone-filesecurity/visionone-filesecurity -o json | jq -r '.[0].version')
+  if [ -z "$V1FS_CHART_VERSION" ] || [ "$V1FS_CHART_VERSION" = "null" ]; then
+    echo "ERROR: could not resolve the latest V1FS chart version" >&2
+    exit 1
+  fi
+  echo "V1FSChartVersion empty -> installing latest chart $V1FS_CHART_VERSION"
+else
+  echo "Installing pinned V1FS chart $V1FS_CHART_VERSION"
+fi
 curl -o /tmp/public-key.asc https://trendmicro.github.io/visionone-file-security-helm/public-key.asc
 gpg --import /tmp/public-key.asc
 gpg --export > /root/.gnupg/pubring.gpg
@@ -311,6 +325,7 @@ fi
 # Chart 1.4.10 workaround: the management-service init job's K8s->DB data
 # migration requires the ontap-agent-config ConfigMap and crash-loops on a
 # fresh install without it (we don't use ONTAP agents). Pre-create it empty.
+# Harmless on charts that no longer need it, so it runs for every version.
 kubectl create configmap ontap-agent-config -n visionone-filesecurity 2>/dev/null || true
 
 # Chart HPA args follow the scanner autoscaler resolved at the top:
@@ -365,7 +380,7 @@ if [ "$DEPLOY_REVIEW" = "true" ]; then
     -n visionone-review 2>/dev/null || true
   kubectl create secret generic device-token-secret \
     -n visionone-review 2>/dev/null || true
-  # Same chart 1.4.10 workaround as the main release (see above)
+  # Same ontap-agent-config workaround as the main release (see above)
   kubectl create configmap ontap-agent-config -n visionone-review 2>/dev/null || true
 
   echo "Installing rv V1FS scanner (unlimited decompression)..."
