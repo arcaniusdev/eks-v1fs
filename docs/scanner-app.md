@@ -75,7 +75,7 @@ Key details:
 - `init()` is synchronous; `quit()` and `scan_buffer()` are async
 - `scan_buffer()` positional args: `(channel, bytes_buffer, uid, tags=None, pml=False, ...)`
 - SDK response keys: `scanResult`, `fileSHA256`, `fileSHA1`, `foundMalwares`, `foundErrors`, `scanId`, `scannerVersion`, `scanTimestamp`, `fileName`, `schemaVersion`
-- PML not currently supported on this account — use `pml=False`
+- PML is controlled by `PML_ENABLED` (from the `PMLEnabled` CFN param) and needs scanner chart 1.6.x+ plus account support
 
 ## Event Parsing (Two Message Shapes)
 

@@ -9,7 +9,8 @@ pod inside the pool (net #2). No load balancer in the scan path.
 
 Config via env: SCAN_QUEUE_URL, SCANNER_TARGET_GROUP_ARN, V1FS_API_KEY,
 PER_POD_CAPACITY (default 30), WORKERS (default = total scanner capacity),
-SCANNER_TLS (default false), SCANNER_CA_CERT (path, optional), AWS_REGION.
+SCANNER_TLS (default false), SCANNER_CA_CERT (path, optional), AWS_REGION,
+PML_ENABLED (default false; Predictive Machine Learning, needs scanner chart 1.6.x+).
 """
 import json
 import os
@@ -65,10 +66,11 @@ def main():
     per_pod = int(os.environ.get("PER_POD_CAPACITY", "30"))
     tls = os.environ.get("SCANNER_TLS", "false").lower() == "true"
     ca = os.environ.get("SCANNER_CA_CERT") or None
+    pml = os.environ.get("PML_ENABLED", "false").lower() == "true"
 
     sqs = boto3.client("sqs", region_name=REGION)
     s3 = boto3.client("s3", region_name=REGION)
-    pool = ScannerPool(tg_arn, api_key, per_pod, tls, ca, REGION)
+    pool = ScannerPool(tg_arn, api_key, per_pod, tls, ca, REGION, pml=pml)
 
     # Size the worker pool near total scanner capacity: saturate the fleet
     # without overcommitting (the per-pod semaphores enforce the ceiling).

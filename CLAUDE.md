@@ -111,7 +111,7 @@ Expect 1–3 minutes for HPA + Cluster Autoscaler scale-up under load — normal
 - **Pod Identity, not IRSA** — no `eks.amazonaws.com/role-arn` annotations anywhere
 - **KEDA auth**: `provider: aws`, `identityOwner: keda` (not `aws-eks`, not `operator`)
 - **V1FS SDK**: `init()` is sync (don't await), `scan_buffer()` and `quit()` are async
-- **PML**: disabled (`pml=False`) unless account supports it
+- **PML**: `PMLEnabled` CFN param → `PML_ENABLED` → SDK `pml` flag on every scan (both scanner-app flavors and all reference clients). Containerized PML needs scanner chart 1.6.x+ (no-op on 1.4.10) AND account support; default off
 - **Never use SSH to connect to the bastion** — always use AWS Systems Manager Session Manager (`aws ssm start-session`). SSH keys are stored in SSM Parameter Store for emergency use only
 
 ### Deployment & Stack Management

@@ -595,7 +595,7 @@ Options are built once and reused across calls:
 
 ```java
 AMaasScanOptions options = AMaasScanOptions.builder()
-    .pml(false)                    // predictive machine learning (needs account support)
+    .pml(false)                    // true = predictive machine learning (needs chart 1.6.x+ and account support)
     .activeContent(true)           // also flag PDF scripts and Office macros
     .verbose(false)                // true = much bigger, engine-level response
     .tagList(new String[]{"my-app"})  // up to 8 tags, visible in the console

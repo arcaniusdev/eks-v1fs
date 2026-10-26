@@ -37,12 +37,14 @@ class NoCapacity(Exception):
 
 class ScannerPool:
     def __init__(self, target_group_arn, api_key, per_pod_capacity=30,
-                 tls=False, ca_cert=None, region="us-east-1", refresh_secs=20):
+                 tls=False, ca_cert=None, region="us-east-1", refresh_secs=20,
+                 pml=False):
         self._tg = target_group_arn
         self._api_key = api_key
         self._cap = per_pod_capacity
         self._tls = tls
         self._ca = ca_cert
+        self._pml = pml                     # Predictive Machine Learning (chart 1.6.x+)
         self._elb = boto3.client("elbv2", region_name=region)
         self._pods = {}                     # addr -> _PodClient
         self._lock = threading.Lock()
@@ -97,8 +99,7 @@ class ScannerPool:
             if pc is None:
                 raise NoCapacity(f"no scanner capacity within {wait_secs}s")
             try:
-                # scan_buffer signature varies by SDK version — adjust as needed.
-                return amaas.grpc.scan_buffer(pc.handle, data, uid, tags=[])
+                return amaas.grpc.scan_buffer(pc.handle, data, uid, pml=self._pml, tags=[])
             except Exception as e:                      # pod-level failure → try another
                 last = e
                 if pc.draining:

@@ -297,7 +297,13 @@ Parameters:
     Default: "scanner.v1fs.internal"
   PMLEnabled:
     Type: String
-    Description: Enable Predictive Machine Learning (PML) for file scanning. Requires PML support on the Vision One account.
+    Description: >
+      Enable Predictive Machine Learning (PML) for file scanning. Requires a
+      scanner chart that supports PML in the containerized scanner (1.6.x and
+      later; on older charts such as 1.4.10 the flag is accepted but has no
+      effect) and PML support on the Vision One account. Applies to the
+      deployed scanner-app (and review scanner-app); BYO clients must send the
+      SDK pml flag themselves.
     Default: "false"
     AllowedValues:
       - "true"

@@ -40,7 +40,7 @@
 - **Do not install both V1FS Helm releases in the same namespace.** Each release creates a ServiceAccount named `visionone-filesecurity`. `my-release` runs in `visionone-filesecurity`, `rv` in `visionone-review`. Sharing a namespace causes a ServiceAccount ownership conflict that breaks Helm operations.
 - **Do not add `--wait` to V1FS Helm install.** Scanner pods need time to register with TrendAI cloud on first startup.
 - **Do not `await` `amaas.grpc.aio.init()`.** It's synchronous despite being in the `aio` module. `quit()` and `scan_buffer()` ARE async.
-- **Do not enable PML unless the account supports it.** `pml=True` on unsupported accounts returns gRPC UNIMPLEMENTED.
+- **Do not enable PML unless the account supports it.** `pml=True` on unsupported accounts returns gRPC UNIMPLEMENTED. Containerized-scanner PML needs chart 1.6.x or later — on older charts (e.g. 1.4.10) the flag does nothing.
 - **V1FS scanner pods do not expose Prometheus metrics.** No `/metrics` HTTP endpoint on any port. The chart HPA uses Metrics Server (CPU/memory), which is why Metrics Server is a hard dependency.
 - **Do not apply CLISH scan policy to `rv`** — it must run with unlimited decompression to properly analyze files that exceeded the main scanner's limits. `upgrade.py` re-applies the captured policy to `my-release` only.
 

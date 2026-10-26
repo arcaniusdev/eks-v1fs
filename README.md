@@ -155,7 +155,7 @@ One application, shipped in **two feature-equivalent flavors** — Python asynci
 - **Scan audit trail** — every scan result is written to CloudWatch Logs as structured JSON (file key, size, verdict, malware names, SHA256, scan duration, pod name), batched for efficiency
 - **Queue-driven work distribution** — all scanner-app pods long-poll the same SQS queue, and SQS delivers each message to exactly one consumer. Pods that are free take more messages; busy pods slow their polling via backpressure (semaphore + 2x in-flight cap). How each pod then reaches the V1FS scanner pods depends on `ScannerDispatchMode`: in `clusterip` the Kubernetes Service distributes gRPC connections at connect time; in `pull` the app discovers scanner pod IPs from the NLB target group and dispatches each scan to the least-busy pod directly (no load balancer in the scan path)
 - **Graceful shutdown** — handles SIGTERM to drain in-flight scans and flush audit entries before exiting (5-minute grace period)
-- **Predictive Machine Learning** — PML can be enabled for advanced threat detection (requires account-level PML support)
+- **Predictive Machine Learning** — PML can be enabled for advanced threat detection (requires scanner chart 1.6.x or later — the default latest — and account-level PML support)
 
 Set `DeployScannerApp=false` if you already have a scanning application — the stack then deploys only the TrendAI V1FS scanner and publishes its endpoint. See [Connect Your Own Scanning Application](#connect-your-own-scanning-application).
 
@@ -396,7 +396,7 @@ Optional parameters:
 | **ExistingVpcCidr** | *(empty)* | CIDR block of the existing VPC (used for scanner endpoint security group rules) |
 | **ExistingPrivateSubnet1Id** / **ExistingPrivateSubnet2Id** | *(empty)* | Two private subnets in different AZs (EKS nodes, EFS mount targets) |
 | **ExistingBastionSubnetId** | *(empty)* | Subnet for the bastion host — private is fine (access is SSM-only; it needs only outbound internet) |
-| **PMLEnabled** | `false` | Enable Predictive Machine Learning scanning (requires account support) |
+| **PMLEnabled** | `false` | Enable Predictive Machine Learning scanning (requires chart 1.6.x+ and account support) |
 | **MaxFileSizeMB** | `500` | Maximum file size in MB the main scanner will download and scan (1–2048). Larger files are routed via server-side S3 copy — to the review bucket if the review pipeline is deployed, otherwise to quarantine with `ScanResult=S3-Oversize` |
 | **ScanTimeoutSeconds** | `600` | gRPC scan timeout; also sets the SQS visibility timeout to match |
 

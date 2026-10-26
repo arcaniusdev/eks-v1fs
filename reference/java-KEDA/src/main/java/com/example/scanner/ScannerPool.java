@@ -1,6 +1,7 @@
 package com.example.scanner;
 
 import com.trend.cloudone.amaas.AMaasClient;
+import com.trend.cloudone.amaas.AMaasScanOptions;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.DescribeTargetHealthRequest;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetHealthStateEnum;
@@ -49,6 +50,7 @@ public final class ScannerPool implements AutoCloseable {
     private final int perPodCapacity;
     private final boolean tls;
     private final String caCertPath;    // null for plaintext (in-VPC NLB default)
+    private final boolean pml;          // Predictive Machine Learning (chart 1.6.x+)
     private final Map<String, PodClient> pods = new ConcurrentHashMap<>();
     private final ScheduledExecutorService refresher =
             Executors.newSingleThreadScheduledExecutor(r -> {
@@ -58,13 +60,15 @@ public final class ScannerPool implements AutoCloseable {
             });
 
     public ScannerPool(ElasticLoadBalancingV2Client elb, String targetGroupArn,
-                       String apiKey, int perPodCapacity, boolean tls, String caCertPath) {
+                       String apiKey, int perPodCapacity, boolean tls, String caCertPath,
+                       boolean pml) {
         this.elb = elb;
         this.targetGroupArn = targetGroupArn;
         this.apiKey = apiKey;
         this.perPodCapacity = perPodCapacity;
         this.tls = tls;
         this.caCertPath = caCertPath;
+        this.pml = pml;
         reconcile();  // initial roster before we start serving
         refresher.scheduleWithFixedDelay(this::reconcileQuietly, 20, 20, TimeUnit.SECONDS);
     }
@@ -124,10 +128,10 @@ public final class ScannerPool implements AutoCloseable {
             PodClient pc = acquireLeastBusy(waitMillis);
             if (pc == null) throw new NoCapacityException("no scanner capacity within " + waitMillis + "ms");
             try {
-                // NOTE: the exact scanBuffer signature varies by SDK version
-                // (tags/PML flags or an AMaasScanOptions builder) — adjust to
-                // your file-security-java-sdk version's javadoc.
-                return pc.client.scanBuffer(data, uid, new String[]{}, false);
+                // scanBuffer(data, identifier, digest, options) — the
+                // AMaasScanOptions form of file-security-java-sdk 1.6.x.
+                AMaasScanOptions options = AMaasScanOptions.builder().pml(pml).build();
+                return pc.client.scanBuffer(data, uid, true, options);
             } catch (Exception e) {
                 last = e;                       // pod-level failure → try another pod
                 if (pc.draining) pods.remove(pc.addr);

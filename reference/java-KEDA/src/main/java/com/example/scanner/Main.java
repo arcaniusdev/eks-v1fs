@@ -33,7 +33,8 @@ import java.util.regex.Pattern;
  *
  * <p>Config via env: SCAN_QUEUE_URL, SCANNER_TARGET_GROUP_ARN, V1FS_API_KEY,
  * WORKERS (default = totalCapacity), PER_POD_CAPACITY (default 30),
- * SCANNER_TLS (default false), SCANNER_CA_CERT (path, optional).
+ * SCANNER_TLS (default false), SCANNER_CA_CERT (path, optional),
+ * PML_ENABLED (default false; Predictive Machine Learning, needs scanner chart 1.6.x+).
  */
 public final class Main {
 
@@ -48,12 +49,13 @@ public final class Main {
         int perPod = Integer.parseInt(System.getenv().getOrDefault("PER_POD_CAPACITY", "30"));
         boolean tls = Boolean.parseBoolean(System.getenv().getOrDefault("SCANNER_TLS", "false"));
         String caCert = System.getenv("SCANNER_CA_CERT");   // null → system/plaintext
+        boolean pml = Boolean.parseBoolean(System.getenv().getOrDefault("PML_ENABLED", "false"));
 
         SqsClient sqs = SqsClient.create();
         S3Client s3 = S3Client.create();
         ElasticLoadBalancingV2Client elb = ElasticLoadBalancingV2Client.create();
 
-        try (ScannerPool pool = new ScannerPool(elb, tgArn, apiKey, perPod, tls, caCert)) {
+        try (ScannerPool pool = new ScannerPool(elb, tgArn, apiKey, perPod, tls, caCert, pml)) {
             // Size the worker pool near total scanner capacity so the fleet can
             // be saturated but not overcommitted; the per-pod semaphores cap it.
             int workers = Integer.parseInt(System.getenv()

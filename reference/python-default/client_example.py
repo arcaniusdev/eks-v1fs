@@ -9,7 +9,8 @@ pull/semaphore dispatcher.)
 
 Config via env: SCANNER_ENDPOINT (e.g. "<nlb-host>:50051" from the stack's SSM
 parameter, or "<domain>:443" for ALB), V1FS_API_KEY, SCANNER_TLS (default
-false), SCANNER_CA_CERT (path; only for a self-signed ALB cert).
+false), SCANNER_CA_CERT (path; only for a self-signed ALB cert), PML_ENABLED
+(default false; Predictive Machine Learning, needs scanner chart 1.6.x+).
 """
 import os
 import sys
@@ -22,6 +23,7 @@ def main(paths):
     api_key = os.environ["V1FS_API_KEY"]
     tls = os.environ.get("SCANNER_TLS", "false").lower() == "true"
     ca = os.environ.get("SCANNER_CA_CERT") or None
+    pml = os.environ.get("PML_ENABLED", "false").lower() == "true"
 
     # init() ONCE, reuse the handle for every scan (the async/gRPC norm).
     handle = amaas.grpc.init(endpoint, api_key, tls, ca)
@@ -29,7 +31,7 @@ def main(paths):
         for p in paths:
             with open(p, "rb") as f:
                 data = f.read()
-            verdict = amaas.grpc.scan_buffer(handle, data, os.path.basename(p), tags=[])
+            verdict = amaas.grpc.scan_buffer(handle, data, os.path.basename(p), pml=pml, tags=[])
             print(verdict)
     finally:
         amaas.grpc.quit(handle)
