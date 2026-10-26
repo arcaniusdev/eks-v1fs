@@ -9,11 +9,31 @@ defaults to, so a template downloaded at tag `vX.Y.Z` deploys the matching
 scripts, app code, and Helm values.
 
 ## [Unreleased]
+
+## [2.5.0]
+### Added
+- **`V1FSChartVersion` parameter.** Empty (the new default) installs the latest
+  published TrendAI File Security chart at deploy time, resolved once so the main
+  and review releases match; a version such as `1.4.10` pins it. Validated on
+  1.4.10 and 1.6.3.
+- **PML on the containerized scanner.** Chart 1.6.x honors the SDK `pml` flag, so
+  `PMLEnabled=true` now takes effect (it was a no-op on 1.4.10). The three
+  reference clients read `PML_ENABLED` and pass it on every scan.
 ### Changed
+- **New deployments default to the latest chart** instead of the pinned 1.4.10.
+  Set `V1FSChartVersion` for reproducible environments.
+- **`noProxy` covers the Kubernetes API server.** Required by chart 1.6.x (the
+  scanner proxies HTTPS through backend-communicator). `bootstrap.sh` sets the chart
+  defaults + VPC CIDR + live API server IPs; `upgrade.py` merges the live API IPs
+  into each release, so existing 1.4.10 stacks upgrade to 1.6.x cleanly.
 - **S3 buckets deploy without versioning.** The ingest and quarantine buckets no
   longer set `VersioningConfiguration: Enabled` (the review bucket was already
   unversioned), so evaluation stacks tear down cleanly without version/delete-marker
   purges. Enable versioning yourself if you need object-recovery on these buckets.
+### Fixed
+- **`upgrade.py` failed in KEDA mode under Helm 4** (server-side apply conflict on the
+  scanner's `.spec.replicas`, owned by KEDA). It now renders the live replica count,
+  so upgrades apply cleanly without changing the scanner fleet size.
 
 ## [2.4.0]
 ### Added

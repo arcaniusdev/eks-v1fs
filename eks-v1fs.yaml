@@ -10,7 +10,7 @@ Parameters:
       matches this template, so the deployed components always match the template
       you launched. Override with a branch name (e.g. main) only for development.
     Type: String
-    Default: v2.4.0
+    Default: v2.5.0
   V1FSChartVersion:
     Description: >
       TrendAI Vision One File Security Helm chart version to install (e.g. 1.4.10).
