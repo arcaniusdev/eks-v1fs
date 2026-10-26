@@ -2020,6 +2020,7 @@ Resources:
             export AWS_REGION="${AWS::Region}"
             export CLUSTER_NAME="EKSCluster-${AWS::StackName}"
             export VPC_ID="${VpcIdValue}"
+            export VPC_CIDR="${VpcCidrValue}"
             export EFS_ID="${EFSFileSystem}"
             export V1FS_REGISTRATION_SECRET="${RegistrationSecretValue}"
             export V1FS_API_KEY_SECRET_ARN="${V1FSApiKeySecret}"
@@ -2086,6 +2087,7 @@ Resources:
           - RegistrationSecretValue: !If [HaveRegToken, !Ref V1FSRegistrationSecret, ""]
             NodeArchValue: !FindInMap [NodeArchMap, !Ref NodeInstanceType, arch]
             VpcIdValue: !If [CreateNetwork, !Ref BaseVPC, !Ref ExistingVpcId]
+            VpcCidrValue: !If [CreateNetwork, 10.2.0.0/16, !Ref ExistingVpcCidr]
             EcrRepoUrlValue: !If [ScannerAppEnabled, !GetAtt ScannerAppECRRepo.RepositoryUri, ""]
             # Built-queue URL when the stack owns the queue; empty in external
             # mode (bootstrap derives SQS_QUEUE_URL from EXTERNAL_SCAN_QUEUE_ARN).

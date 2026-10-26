@@ -328,6 +328,24 @@ fi
 # Harmless on charts that no longer need it, so it runs for every version.
 kubectl create configmap ontap-agent-config -n visionone-filesecurity 2>/dev/null || true
 
+# NO_PROXY must cover the Kubernetes API server. The scanner sends HTTPS through
+# the chart's backend-communicator proxy, and the API server (EKS control-plane
+# ENIs in the VPC) is not a cluster.local name, so without this the scanner
+# can't read its Secrets. Chart 1.6.x enforces it at install time. Include the
+# VPC CIDR (covers control-plane ENIs if EKS replaces them) plus the live API
+# server IPs as literals (the chart's check only understands /8,/16,/24,/32
+# CIDRs, so an existing VPC with another mask still passes). Written to a
+# values file because helm --set would split the commas.
+API_SERVER_IPS=$(kubectl get endpointslice kubernetes -n default \
+  -o jsonpath='{range .endpoints[*]}{.addresses[*]}{" "}{end}' | xargs -n1 | sort -u | paste -sd, -)
+NO_PROXY_LIST="localhost,127.0.0.1,.cluster.local,.svc.cluster.local,${VPC_CIDR}${API_SERVER_IPS:+,$API_SERVER_IPS}"
+NO_PROXY_VALUES=/tmp/values-noproxy.yaml
+cat > "$NO_PROXY_VALUES" <<EOFNP
+visiononeFilesecurity:
+  noProxy: "$NO_PROXY_LIST"
+EOFNP
+echo "V1FS noProxy: $NO_PROXY_LIST"
+
 # Chart HPA args follow the scanner autoscaler resolved at the top:
 #   keda -> disable the chart HPA (KEDA owns scanner scaling; the ScaledObject
 #           is applied by deploy.sh in full-auto or below for BYO+external).
@@ -347,6 +365,7 @@ helm install my-release visionone-filesecurity/visionone-filesecurity \
   -n visionone-filesecurity \
   --version "$V1FS_CHART_VERSION" \
   -f "$REPO_DIR/helm/values-base.yaml" \
+  -f "$NO_PROXY_VALUES" \
   $SCANNER_AUTOSCALE_ARGS \
   $ENDPOINT_ARGS
 
@@ -388,6 +407,7 @@ if [ "$DEPLOY_REVIEW" = "true" ]; then
     -n visionone-review \
     --version "$V1FS_CHART_VERSION" \
     -f "$REPO_DIR/helm/values-base.yaml" \
+    -f "$NO_PROXY_VALUES" \
     --set scanner.autoscaling.minReplicas=1 \
     --set scanner.autoscaling.maxReplicas=3
 

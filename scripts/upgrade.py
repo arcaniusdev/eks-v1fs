@@ -115,6 +115,42 @@ def capture_release_values(release, namespace):
     return path
 
 
+DEFAULT_NO_PROXY = "localhost,127.0.0.1,.cluster.local,.svc.cluster.local"
+
+
+def noproxy_values_file(release, namespace):
+    """Write a values file whose noProxy covers the live Kubernetes API server.
+
+    Chart 1.6.x fails install/upgrade unless visiononeFilesecurity.noProxy
+    covers the API server IPs (the scanner proxies HTTPS through
+    backend-communicator). Releases installed on older charts never set it, so
+    merge the release's current noProxy (keeps the VPC CIDR bootstrap.sh adds)
+    with the chart defaults and the live API server IPs. JSON is valid YAML.
+    """
+    current = ""
+    r = run(f"helm get values {release} -n {namespace} -a -o json", check=False)
+    if r.returncode == 0 and r.stdout.strip():
+        try:
+            current = (json.loads(r.stdout).get("visiononeFilesecurity", {}) or {}).get("noProxy", "") or ""
+        except json.JSONDecodeError:
+            pass
+    r = run("kubectl get endpointslice kubernetes -n default -o json", check=False)
+    api_ips = []
+    if r.returncode == 0 and r.stdout.strip():
+        for ep in json.loads(r.stdout).get("endpoints", []) or []:
+            api_ips += ep.get("addresses", []) or []
+    entries = []
+    for e in (current + "," + DEFAULT_NO_PROXY + "," + ",".join(api_ips)).split(","):
+        e = e.strip()
+        if e and e not in entries:
+            entries.append(e)
+    path = f"/tmp/upgrade-noproxy-{release}.yaml"
+    with open(path, "w") as f:
+        json.dump({"visiononeFilesecurity": {"noProxy": ",".join(entries)}}, f)
+    print(f"  noProxy → {','.join(entries)}")
+    return path
+
+
 SCANNER_SCALEDOBJECT = "v1fs-scanner-sqs-scaler"
 
 
@@ -148,7 +184,7 @@ def chart_hpa_on_scanner(namespace):
     return None
 
 
-def build_upgrade_cmd(release, namespace, values_file, hpa_bounds, keda_scanner, version=None):
+def build_upgrade_cmd(release, namespace, values_file, noproxy_file, hpa_bounds, keda_scanner, version=None):
     """Build the helm upgrade command: base values + preserved install values.
 
     KEDA-scanner mode (this branch's default): the chart HPA stays disabled
@@ -158,7 +194,7 @@ def build_upgrade_cmd(release, namespace, values_file, hpa_bounds, keda_scanner,
     """
     cmd = (
         f"helm upgrade {release} visionone-filesecurity/visionone-filesecurity "
-        f"-n {namespace} -f {VALUES_BASE} -f {values_file}"
+        f"-n {namespace} -f {VALUES_BASE} -f {values_file} -f {noproxy_file}"
     )
     if version:
         cmd += f" --version {version}"
@@ -258,7 +294,8 @@ def main():
             else:
                 print("  WARNING: scanner has neither a KEDA ScaledObject nor a chart HPA — "
                       "it will not autoscale. Check the deployment mode.")
-        cmd = build_upgrade_cmd(release, ns, values_file, hpa_bounds, keda_scanner, args.version)
+        noproxy_file = noproxy_values_file(release, ns)
+        cmd = build_upgrade_cmd(release, ns, values_file, noproxy_file, hpa_bounds, keda_scanner, args.version)
         if args.dry_run:
             print(f"  DRY RUN: {cmd}")
         else:
