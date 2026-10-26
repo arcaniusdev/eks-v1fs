@@ -595,7 +595,7 @@ This rebuilds the flavor's Docker image, pushes it to ECR, and re-applies the k8
 
 ## Updating the V1FS Scanner
 
-The TrendAI Vision One File Security scanner is installed via its official Helm chart, at the latest published version by default. Set the `V1FSChartVersion` parameter (e.g. `1.4.10`, the last validated version) to pin new deployments to a specific build. All custom values live in **`helm/values-base.yaml`** — the single source of truth used by both the initial install (`scripts/bootstrap.sh`) and upgrades (`scripts/upgrade.py`). The deviations from chart defaults are deliberately minimal and all documented chart options, keeping the deployment within TrendAI's supported methodology:
+The TrendAI Vision One File Security scanner is installed via its official Helm chart, at the latest published version by default. Set the `V1FSChartVersion` parameter (e.g. `1.4.10`; validated versions are 1.4.10 and 1.6.3) to pin new deployments to a specific build. All custom values live in **`helm/values-base.yaml`** — the single source of truth used by both the initial install (`scripts/bootstrap.sh`) and upgrades (`scripts/upgrade.py`). The deviations from chart defaults are deliberately minimal and all documented chart options, keeping the deployment within TrendAI's supported methodology:
 
 | Chart default | Our value (`values-base.yaml`) | Why |
 |---|---|---|
