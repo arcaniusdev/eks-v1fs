@@ -184,7 +184,16 @@ def chart_hpa_on_scanner(namespace):
     return None
 
 
-def build_upgrade_cmd(release, namespace, values_file, noproxy_file, hpa_bounds, keda_scanner, version=None):
+def live_scanner_replicas(release, namespace):
+    """Current .spec.replicas of the release's scanner Deployment (None if unknown)."""
+    r = run(f"kubectl get deploy {release}-visionone-filesecurity-scanner -n {namespace} "
+            f"-o jsonpath='{{.spec.replicas}}'", check=False)
+    v = r.stdout.strip().strip("'") if r.returncode == 0 else ""
+    return int(v) if v.isdigit() else None
+
+
+def build_upgrade_cmd(release, namespace, values_file, noproxy_file, hpa_bounds, keda_scanner,
+                      version=None, live_replicas=None):
     """Build the helm upgrade command: base values + preserved install values.
 
     KEDA-scanner mode (this branch's default): the chart HPA stays disabled
@@ -202,6 +211,13 @@ def build_upgrade_cmd(release, namespace, values_file, noproxy_file, hpa_bounds,
         # Belt-and-suspenders: re-assert the chart HPA stays off so a chart
         # default flip can't resurrect it to fight KEDA.
         cmd += " --set scanner.autoscaling.enabled=false"
+        # With the chart HPA off the chart renders replicas: scanner.replicaCount
+        # (default 1). KEDA owns .spec.replicas via the scale subresource, so
+        # Helm 4's server-side apply conflicts on any other value, and forcing
+        # it would cut the fleet to 1 mid-scan. Render the live count instead:
+        # same value = no conflict, no scale change.
+        if live_replicas:
+            cmd += f" --set scanner.replicaCount={live_replicas}"
     elif hpa_bounds:
         min_r, max_r = hpa_bounds
         if min_r:
@@ -295,7 +311,9 @@ def main():
                 print("  WARNING: scanner has neither a KEDA ScaledObject nor a chart HPA — "
                       "it will not autoscale. Check the deployment mode.")
         noproxy_file = noproxy_values_file(release, ns)
-        cmd = build_upgrade_cmd(release, ns, values_file, noproxy_file, hpa_bounds, keda_scanner, args.version)
+        live = live_scanner_replicas(release, ns) if keda_scanner else None
+        cmd = build_upgrade_cmd(release, ns, values_file, noproxy_file, hpa_bounds, keda_scanner,
+                                args.version, live)
         if args.dry_run:
             print(f"  DRY RUN: {cmd}")
         else:
